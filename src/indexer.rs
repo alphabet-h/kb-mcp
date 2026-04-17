@@ -43,6 +43,13 @@ pub fn rebuild_index(
         .canonicalize()
         .with_context(|| format!("failed to canonicalize kb_path: {}", kb_path.display()))?;
 
+    // pre-feature-9 DB を引き継いだケースで FTS が空のままにならないよう、
+    // まず既存 chunks のうち FTS 未登録のものを backfill する。
+    let backfilled = db.backfill_fts()?;
+    if backfilled > 0 {
+        eprintln!("Backfilled {backfilled} chunks into FTS index");
+    }
+
     // 1. Collect all .md files, skipping .obsidian/
     let md_files = collect_md_files(&kb_path)?;
     eprintln!("Found {} markdown files", md_files.len());

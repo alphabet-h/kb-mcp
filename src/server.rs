@@ -124,7 +124,7 @@ struct ErrorResponse {
 impl KbServer {
     #[tool(
         name = "search",
-        description = "Semantic search over the knowledge base. Returns chunks ranked by relevance."
+        description = "Hybrid search (vector + FTS5 full-text, merged via Reciprocal Rank Fusion) over the knowledge base. The `score` field is the RRF score (higher = better)."
     )]
     async fn search(
         &self,
@@ -148,7 +148,8 @@ impl KbServer {
 
         // Search the DB
         let db = self.db.lock().unwrap();
-        match db.search_similar(
+        match db.search_hybrid(
+            &params.query,
             &query_embedding,
             limit,
             params.category.as_deref(),

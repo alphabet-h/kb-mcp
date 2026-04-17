@@ -30,3 +30,18 @@
     2.3 GB の無駄 DL を回避
   - テスト 28 件パス (3 ignored)、実 DB でミスマッチエラー + 既存モデル継続動作確認
 - 次タスク候補: feature 9 (FTS5 ハイブリッド検索 RRF)
+- feature 9 実装完了 (status: passing)
+  - FTS5 contentless + contentless_delete=1 + trigram tokenizer
+  - 実装中の発見: contentless モードでは通常 DELETE が不可 → contentless_delete=1
+    (SQLite 3.43+) に切り替えて解決
+  - RRF (k=60)、各側 top-N = max(limit*5, 50)。Rust 側で HashMap マージ
+  - サニタイズ: 3 文字未満は vec-only、ダブルクォート 2 連化でフレーズ化
+  - backfill_fts(): 非破壊的 FTS 埋戻し。rebuild_index 冒頭で自動実行
+  - 実 DB (ai_organization/.kb-mcp.db) で 3610 chunks を 4.6s で backfill
+    完了、2 回目は 0 件で冪等確認
+  - server.rs::search を search_hybrid に差替 (score の意味が distance → RRF)
+  - 新規テスト 9 件 (fts_created / insert / delete / upsert / reset / sanitize /
+    hybrid_exact / hybrid_fallback / hybrid_ja_trigram / backfill) + 既存 24 件
+    = 合計 37 パス (3 ignored)
+  - README / CLAUDE.md 更新 (hybrid 動作・RRF score 意味・trigram 下限告知)
+- 次タスク候補: feature 10 (Reranking BGE-reranker) または feature 11 以降

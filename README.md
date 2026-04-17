@@ -69,7 +69,7 @@ The server will be started automatically when the client connects.
 
 | Tool | Description | Key parameters |
 |---|---|---|
-| `search` | Semantic search over the knowledge base. Returns chunks ranked by relevance. | `query` (required), `limit`, `category`, `topic` |
+| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion. Returns chunks ranked by relevance. | `query` (required), `limit`, `category`, `topic` |
 | `list_topics` | List all indexed topics and categories with document counts. | (none) |
 | `get_document` | Get the full content and metadata of a document by its relative path. | `path` (e.g. `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | Get a PERFECT.md best-practices document, optionally extracting a specific h2 section. | `target` (e.g. `"claude-code"`), `category` (optional) |
@@ -84,3 +84,4 @@ The server will be started automatically when the client connects.
 - **Index storage**: The SQLite database is stored as `.kb-mcp.db` in the **parent** directory of the `--kb-path` (i.e. the repository root when `--kb-path` points to `knowledge-base/`).
 - **Embedding dimensions**: Depends on `--model`. BGE-small-en-v1.5 = 384, BGE-M3 = 1024. The chosen dim is declared on the `vec_chunks` virtual table and recorded in the `index_meta` table; a mismatch at runtime is detected and rejected.
 - **Incremental indexing**: Files are tracked by SHA-256 content hash. Only changed files are re-embedded on subsequent `index` runs (unless `--force` is passed).
+- **Hybrid search (FTS5 + vector)**: The `search` tool combines SQLite FTS5 full-text search (trigram tokenizer, works for Japanese/CJK too) with the vector search via Reciprocal Rank Fusion (k=60). The returned `score` is the RRF score (higher = better), not a distance. Queries shorter than 3 characters fall back to vector-only (below the trigram minimum).

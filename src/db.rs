@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::sync::Once;
+
+/// RRF の定数項。原論文および多くの実装で慣例 60。
+const RRF_K: f32 = 60.0;
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -26,6 +30,21 @@ pub struct TopicInfo {
     pub file_count: u32,
     pub last_updated: Option<String>,
     pub titles: Vec<String>,
+}
+
+/// FTS5 クエリ用にユーザ入力をサニタイズする。
+///
+/// - trim 後に空、または 3 文字未満 (trigram の下限未満) なら `None` を返し
+///   呼び出し側で vector-only にフォールバックさせる
+/// - ダブルクォートを 2 連化してフレーズ全体をクォートで囲み、`AND` / `OR` /
+///   `NOT` / `NEAR` / `*` / `:` 等の予約構文を中立化する
+fn sanitize_fts_query(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().count() < 3 {
+        return None;
+    }
+    let escaped = trimmed.replace('"', "\"\"");
+    Some(format!("\"{escaped}\""))
 }
 
 /// `CREATE VIRTUAL TABLE ... USING vec0(... embedding float[384] ...)` 形式の
@@ -131,6 +150,21 @@ impl Database {
             ",
         )?;
 
+        // FTS5 仮想テーブル: contentless + trigram tokenizer。
+        // - contentless (content=''): chunks 側で本文を保持するのでメタ同期で十分
+        // - contentless_delete=1: rowid 指定の DELETE を許可 (SQLite 3.43+)
+        // - trigram: 日本語を含む任意言語で 3-gram ヒットが効く (SQLite 3.34+)
+        // - rowid = chunks.id で統一 (INSERT 時に明示)
+        self.conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
+                heading,
+                content,
+                content='',
+                contentless_delete=1,
+                tokenize = \"trigram remove_diacritics 1 case_sensitive 0\"
+            );",
+        )?;
+
         // meta に dim が記録されていれば vec_chunks を復元
         if let Some((_, dim)) = self.read_embedding_meta()? {
             self.ensure_vec_chunks_table(dim)?;
@@ -208,9 +242,14 @@ impl Database {
             .optional()?;
 
         if let Some(doc_id) = existing_id {
-            // Delete old vector entries for chunks that belong to this document
+            // Delete old vector / FTS entries for chunks that belong to this document
             self.conn.execute(
                 "DELETE FROM vec_chunks WHERE chunk_id IN \
+                 (SELECT id FROM chunks WHERE document_id = ?1)",
+                params![doc_id],
+            )?;
+            self.conn.execute(
+                "DELETE FROM fts_chunks WHERE rowid IN \
                  (SELECT id FROM chunks WHERE document_id = ?1)",
                 params![doc_id],
             )?;
@@ -267,6 +306,12 @@ impl Database {
             params![chunk_id, embedding_json],
         )?;
 
+        // FTS5 contentless: rowid を chunks.id に合わせる必要あり
+        self.conn.execute(
+            "INSERT INTO fts_chunks (rowid, heading, content) VALUES (?1, ?2, ?3)",
+            params![chunk_id, heading, content],
+        )?;
+
         Ok(chunk_id)
     }
 
@@ -285,11 +330,17 @@ impl Database {
         Ok(result)
     }
 
-    /// Delete a document and all associated chunks / vectors.
+    /// Delete a document and all associated chunks / vectors / FTS rows.
     pub fn delete_document(&self, path: &str) -> Result<()> {
         // Delete vector entries first (no FK from virtual table)
         self.conn.execute(
             "DELETE FROM vec_chunks WHERE chunk_id IN \
+             (SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.path = ?1)",
+            params![path],
+        )?;
+        // FTS5 contentless: rowid ベースで削除
+        self.conn.execute(
+            "DELETE FROM fts_chunks WHERE rowid IN \
              (SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.path = ?1)",
             params![path],
         )?;
@@ -412,6 +463,197 @@ impl Database {
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into)
         }
+    }
+
+    /// FTS5 側の候補検索。`limit` 件を bm25 昇順 (小さい = 関連度高) で返す。
+    /// 返値は `(chunk_id, bm25_score, SearchResult の雛形)` のタプル列。
+    fn search_fts_candidates(
+        &self,
+        query_text: &str,
+        limit: u32,
+        category: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<Vec<(i64, SearchResult)>> {
+        let Some(fts_query) = sanitize_fts_query(query_text) else {
+            return Ok(Vec::new());
+        };
+
+        let sql = "
+            SELECT c.id, bm25(fts_chunks) AS score,
+                   c.content, c.heading,
+                   d.path, d.title, d.topic, d.date, d.category
+            FROM fts_chunks f
+            JOIN chunks c ON c.id = f.rowid
+            JOIN documents d ON d.id = c.document_id
+            WHERE fts_chunks MATCH ?1
+            ORDER BY bm25(fts_chunks)
+            LIMIT ?2
+        ";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![fts_query, limit], |row| {
+            let chunk_id: i64 = row.get(0)?;
+            let score: f32 = row.get(1)?;
+            Ok((
+                chunk_id,
+                score,
+                row.get::<_, String>(2)?,           // content
+                row.get::<_, Option<String>>(3)?,   // heading
+                row.get::<_, String>(4)?,           // path
+                row.get::<_, Option<String>>(5)?,   // title
+                row.get::<_, Option<String>>(6)?,   // topic
+                row.get::<_, Option<String>>(7)?,   // date
+                row.get::<_, Option<String>>(8)?,   // category
+            ))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let (chunk_id, score, content, heading, path, title, r_topic, date, r_category) =
+                row?;
+            if let Some(cat) = category
+                && r_category.as_deref() != Some(cat)
+            {
+                continue;
+            }
+            if let Some(t) = topic
+                && r_topic.as_deref() != Some(t)
+            {
+                continue;
+            }
+            results.push((
+                chunk_id,
+                SearchResult {
+                    score, // 一旦 bm25 を入れておく (呼び出し側で RRF に上書き)
+                    content,
+                    heading,
+                    path,
+                    title,
+                    topic: r_topic,
+                    date,
+                },
+            ));
+        }
+        Ok(results)
+    }
+
+    /// ベクトル検索 + FTS5 を Reciprocal Rank Fusion (RRF, k=60) で統合する
+    /// ハイブリッド検索。各側の順位だけを使うため、距離や bm25 の正規化は不要。
+    ///
+    /// FTS 側でヒットが 0 件 (trigram 下限以下のクエリや予約語のみ等) の場合は
+    /// vec-only の順位で結果を返す (スコアは RRF 公式で計算)。
+    pub fn search_hybrid(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: u32,
+        category: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<Vec<SearchResult>> {
+        let candidates = limit.saturating_mul(5).max(50);
+
+        // vec 側: 既存の search_similar は SearchResult を返すだけで chunk_id を
+        // 外に出さないので、RRF 用に chunk_id を拾う最小 SELECT を別途組む。
+        let vec_hits = self.search_vec_candidates(
+            query_embedding,
+            candidates,
+            category,
+            topic,
+        )?;
+        let fts_hits = self.search_fts_candidates(query_text, candidates, category, topic)?;
+
+        // RRF: chunk_id ごとに 1/(K + rank + 1) を加算
+        let mut scores: HashMap<i64, f32> = HashMap::new();
+        let mut rows: HashMap<i64, SearchResult> = HashMap::new();
+        for (rank, (chunk_id, row)) in vec_hits.into_iter().enumerate() {
+            *scores.entry(chunk_id).or_insert(0.0) += 1.0 / (RRF_K + (rank as f32) + 1.0);
+            rows.entry(chunk_id).or_insert(row);
+        }
+        for (rank, (chunk_id, row)) in fts_hits.into_iter().enumerate() {
+            *scores.entry(chunk_id).or_insert(0.0) += 1.0 / (RRF_K + (rank as f32) + 1.0);
+            rows.entry(chunk_id).or_insert(row);
+        }
+
+        let mut merged: Vec<(i64, f32)> = scores.into_iter().collect();
+        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        merged.truncate(limit as usize);
+
+        let results = merged
+            .into_iter()
+            .filter_map(|(id, rrf)| {
+                rows.remove(&id).map(|mut r| {
+                    r.score = rrf;
+                    r
+                })
+            })
+            .collect();
+        Ok(results)
+    }
+
+    /// RRF 用: ベクトル検索の候補を `(chunk_id, SearchResult)` で返す。
+    /// 既存の `search_similar` とロジックは同じだが chunk_id を外に出す。
+    fn search_vec_candidates(
+        &self,
+        query_embedding: &[f32],
+        limit: u32,
+        category: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<Vec<(i64, SearchResult)>> {
+        let embedding_json = serde_json::to_string(query_embedding)?;
+        let sql = "
+            SELECT v.chunk_id, v.distance,
+                   c.content, c.heading,
+                   d.path, d.title, d.topic, d.date, d.category
+            FROM vec_chunks v
+            JOIN chunks c ON c.id = v.chunk_id
+            JOIN documents d ON d.id = c.document_id
+            WHERE v.embedding MATCH ?1 AND k = ?2
+            ORDER BY v.distance
+        ";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![embedding_json, limit], |row| {
+            let chunk_id: i64 = row.get(0)?;
+            let distance: f32 = row.get(1)?;
+            Ok((
+                chunk_id,
+                distance,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (chunk_id, distance, content, heading, path, title, r_topic, date, r_category) =
+                row?;
+            if let Some(cat) = category
+                && r_category.as_deref() != Some(cat)
+            {
+                continue;
+            }
+            if let Some(t) = topic
+                && r_topic.as_deref() != Some(t)
+            {
+                continue;
+            }
+            out.push((
+                chunk_id,
+                SearchResult {
+                    score: distance,
+                    content,
+                    heading,
+                    path,
+                    title,
+                    topic: r_topic,
+                    date,
+                },
+            ));
+        }
+        Ok(out)
     }
 
     /// List all indexed topics grouped by (category, topic).
@@ -541,6 +783,33 @@ impl Database {
         }
     }
 
+    /// FTS に未登録の `chunks` を拾って `fts_chunks` に埋め直す。
+    /// 主に pre-feature-9 DB のマイグレーション経路で呼ばれる。
+    /// 埋め込み再計算は行わないので高速 (既存 content を INSERT するだけ)。
+    pub fn backfill_fts(&self) -> Result<u32> {
+        let sql = "
+            SELECT id, heading, content
+            FROM chunks
+            WHERE id NOT IN (SELECT rowid FROM fts_chunks)
+        ";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows: Vec<(i64, Option<String>, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut count = 0u32;
+        for (id, heading, content) in rows {
+            self.conn.execute(
+                "INSERT INTO fts_chunks (rowid, heading, content) VALUES (?1, ?2, ?3)",
+                params![id, heading, content],
+            )?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// `vec_chunks` を DROP して指定 `dim` で再生成する。
     /// 呼び出し側で `chunks` / `documents` の整合を別途管理すること
     /// (通常は [`Database::reset_for_model`] 経由で呼ぶ)。
@@ -561,7 +830,8 @@ impl Database {
     /// が直後にすべての文書を再インデックスすることを前提とする。
     pub fn reset_for_model(&self, model: &str, dim: u32) -> Result<()> {
         self.conn.execute_batch(
-            "DELETE FROM chunks; \
+            "DELETE FROM fts_chunks; \
+             DELETE FROM chunks; \
              DELETE FROM documents;",
         )?;
         self.recreate_vec_chunks(dim)?;
@@ -759,6 +1029,37 @@ mod tests {
     }
 
     #[test]
+    fn test_fts_table_created_on_init() {
+        let db = Database::open_in_memory().unwrap();
+        let name: String = db
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='fts_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "fts_chunks");
+    }
+
+    #[test]
+    fn test_sanitize_fts_query() {
+        assert_eq!(sanitize_fts_query("E0382"), Some("\"E0382\"".to_string()));
+        assert_eq!(
+            sanitize_fts_query("foo \"bar\" AND"),
+            Some("\"foo \"\"bar\"\" AND\"".to_string())
+        );
+        assert_eq!(sanitize_fts_query(""), None);
+        assert_eq!(sanitize_fts_query("   "), None);
+        assert_eq!(sanitize_fts_query("ab"), None, "trigram 3 文字未満は None");
+        assert_eq!(
+            sanitize_fts_query("エラー"),
+            Some("\"エラー\"".to_string()),
+            "日本語 3 文字は通る"
+        );
+    }
+
+    #[test]
     fn test_parse_dim_from_create_sql() {
         let sql = "CREATE VIRTUAL TABLE vec_chunks USING vec0(\
                    chunk_id INTEGER PRIMARY KEY, embedding float[1024])";
@@ -799,6 +1100,156 @@ mod tests {
         db.ensure_vec_chunks_table(384).unwrap();
         let err = db.ensure_vec_chunks_table(1024).expect_err("must reject");
         assert!(err.to_string().contains("float[384]"));
+    }
+
+    /// Helper: FTS row count (contentless でも COUNT は通る)
+    fn fts_count(db: &Database) -> u32 {
+        db.conn
+            .query_row("SELECT COUNT(*) FROM fts_chunks", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_insert_chunk_populates_fts() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
+            .unwrap();
+        let chunk_id = db
+            .insert_chunk(doc_id, 0, Some("Intro"), "hello world", &dummy_embedding(0.1))
+            .unwrap();
+        assert_eq!(fts_count(&db), 1);
+
+        // rowid が chunks.id と一致
+        let fts_rowid: i64 = db
+            .conn
+            .query_row("SELECT rowid FROM fts_chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_rowid, chunk_id);
+    }
+
+    #[test]
+    fn test_delete_document_cascades_to_fts() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "hi", &dummy_embedding(0.1))
+            .unwrap();
+        assert_eq!(fts_count(&db), 1);
+
+        db.delete_document("a.md").unwrap();
+        assert_eq!(fts_count(&db), 0);
+    }
+
+    #[test]
+    fn test_upsert_document_purges_old_fts() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h1")
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "old content", &dummy_embedding(0.1))
+            .unwrap();
+        assert_eq!(fts_count(&db), 1);
+
+        // 同一 path を異なる content_hash で再 upsert → 旧 chunk/FTS は消える
+        db.upsert_document("a.md", Some("a"), None, None, None, &[], None, "h2")
+            .unwrap();
+        assert_eq!(fts_count(&db), 0);
+    }
+
+    #[test]
+    fn test_search_hybrid_fts_exact_match_ranks_higher() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("doc.md", Some("doc"), None, None, None, &[], None, "h")
+            .unwrap();
+        // chunk A: 完全一致語 E0382 を含む。埋め込みはクエリから等距離
+        let a_id = db
+            .insert_chunk(doc_id, 0, Some("Errors"), "E0382 is a move error", &dummy_embedding(0.5))
+            .unwrap();
+        // chunk B: 完全一致語を含まない。埋め込みはクエリから等距離
+        let b_id = db
+            .insert_chunk(doc_id, 1, Some("Other"), "unrelated content here", &dummy_embedding(0.5))
+            .unwrap();
+
+        let hits = db
+            .search_hybrid("E0382", &dummy_embedding(0.5), 5, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        // FTS でヒットするのは A だけ → A が上位
+        assert!(hits[0].content.contains("E0382"), "got: {:?}", hits[0].content);
+        let _ = (a_id, b_id);
+    }
+
+    #[test]
+    fn test_search_hybrid_falls_back_when_fts_query_empty() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "content", &dummy_embedding(0.1))
+            .unwrap();
+
+        // 2 文字クエリ → sanitize が None → vec-only
+        let hits = db
+            .search_hybrid("ab", &dummy_embedding(0.1), 5, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].score > 0.0, "RRF スコアは正の有限値");
+    }
+
+    #[test]
+    fn test_search_hybrid_japanese_trigram() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("ja.md", Some("ja"), None, None, None, &[], None, "h")
+            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("見出し"),
+            "E0382 は value moved エラーです",
+            &dummy_embedding(0.7),
+        )
+        .unwrap();
+        db.insert_chunk(doc_id, 1, None, "unrelated", &dummy_embedding(0.9))
+            .unwrap();
+
+        // 日本語 3 文字 "エラー" が trigram でヒットする
+        let hits = db
+            .search_hybrid("エラー", &dummy_embedding(0.7), 5, None, None)
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().any(|h| h.content.contains("エラー")),
+            "Japanese trigram should hit"
+        );
+    }
+
+    #[test]
+    fn test_backfill_fts_hydrates_preexisting_db() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
+            .unwrap();
+        db.insert_chunk(doc_id, 0, Some("H1"), "hello world", &dummy_embedding(0.1))
+            .unwrap();
+        db.insert_chunk(doc_id, 1, Some("H2"), "second chunk", &dummy_embedding(0.2))
+            .unwrap();
+        assert_eq!(fts_count(&db), 2);
+
+        // pre-feature-9 DB を模擬: FTS だけ空にする
+        db.conn.execute("DELETE FROM fts_chunks", []).unwrap();
+        assert_eq!(fts_count(&db), 0);
+
+        let n = db.backfill_fts().unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(fts_count(&db), 2);
+
+        // 冪等: 2 回目は 0 件
+        let n2 = db.backfill_fts().unwrap();
+        assert_eq!(n2, 0);
     }
 
     #[test]

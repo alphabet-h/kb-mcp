@@ -62,7 +62,7 @@
       "id": 9,
       "category": "upgrade-search",
       "description": "FTS5 全文検索 + ベクトル検索の Reciprocal Rank Fusion ハイブリッド",
-      "status": "failing",
+      "status": "passing",
       "verification": "エラーコード等の完全一致クエリで FTS5 ヒットが vector-only より上位に来る回帰テスト"
     },
     {
