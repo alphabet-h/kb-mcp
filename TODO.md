@@ -75,6 +75,15 @@
 ai_organization 側に網羅的な比較ノート `knowledge-base/deep-dive/mcp-rag-servers/overview.md` を整理済み（同プロジェクトを運用する環境ならローカル参照可）。
 以下は **kb-mcp に借用 or 参考にすべき設計要素** を既存実装別に抽出したもの。単体で読めるよう出典と概略を全てインラインで記載する。
 
+### 借用判断の基本原則
+
+kb-mcp は「**ドキュメントがあるディレクトリに 1 バイナリを置くだけで簡易 RAG 化**」できる点が本質的な価値提案。同調査で比較した多くの実装は Python/Docker/Node 前提の機能豊富フレームワークで、そもそも階層が違う。したがって借用判断は以下の基準で行う:
+
+- ✅ **採用可**: SQLite 標準機能 / fastembed-rs 既存 API / Rust クレートで完結する → 単体バイナリの性質を維持できる
+- ❌ **不採用**: 外部 LLM 呼び出し（agentic rerank 等）/ クラウドサービス依存 → ランタイム依存を増やし、階層 B / A へ転落する
+
+機能の有無ではなく「**単体バイナリ・ランタイム不要の value prop を壊さないか**」が採否の一次基準である。
+
 ### 既出項目に対する参照先（上記セクションの具体化）
 
 - **ハイブリッド検索（FTS5 + ベクトル）**: [markdown-vault-mcp](https://github.com/pvliesdonk/markdown-vault-mcp) が SQLite FTS5 + BM25 + porter stemming をベースに Reciprocal Rank Fusion で融合する実装を公開。[basic-memory v0.19.0](https://github.com/basicmachines-co/basic-memory) も同方針で追加。Python 実装だが SQLite スキーマ設計は Rust に翻案しやすい
@@ -113,13 +122,17 @@ ai_organization 側に網羅的な比較ノート `knowledge-base/deep-dive/mcp-
 
 ### 優先度マトリクス
 
-| 項目 | 実装コスト | ユーザ体感向上 | 優先度 |
-|---|---|---|---|
-| FTS5 ハイブリッド検索 | 中 | 高 | **高** |
-| Reranking | 低 | 中〜高 | 高 |
-| 多言語 embedding (BGE-M3) | 中 | 高（日本語で顕著） | 高 |
-| 品質ベースチャンクフィルタ | 低 | 中 | 中 |
-| ライブ同期 | 中 | 中 | 中 |
-| Connection Graph | 低 | 中 | 中 |
-| スキーマ検証 | 高 | 低〜中 | 低 |
-| 書き込み系ツール | 中 | N/A | **不採用** |
+「単体バイナリ維持」列は**ランタイム依存を増やさず実装できるか**の判断。✅ = OK、❌ = value prop を壊す。
+
+| 項目 | 実装コスト | ユーザ体感向上 | 単体バイナリ維持 | 優先度 |
+|---|---|---|:-:|---|
+| FTS5 ハイブリッド検索 | 中 | 高 | ✅ | **高** |
+| Reranking (BGE-reranker) | 低 | 中〜高 | ✅ | 高 |
+| 多言語 embedding (BGE-M3) | 中 | 高（日本語で顕著） | ✅ | 高 |
+| 品質ベースチャンクフィルタ | 低 | 中 | ✅ | 中 |
+| ライブ同期 (`notify` crate) | 中 | 中 | ✅ | 中 |
+| Connection Graph | 低 | 中 | ✅ | 中 |
+| スキーマ検証 | 高 | 低〜中 | ✅ | 低 |
+| 書き込み系ツール | 中 | N/A | ✅ | **不採用**（設計ポリシー違反） |
+| Agentic rerank (LLM 呼び出し) | 低 | 中 | ❌ | **不採用**（ランタイム依存増） |
+| クラウド同期 | 高 | 中 | ❌ | **不採用**（階層が変わる） |
