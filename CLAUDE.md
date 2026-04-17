@@ -1,0 +1,114 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## プロジェクト概要
+
+Markdown ナレッジベースに対するセマンティック検索を提供する MCP (Model Context Protocol) サーバ。YAML frontmatter 付き `.md` ファイルを見出し単位でチャンク化し、BGE-small-en-v1.5 で embedding を生成、sqlite-vec のベクトル類似検索と組み合わせて stdio transport で Claude Code / Cursor に接続する。
+
+元は `ai_organization` リポジトリ内のサブディレクトリとして開発されていたが、独立プロジェクト化した。
+
+## ビルド・テスト
+
+```bash
+cargo build --release                    # release バイナリ: target/release/kb-mcp(.exe)
+cargo check                              # 型検査のみ（高速）
+cargo test                               # 軽量テスト（embedding DL 不要なもののみ）
+cargo test -- --ignored                  # 実モデル DL を伴う embedding テスト（~128 MB キャッシュ必要）
+```
+
+Windows では `kb-mcp.exe` になる。ONNX runtime (`ort-sys`) は静的リンクされるため、**追加の DLL は不要**。SQLite も `rusqlite` の `bundled` feature で同梱。
+
+## 実行
+
+```bash
+kb-mcp index --kb-path /path/to/knowledge-base           # 初回 index
+kb-mcp index --kb-path /path/to/knowledge-base --force   # 全件再生成
+kb-mcp status --kb-path /path/to/knowledge-base          # docs/chunks 数の確認
+kb-mcp serve --kb-path /path/to/knowledge-base           # MCP サーバ起動（stdio）
+```
+
+SQLite DB は `--kb-path` の **親ディレクトリ** に `.kb-mcp.db` として作られる（例: `--kb-path ./knowledge-base` ならプロジェクトルートに `.kb-mcp.db`）。
+
+## MCP クライアントとの接続
+
+呼び出し側プロジェクトのルートに `.mcp.json` を置く:
+
+```json
+{
+  "mcpServers": {
+    "ai-knowledge": {
+      "type": "stdio",
+      "command": "/path/to/kb-mcp.exe",
+      "args": ["serve", "--kb-path", "/path/to/knowledge-base"]
+    }
+  }
+}
+```
+
+公開ツール: `search`, `list_topics`, `get_document`, `get_best_practice`, `rebuild_index`。詳細は README.md 参照。
+
+## アーキテクチャ（ソース別の責務）
+
+| ファイル | 役割 |
+|---|---|
+| `src/main.rs` | clap CLI エントリ。`index` / `status` / `serve` サブコマンドの分岐 |
+| `src/server.rs` | rmcp `ServerHandler` 実装。5 つの MCP ツールをディスパッチ |
+| `src/indexer.rs` | walkdir で `.md` を走査 → markdown.rs でパース → embedder.rs で embedding → db.rs で格納。SHA-256 で差分検出 |
+| `src/markdown.rs` | pulldown-cmark で Markdown をパース、frontmatter 抽出、見出し単位でチャンク分割 |
+| `src/embedder.rs` | fastembed-rs の薄いラッパ。BGE-small-en-v1.5 (384 次元) でテキストを embedding 化 |
+| `src/db.rs` | rusqlite + sqlite-vec。`chunks` テーブル + `vec_chunks` 仮想テーブルの schema と CRUD |
+
+### データフロー
+
+```
+.md ファイル群
+     ↓ walkdir
+indexer.rs: 差分検出 (SHA-256 vs .kb-mcp.db の chunks.hash)
+     ↓ 変更ありのものだけ
+markdown.rs: frontmatter 抽出 + 見出しでチャンク化
+     ↓
+embedder.rs: fastembed で 384次元ベクトル生成
+     ↓
+db.rs: chunks (メタ) + vec_chunks (embedding) に UPSERT
+```
+
+検索時は逆向きに、query → embedder → vec_chunks MATCH → chunks JOIN で結果を返す。
+
+## Embedding モデルのキャッシュ
+
+`embedder.rs::resolve_cache_dir()` が以下の順でキャッシュディレクトリを決める:
+
+1. `FASTEMBED_CACHE_DIR` 環境変数（最優先）
+2. OS 標準キャッシュディレクトリ + `fastembed`
+   - Linux: `~/.cache/fastembed`
+   - macOS: `~/Library/Caches/fastembed`
+   - Windows: `%LOCALAPPDATA%\fastembed`
+3. `.fastembed_cache/`（CWD 直下、最終フォールバック）
+
+初回実行時に ~128 MB の HuggingFace hub cache が作られる（model.onnx 127 MB + tokenizer.json 711 KB 等）。2 回目以降は再 DL されない。
+
+## 主要な依存
+
+- `rmcp` 1.x — MCP サーバフレームワーク (stdio transport)
+- `fastembed` 5.x — ONNX ベースの embedding (BGE-small-en-v1.5)
+- `rusqlite` 0.39 (bundled) — SQLite 静的リンク
+- `sqlite-vec` 0.1 — ベクトル類似検索拡張
+- `pulldown-cmark` 0.13 — Markdown パーサ
+- `dirs` 6 — OS 標準キャッシュディレクトリ解決
+
+## 改善候補
+
+次期バージョンアップで検討中のアイテムは [TODO.md](./TODO.md) を参照。主なもの:
+
+- 多言語 embedding モデル (BGE-M3) 対応
+- ハイブリッド検索 (vec + FTS5)
+- Reranking
+- HTTP/SSE トランスポート
+- CRLF 正規化の強化 / `transmute` の型安全化
+
+## 運用の細則
+
+- **Cargo.lock はコミットする**（バイナリクレート）
+- **`.kb-mcp.db` はクライアントプロジェクト側の責務**。本リポジトリでは生成しない
+- **テストは 2 層構造**: 通常 `cargo test` では `#[ignore]` の embedding 実行テストはスキップされる。CI 等で検証したければ `-- --ignored` を付ける

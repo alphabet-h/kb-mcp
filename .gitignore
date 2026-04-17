@@ -1,0 +1,4 @@
+/target/
+
+# fastembed-rs が cache_dir 未解決時に使うローカルフォールバック
+.fastembed_cache/
