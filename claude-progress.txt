@@ -8,11 +8,25 @@
 - 本セッション内で下記 fix を先行実施:
   - fix(db): sqlite-vec knn クエリに `k = ?` 制約を追加 (1e613fd)
   - chore(gitignore): Claude Code ローカル設定を無視 (d39dfa5)
-- feature 8 実装完了 (status: passing)
+- feature 8 実装完了 (status: passing, commit ccc9c8d)
   - Plan エージェントで仕様化 → 5 ステップで実装
   - 追加: Embedder::model_id, Database::{read,write,verify}_embedding_meta
   - init() で index_meta を vec_chunks より先に CREATE (feature 7 下地)
   - verify 呼び出し: main.rs::Commands::Index と server.rs::run_server
   - 新規テスト 5 件 + 既存 6 件 すべてパス (合計 11 / 22 全体)
   - 実 DB (ai_organization/.kb-mcp.db) で migration → idempotent 動作確認
-- 次タスク候補: feature 7 (BGE-M3 1024 次元 switchable) の仕様化
+- feature 7 実装完了 (status: passing)
+  - モデル調査: fastembed-rs 対応の多言語モデルを網羅比較
+  - 選定: BGE-M3 (1024 dim, MIT, プレフィックス不要)。次点 mE5-large
+  - 不採用: Ruri-large / jina-v3 は fastembed-rs enum 未登録のため
+  - 6 ステップ実装:
+    1. ModelChoice enum (clap::ValueEnum derive)
+    2. Embedder::with_model (new() は委譲で後方互換)
+    3. vec_chunks 遅延作成 + ensure/current_vec_dim + parse_dim_from_create_sql
+    4. recreate_vec_chunks / reset_for_model (--force 用の破壊的再初期化)
+    5. CLI --model flag (Serve/Index に配線、run_server シグネチャ変更)
+    6. README.md / CLAUDE.md に --model 使用例追記、BGE-M3 ignored テスト
+  - UX 改善: verify_embedding_meta をモデル DL の前に配置し、不整合時に
+    2.3 GB の無駄 DL を回避
+  - テスト 28 件パス (3 ignored)、実 DB でミスマッチエラー + 既存モデル継続動作確認
+- 次タスク候補: feature 9 (FTS5 ハイブリッド検索 RRF)

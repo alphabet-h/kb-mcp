@@ -2,16 +2,69 @@ use anyhow::Result;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::path::PathBuf;
 
+/// Embedding モデル選択肢。CLI の `--model` と共有される。
+///
+/// 追加時の手順: variant を足し、`model_id` / `dimension` /
+/// `fastembed_model` / `approx_download_mb` の 4 メソッドに分岐を追加する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ModelChoice {
+    /// BAAI/bge-small-en-v1.5 (384 dim, 英語特化, ~130 MB)
+    #[value(name = "bge-small-en-v1.5")]
+    BgeSmallEnV15,
+    /// BAAI/bge-m3 (1024 dim, 多言語, ~2.3 GB)
+    #[value(name = "bge-m3")]
+    BgeM3,
+}
+
+impl ModelChoice {
+    pub fn model_id(self) -> &'static str {
+        match self {
+            Self::BgeSmallEnV15 => "bge-small-en-v1.5",
+            Self::BgeM3 => "bge-m3",
+        }
+    }
+
+    pub fn dimension(self) -> usize {
+        match self {
+            Self::BgeSmallEnV15 => 384,
+            Self::BgeM3 => 1024,
+        }
+    }
+
+    fn fastembed_model(self) -> EmbeddingModel {
+        match self {
+            Self::BgeSmallEnV15 => EmbeddingModel::BGESmallENV15,
+            Self::BgeM3 => EmbeddingModel::BGEM3,
+        }
+    }
+
+    /// 初回 DL サイズの目安 (ユーザ告知用)
+    fn approx_download_mb(self) -> u32 {
+        match self {
+            Self::BgeSmallEnV15 => 130,
+            Self::BgeM3 => 2300,
+        }
+    }
+}
+
+impl Default for ModelChoice {
+    // 既存 DB 互換のため据え置き。BGE-M3 へ切り替えたい場合は明示オプトイン。
+    fn default() -> Self {
+        Self::BgeSmallEnV15
+    }
+}
+
 /// Thin wrapper around fastembed for generating text embeddings.
 ///
-/// Uses BGE-small-en-v1.5 (384 dimensions). The ONNX model is downloaded
-/// on first use to the resolved cache directory (see [`resolve_cache_dir`]).
+/// モデルは [`ModelChoice`] で切替可能。ONNX モデルは初回実行時に
+/// [`resolve_cache_dir`] のキャッシュディレクトリへダウンロードされる。
 pub struct Embedder {
     model: TextEmbedding,
+    choice: ModelChoice,
 }
 
 impl Embedder {
-    /// Initialize with BGE-small-en-v1.5 (384 dimensions).
+    /// デフォルトモデル ([`ModelChoice::default`]) で初期化する。
     ///
     /// Cache directory resolution (in order):
     /// 1. `FASTEMBED_CACHE_DIR` environment variable if set
@@ -20,12 +73,23 @@ impl Embedder {
     ///     Windows: `%LOCALAPPDATA%\fastembed`)
     /// 3. `.fastembed_cache` relative to the working directory (fastembed's own default)
     pub fn new() -> Result<Self> {
+        Self::with_model(ModelChoice::default())
+    }
+
+    /// 明示的にモデルを指定して初期化する。
+    pub fn with_model(choice: ModelChoice) -> Result<Self> {
+        eprintln!(
+            "Loading embedding model: {} ({} dim, ~{} MB on first run)...",
+            choice.model_id(),
+            choice.dimension(),
+            choice.approx_download_mb()
+        );
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15)
+            InitOptions::new(choice.fastembed_model())
                 .with_cache_dir(resolve_cache_dir())
                 .with_show_download_progress(true),
         )?;
-        Ok(Self { model })
+        Ok(Self { model, choice })
     }
 
     /// Embed multiple texts in a batch.
@@ -42,15 +106,14 @@ impl Embedder {
             .ok_or_else(|| anyhow::anyhow!("embedding returned empty result"))
     }
 
-    /// Returns the embedding dimension (384 for BGE-small-en-v1.5).
+    /// 選択中のモデルの埋め込み次元数。
     pub fn dimension(&self) -> usize {
-        384
+        self.choice.dimension()
     }
 
-    /// Stable identifier for the current embedding model. Recorded in
-    /// `index_meta` so model/dim mismatches can be detected between runs.
+    /// 選択中のモデルの識別子 (index_meta に記録される)。
     pub fn model_id(&self) -> &'static str {
-        "bge-small-en-v1.5"
+        self.choice.model_id()
     }
 }
 
@@ -88,5 +151,25 @@ mod tests {
         assert_eq!(embeddings.len(), 2);
         assert_eq!(embeddings[0].len(), 384);
         assert_eq!(embeddings[1].len(), 384);
+    }
+
+    #[test]
+    fn test_model_choice_values() {
+        assert_eq!(ModelChoice::BgeSmallEnV15.model_id(), "bge-small-en-v1.5");
+        assert_eq!(ModelChoice::BgeSmallEnV15.dimension(), 384);
+        assert_eq!(ModelChoice::BgeM3.model_id(), "bge-m3");
+        assert_eq!(ModelChoice::BgeM3.dimension(), 1024);
+        assert_eq!(ModelChoice::default(), ModelChoice::BgeSmallEnV15);
+    }
+
+    #[test]
+    #[ignore] // requires BGE-M3 download (~2.3 GB)
+    fn test_bge_m3_produces_1024_dim() {
+        let mut embedder =
+            Embedder::with_model(ModelChoice::BgeM3).expect("failed to load BGE-M3");
+        let emb = embedder
+            .embed_single("こんにちは、世界")
+            .expect("failed to embed");
+        assert_eq!(emb.len(), 1024);
     }
 }

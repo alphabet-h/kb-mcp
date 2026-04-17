@@ -28,6 +28,15 @@ pub struct TopicInfo {
     pub titles: Vec<String>,
 }
 
+/// `CREATE VIRTUAL TABLE ... USING vec0(... embedding float[384] ...)` 形式の
+/// SQL から次元数を抽出する。失敗時は `None`。
+fn parse_dim_from_create_sql(sql: &str) -> Option<u32> {
+    let start = sql.find("float[")? + "float[".len();
+    let rest = &sql[start..];
+    let end = rest.find(']')?;
+    rest[..end].trim().parse().ok()
+}
+
 // ---------------------------------------------------------------------------
 // Extension loading (once per process)
 // ---------------------------------------------------------------------------
@@ -88,9 +97,10 @@ impl Database {
         self.conn.execute_batch("PRAGMA journal_mode = WAL;")?;
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
+        // vec_chunks は dim が未知の段階では作れないので遅延生成にする。
+        // meta に dim が記録されていれば init 時に作るが、無ければ
+        // `verify_embedding_meta` が実行時に決定した dim で作る。
         self.conn.execute_batch(
-            // `index_meta` が最初なのは、feature 7 で `vec_chunks` の次元を
-            // meta から読んで動的に決める拡張余地を残すため。
             "
             CREATE TABLE IF NOT EXISTS index_meta (
                 key   TEXT PRIMARY KEY,
@@ -118,13 +128,50 @@ impl Database {
                 content      TEXT NOT NULL,
                 token_count  INTEGER
             );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
-                chunk_id INTEGER PRIMARY KEY,
-                embedding float[384]
-            );
             ",
         )?;
+
+        // meta に dim が記録されていれば vec_chunks を復元
+        if let Some((_, dim)) = self.read_embedding_meta()? {
+            self.ensure_vec_chunks_table(dim)?;
+        }
+        Ok(())
+    }
+
+    /// 現存する `vec_chunks` の宣言済み次元を返す。テーブルが無い or
+    /// `CREATE` 文から次元を抜き出せない場合は `None`。
+    fn current_vec_dim(&self) -> Result<Option<u32>> {
+        use rusqlite::OptionalExtension;
+        let sql: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(sql.as_deref().and_then(parse_dim_from_create_sql))
+    }
+
+    /// 指定 `dim` の `vec_chunks` が存在することを保証する。
+    /// 既存テーブルが別次元なら error (再構築は `recreate_vec_chunks` 経由)。
+    fn ensure_vec_chunks_table(&self, dim: u32) -> Result<()> {
+        if let Some(existing) = self.current_vec_dim()? {
+            if existing == dim {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "vec_chunks declared float[{existing}] but runtime dim is {dim}. \
+                 Run index with --force to rebuild."
+            );
+        }
+        let sql = format!(
+            "CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                 chunk_id INTEGER PRIMARY KEY,
+                 embedding float[{dim}]
+             )"
+        );
+        self.conn.execute_batch(&sql)?;
         Ok(())
     }
 
@@ -477,17 +524,49 @@ impl Database {
                         "Migrating pre-meta index: recording ({model}, {dim}) into index_meta"
                     );
                 }
-                self.write_embedding_meta(model, dim)
+                self.write_embedding_meta(model, dim)?;
+                self.ensure_vec_chunks_table(dim)
             }
-            Some((db_model, db_dim)) if db_model == model && db_dim == dim => Ok(()),
+            Some((db_model, db_dim)) if db_model == model && db_dim == dim => {
+                // init 時に meta が無くて vec_chunks を作れなかったケースをここで補う。
+                self.ensure_vec_chunks_table(dim)
+            }
             Some((db_model, db_dim)) => anyhow::bail!(
                 "embedding model mismatch.\n  \
                  DB was indexed with: {db_model} ({db_dim} dim)\n  \
                  Current runtime:     {model} ({dim} dim)\n\n\
-                 Run `kb-mcp index --kb-path <path> --force` to rebuild the index, \
+                 Run `kb-mcp index --kb-path <path> --force --model {model}` to rebuild the index, \
                  or switch back to the previous model."
             ),
         }
+    }
+
+    /// `vec_chunks` を DROP して指定 `dim` で再生成する。
+    /// 呼び出し側で `chunks` / `documents` の整合を別途管理すること
+    /// (通常は [`Database::reset_for_model`] 経由で呼ぶ)。
+    fn recreate_vec_chunks(&self, dim: u32) -> Result<()> {
+        self.conn.execute_batch("DROP TABLE IF EXISTS vec_chunks;")?;
+        let sql = format!(
+            "CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                 chunk_id INTEGER PRIMARY KEY,
+                 embedding float[{dim}]
+             )"
+        );
+        self.conn.execute_batch(&sql)?;
+        Ok(())
+    }
+
+    /// `--force` 時の破壊的再初期化: `documents` / `chunks` / `vec_chunks`
+    /// を全消ししてから新しい `(model, dim)` を記録する。`indexer::rebuild_index`
+    /// が直後にすべての文書を再インデックスすることを前提とする。
+    pub fn reset_for_model(&self, model: &str, dim: u32) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM chunks; \
+             DELETE FROM documents;",
+        )?;
+        self.recreate_vec_chunks(dim)?;
+        self.write_embedding_meta(model, dim)?;
+        Ok(())
     }
 
     /// Return every indexed document path.
@@ -513,6 +592,16 @@ mod tests {
         vec![val; 384]
     }
 
+    /// Helper: create an in-memory DB and initialize its vec_chunks table
+    /// with the legacy 384-dim schema. Most tests below operate on this
+    /// setup to mirror a normal runtime where `verify_embedding_meta` has
+    /// already run.
+    fn db_with_384() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+        db
+    }
+
     #[test]
     fn test_schema_creation() {
         let db = Database::open_in_memory().expect("open_in_memory");
@@ -523,7 +612,7 @@ mod tests {
 
     #[test]
     fn test_upsert_and_query_document() {
-        let db = Database::open_in_memory().unwrap();
+        let db = db_with_384();
 
         // First insert
         let id1 = db
@@ -601,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_delete_document() {
-        let db = Database::open_in_memory().unwrap();
+        let db = db_with_384();
 
         let doc_id = db
             .upsert_document(
@@ -633,7 +722,7 @@ mod tests {
         // Regression: sqlite-vec requires `k = ?` (or literal LIMIT) on knn
         // queries. A bound `LIMIT ?` used to fail with "A LIMIT or 'k = ?'
         // constraint is required on vec0 knn queries".
-        let db = Database::open_in_memory().unwrap();
+        let db = db_with_384();
 
         let doc_id = db
             .upsert_document(
@@ -670,6 +759,79 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_dim_from_create_sql() {
+        let sql = "CREATE VIRTUAL TABLE vec_chunks USING vec0(\
+                   chunk_id INTEGER PRIMARY KEY, embedding float[1024])";
+        assert_eq!(parse_dim_from_create_sql(sql), Some(1024));
+
+        let sql2 = "CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id, embedding float[384] )";
+        assert_eq!(parse_dim_from_create_sql(sql2), Some(384));
+
+        assert_eq!(parse_dim_from_create_sql("no float here"), None);
+    }
+
+    #[test]
+    fn test_init_does_not_create_vec_chunks_without_meta() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(db.current_vec_dim().unwrap(), None);
+    }
+
+    #[test]
+    fn test_verify_creates_vec_chunks_with_declared_dim() {
+        let db = Database::open_in_memory().unwrap();
+        db.verify_embedding_meta("bge-m3", 1024).unwrap();
+        assert_eq!(db.current_vec_dim().unwrap(), Some(1024));
+
+        // 1024-dim embedding を insert できることを確認
+        let doc_id = db
+            .upsert_document(
+                "x.md", Some("x"), None, None, None, &[], None, "h",
+            )
+            .unwrap();
+        let emb: Vec<f32> = vec![0.1; 1024];
+        db.insert_chunk(doc_id, 0, None, "hi", &emb).unwrap();
+        assert_eq!(db.chunk_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_ensure_vec_chunks_rejects_mismatched_dim() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_vec_chunks_table(384).unwrap();
+        let err = db.ensure_vec_chunks_table(1024).expect_err("must reject");
+        assert!(err.to_string().contains("float[384]"));
+    }
+
+    #[test]
+    fn test_reset_for_model_switches_dim_and_wipes_data() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "hi", &dummy_embedding(0.1))
+            .unwrap();
+        assert_eq!(db.chunk_count().unwrap(), 1);
+        assert_eq!(db.document_count().unwrap(), 1);
+
+        db.reset_for_model("bge-m3", 1024).unwrap();
+
+        assert_eq!(db.chunk_count().unwrap(), 0);
+        assert_eq!(db.document_count().unwrap(), 0);
+        assert_eq!(db.current_vec_dim().unwrap(), Some(1024));
+        assert_eq!(
+            db.read_embedding_meta().unwrap(),
+            Some(("bge-m3".to_string(), 1024))
+        );
+
+        // 1024-dim insert が通る
+        let doc_id2 = db
+            .upsert_document("b.md", Some("b"), None, None, None, &[], None, "h")
+            .unwrap();
+        let emb: Vec<f32> = vec![0.2; 1024];
+        db.insert_chunk(doc_id2, 0, None, "hi2", &emb).unwrap();
+        assert_eq!(db.chunk_count().unwrap(), 1);
+    }
+
+    #[test]
     fn test_verify_embedding_meta_fresh_db() {
         let db = Database::open_in_memory().unwrap();
         assert!(db.read_embedding_meta().unwrap().is_none());
@@ -683,7 +845,10 @@ mod tests {
     #[test]
     fn test_verify_embedding_meta_migrates_preexisting_db() {
         // Simulate a pre-feature-8 DB: chunks exist but meta is empty.
+        // In pre-feature-8 code `init()` always created vec_chunks with the
+        // 384-dim literal. Reproduce that here by creating it manually.
         let db = Database::open_in_memory().unwrap();
+        db.ensure_vec_chunks_table(384).unwrap();
         let doc_id = db
             .upsert_document(
                 "deep-dive/mcp/overview.md",

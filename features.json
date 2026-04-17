@@ -47,9 +47,9 @@
     {
       "id": 7,
       "category": "upgrade-embedding",
-      "description": "多言語 embedding (BGE-M3 1024 次元) 対応。--model / --dim フラグで切替",
-      "status": "failing",
-      "verification": "kb-mcp index --model bge-m3 で再インデックスし、日本語クエリで関連チャンクが距離降順で返る"
+      "description": "多言語 embedding (BGE-M3 1024 次元) 対応。--model フラグで切替",
+      "status": "passing",
+      "verification": "kb-mcp index --model bge-m3 --force で再インデックスし、日本語クエリで関連チャンクが距離降順で返る"
     },
     {
       "id": 8,

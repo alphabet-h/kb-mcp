@@ -5,6 +5,7 @@ pub mod markdown;
 pub mod server;
 
 use clap::{Parser, Subcommand};
+use embedder::ModelChoice;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -22,15 +23,21 @@ enum Commands {
         /// Path to the knowledge-base directory
         #[arg(long)]
         kb_path: PathBuf,
+        /// Embedding model to use (must match the one that built the index)
+        #[arg(long, value_enum, default_value_t = ModelChoice::default())]
+        model: ModelChoice,
     },
     /// Build or rebuild the search index
     Index {
         /// Path to the knowledge-base directory
         #[arg(long)]
         kb_path: PathBuf,
-        /// Force full re-index (ignore existing state)
+        /// Force full re-index. Required when switching `--model`.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Embedding model to use
+        #[arg(long, value_enum, default_value_t = ModelChoice::default())]
+        model: ModelChoice,
     },
     /// Show index status and statistics
     Status {
@@ -55,18 +62,25 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { kb_path } => {
+        Commands::Serve { kb_path, model } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                server::run_server(&kb_path).await
+                server::run_server(&kb_path, model).await
             })?;
         }
-        Commands::Index { kb_path, force } => {
+        Commands::Index { kb_path, force, model } => {
             let db_path = resolve_db_path(&kb_path);
             let db = db::Database::open(&db_path.to_string_lossy())?;
-            eprintln!("Loading embedding model...");
-            let mut embedder = embedder::Embedder::new()?;
-            db.verify_embedding_meta(embedder.model_id(), embedder.dimension() as u32)?;
+            // モデル DL (BGE-M3 なら ~2.3 GB) の前に meta 整合性を先に確認する。
+            // そうしないと不整合時にユーザが不要な DL を待たされる。
+            let dim = model.dimension() as u32;
+            if !force {
+                db.verify_embedding_meta(model.model_id(), dim)?;
+            }
+            let mut embedder = embedder::Embedder::with_model(model)?;
+            if force {
+                db.reset_for_model(embedder.model_id(), dim)?;
+            }
             eprintln!("Indexing {}...", kb_path.display());
             let result = indexer::rebuild_index(&db, &mut embedder, &kb_path, force)?;
             eprintln!(

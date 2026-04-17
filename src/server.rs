@@ -9,7 +9,7 @@ use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
-use crate::embedder::Embedder;
+use crate::embedder::{Embedder, ModelChoice};
 use crate::{indexer, markdown};
 
 // ---------------------------------------------------------------------------
@@ -423,13 +423,13 @@ fn list_h2_sections(content: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Run the MCP server on stdio transport.
-pub async fn run_server(kb_path: &std::path::Path) -> Result<()> {
+pub async fn run_server(kb_path: &std::path::Path, model: ModelChoice) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
 
-    eprintln!("Loading embedding model...");
-    let embedder = Embedder::new()?;
-    db.verify_embedding_meta(embedder.model_id(), embedder.dimension() as u32)?;
+    // モデル DL の前に meta 整合性を確認。不整合ならここで止めて DL を回避。
+    db.verify_embedding_meta(model.model_id(), model.dimension() as u32)?;
+    let embedder = Embedder::with_model(model)?;
 
     let kb_path = kb_path.canonicalize().unwrap_or_else(|_| kb_path.to_path_buf());
 
