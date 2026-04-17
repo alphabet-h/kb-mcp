@@ -282,6 +282,8 @@ impl Database {
             // together with MATCH, so we do a two-step approach: fetch
             // candidates from vec_chunks (generous limit), then filter in Rust.
             let generous_limit = limit.saturating_mul(10).min(10_000); // over-fetch, capped at 10k
+            // sqlite-vec requires the KNN bound to be known at xBestIndex time;
+            // a bound `LIMIT ?` is not visible there, so we use `k = ?` instead.
             let sql = "
                 SELECT v.chunk_id, v.distance,
                        c.content, c.heading,
@@ -289,9 +291,8 @@ impl Database {
                 FROM vec_chunks v
                 JOIN chunks c ON c.id = v.chunk_id
                 JOIN documents d ON d.id = c.document_id
-                WHERE v.embedding MATCH ?1
+                WHERE v.embedding MATCH ?1 AND k = ?2
                 ORDER BY v.distance
-                LIMIT ?2
             ";
             let mut stmt = self.conn.prepare(sql)?;
             let rows = stmt.query_map(params![embedding_json, generous_limit], |row| {
@@ -343,9 +344,8 @@ impl Database {
                 FROM vec_chunks v
                 JOIN chunks c ON c.id = v.chunk_id
                 JOIN documents d ON d.id = c.document_id
-                WHERE v.embedding MATCH ?1
+                WHERE v.embedding MATCH ?1 AND k = ?2
                 ORDER BY v.distance
-                LIMIT ?2
             ";
             let mut stmt = self.conn.prepare(sql)?;
             let rows = stmt.query_map(params![embedding_json, limit], |row| {
@@ -552,6 +552,47 @@ mod tests {
         assert_eq!(db.chunk_count().unwrap(), 0, "chunks deleted");
 
         println!("test_delete_document: OK");
+    }
+
+    #[test]
+    fn test_search_similar_executes_knn_query() {
+        // Regression: sqlite-vec requires `k = ?` (or literal LIMIT) on knn
+        // queries. A bound `LIMIT ?` used to fail with "A LIMIT or 'k = ?'
+        // constraint is required on vec0 knn queries".
+        let db = Database::open_in_memory().unwrap();
+
+        let doc_id = db
+            .upsert_document(
+                "deep-dive/mcp/overview.md",
+                Some("MCP Overview"),
+                Some("mcp"),
+                Some("deep-dive"),
+                Some("1"),
+                &[],
+                Some("2026-04-16"),
+                "h1",
+            )
+            .unwrap();
+        db.insert_chunk(doc_id, 0, Some("Intro"), "hello", &dummy_embedding(0.1))
+            .unwrap();
+        db.insert_chunk(doc_id, 1, Some("Body"), "world", &dummy_embedding(0.2))
+            .unwrap();
+
+        // No filter path
+        let hits = db.search_similar(&dummy_embedding(0.1), 5, None, None).unwrap();
+        assert_eq!(hits.len(), 2, "both chunks should be returned");
+
+        // Filter path (category match)
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 5, Some("deep-dive"), None)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+
+        // Filter path (non-matching topic → empty)
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 5, None, Some("no-such-topic"))
+            .unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]
