@@ -55,7 +55,7 @@
       "id": 8,
       "category": "upgrade-embedding",
       "description": "index_meta テーブルでモデル名・次元数を管理し、不整合時に再インデックスを促す",
-      "status": "failing",
+      "status": "passing",
       "verification": "モデル変更後の serve 起動時に model mismatch を検出して警告を出す"
     },
     {

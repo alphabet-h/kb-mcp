@@ -66,6 +66,7 @@ fn main() -> anyhow::Result<()> {
             let db = db::Database::open(&db_path.to_string_lossy())?;
             eprintln!("Loading embedding model...");
             let mut embedder = embedder::Embedder::new()?;
+            db.verify_embedding_meta(embedder.model_id(), embedder.dimension() as u32)?;
             eprintln!("Indexing {}...", kb_path.display());
             let result = indexer::rebuild_index(&db, &mut embedder, &kb_path, force)?;
             eprintln!(

@@ -5,8 +5,14 @@
 ## 2026-04-18
 - harness-kit 初期化完了
 - features.json 作成 (22 件の機能を登録: core 6 passing / upgrade 14 failing / quality 2 failing)
-- 次タスク候補: 優先度「高」の 3 件
-  - feature 7/8: 多言語 embedding (BGE-M3) + index_meta 可変次元化
-  - feature 9: FTS5 ハイブリッド検索 (RRF)
-  - feature 10: Reranking (BGE-reranker)
-- 推奨着手順: feature 8 (スキーマ土台) → feature 7 (BGE-M3 切替) → feature 9 → feature 10
+- 本セッション内で下記 fix を先行実施:
+  - fix(db): sqlite-vec knn クエリに `k = ?` 制約を追加 (1e613fd)
+  - chore(gitignore): Claude Code ローカル設定を無視 (d39dfa5)
+- feature 8 実装完了 (status: passing)
+  - Plan エージェントで仕様化 → 5 ステップで実装
+  - 追加: Embedder::model_id, Database::{read,write,verify}_embedding_meta
+  - init() で index_meta を vec_chunks より先に CREATE (feature 7 下地)
+  - verify 呼び出し: main.rs::Commands::Index と server.rs::run_server
+  - 新規テスト 5 件 + 既存 6 件 すべてパス (合計 11 / 22 全体)
+  - 実 DB (ai_organization/.kb-mcp.db) で migration → idempotent 動作確認
+- 次タスク候補: feature 7 (BGE-M3 1024 次元 switchable) の仕様化

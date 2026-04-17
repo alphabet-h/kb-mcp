@@ -429,6 +429,7 @@ pub async fn run_server(kb_path: &std::path::Path) -> Result<()> {
 
     eprintln!("Loading embedding model...");
     let embedder = Embedder::new()?;
+    db.verify_embedding_meta(embedder.model_id(), embedder.dimension() as u32)?;
 
     let kb_path = kb_path.canonicalize().unwrap_or_else(|_| kb_path.to_path_buf());
 

@@ -46,6 +46,12 @@ impl Embedder {
     pub fn dimension(&self) -> usize {
         384
     }
+
+    /// Stable identifier for the current embedding model. Recorded in
+    /// `index_meta` so model/dim mismatches can be detected between runs.
+    pub fn model_id(&self) -> &'static str {
+        "bge-small-en-v1.5"
+    }
 }
 
 fn resolve_cache_dir() -> PathBuf {

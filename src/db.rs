@@ -89,7 +89,14 @@ impl Database {
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
         self.conn.execute_batch(
+            // `index_meta` が最初なのは、feature 7 で `vec_chunks` の次元を
+            // meta から読んで動的に決める拡張余地を残すため。
             "
+            CREATE TABLE IF NOT EXISTS index_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS documents (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 path         TEXT UNIQUE NOT NULL,
@@ -115,11 +122,6 @@ impl Database {
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
                 chunk_id INTEGER PRIMARY KEY,
                 embedding float[384]
-            );
-
-            CREATE TABLE IF NOT EXISTS index_meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT
             );
             ",
         )?;
@@ -416,6 +418,78 @@ impl Database {
         Ok(count)
     }
 
+    /// Read `(model, dim)` from `index_meta`. Returns `None` if either key is
+    /// missing or malformed (treated as "no meta recorded yet").
+    pub fn read_embedding_meta(&self) -> Result<Option<(String, u32)>> {
+        use rusqlite::OptionalExtension;
+        let model: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM index_meta WHERE key = 'embedding_model'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let dim_raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM index_meta WHERE key = 'embedding_dim'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match (model, dim_raw) {
+            (Some(m), Some(d)) => match d.parse::<u32>() {
+                Ok(dim) => Ok(Some((m, dim))),
+                Err(_) => Ok(None),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// Insert or replace the `(embedding_model, embedding_dim)` entries in
+    /// `index_meta`.
+    pub fn write_embedding_meta(&self, model: &str, dim: u32) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('embedding_model', ?1)",
+            params![model],
+        )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('embedding_dim', ?1)",
+            params![dim.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Verify the runtime `(model, dim)` matches the values recorded in
+    /// `index_meta`.
+    ///
+    /// * Empty meta + empty DB → record current values (fresh DB).
+    /// * Empty meta + non-empty DB → migrate a pre-feature-8 DB by recording
+    ///   the current values, with a one-time log message.
+    /// * Matching meta → no-op.
+    /// * Mismatching meta → return an actionable error.
+    pub fn verify_embedding_meta(&self, model: &str, dim: u32) -> Result<()> {
+        match self.read_embedding_meta()? {
+            None => {
+                if self.chunk_count()? > 0 {
+                    eprintln!(
+                        "Migrating pre-meta index: recording ({model}, {dim}) into index_meta"
+                    );
+                }
+                self.write_embedding_meta(model, dim)
+            }
+            Some((db_model, db_dim)) if db_model == model && db_dim == dim => Ok(()),
+            Some((db_model, db_dim)) => anyhow::bail!(
+                "embedding model mismatch.\n  \
+                 DB was indexed with: {db_model} ({db_dim} dim)\n  \
+                 Current runtime:     {model} ({dim} dim)\n\n\
+                 Run `kb-mcp index --kb-path <path> --force` to rebuild the index, \
+                 or switch back to the previous model."
+            ),
+        }
+    }
+
     /// Return every indexed document path.
     pub fn all_document_paths(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT path FROM documents ORDER BY path")?;
@@ -593,6 +667,80 @@ mod tests {
             .search_similar(&dummy_embedding(0.1), 5, None, Some("no-such-topic"))
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn test_verify_embedding_meta_fresh_db() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.read_embedding_meta().unwrap().is_none());
+
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+
+        let meta = db.read_embedding_meta().unwrap();
+        assert_eq!(meta, Some(("bge-small-en-v1.5".to_string(), 384)));
+    }
+
+    #[test]
+    fn test_verify_embedding_meta_migrates_preexisting_db() {
+        // Simulate a pre-feature-8 DB: chunks exist but meta is empty.
+        let db = Database::open_in_memory().unwrap();
+        let doc_id = db
+            .upsert_document(
+                "deep-dive/mcp/overview.md",
+                Some("MCP Overview"),
+                Some("mcp"),
+                Some("deep-dive"),
+                None,
+                &[],
+                Some("2026-04-16"),
+                "h",
+            )
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "hi", &dummy_embedding(0.1))
+            .unwrap();
+        assert!(db.read_embedding_meta().unwrap().is_none());
+
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+
+        assert_eq!(
+            db.read_embedding_meta().unwrap(),
+            Some(("bge-small-en-v1.5".to_string(), 384))
+        );
+    }
+
+    #[test]
+    fn test_verify_embedding_meta_idempotent_on_match() {
+        let db = Database::open_in_memory().unwrap();
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+        // Second call with same args must succeed.
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+    }
+
+    #[test]
+    fn test_verify_embedding_meta_detects_mismatch() {
+        let db = Database::open_in_memory().unwrap();
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+
+        let err = db
+            .verify_embedding_meta("bge-m3", 1024)
+            .expect_err("mismatch must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("bge-small-en-v1.5"), "msg: {msg}");
+        assert!(msg.contains("bge-m3"), "msg: {msg}");
+        assert!(msg.contains("--force"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_read_embedding_meta_returns_none_when_half_written() {
+        let db = Database::open_in_memory().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO index_meta (key, value) VALUES ('embedding_model', 'x')",
+                [],
+            )
+            .unwrap();
+        // dim missing → None (not an error, treated as unrecorded).
+        assert!(db.read_embedding_meta().unwrap().is_none());
     }
 
     #[test]
