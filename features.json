@@ -1,0 +1,160 @@
+{
+  "project": "kb-mcp",
+  "created": "2026-04-18",
+  "features": [
+    {
+      "id": 1,
+      "category": "core",
+      "description": "clap CLI (index / status / serve サブコマンド)",
+      "status": "passing",
+      "verification": "kb-mcp --help で 3 サブコマンドが列挙される"
+    },
+    {
+      "id": 2,
+      "category": "core",
+      "description": "Markdown パース + frontmatter 抽出 + 見出し単位チャンク化",
+      "status": "passing",
+      "verification": "cargo test markdown:: がパス"
+    },
+    {
+      "id": 3,
+      "category": "core",
+      "description": "BGE-small-en-v1.5 による 384 次元 embedding 生成",
+      "status": "passing",
+      "verification": "cargo test -- --ignored の embedder テストがパス"
+    },
+    {
+      "id": 4,
+      "category": "core",
+      "description": "SQLite + sqlite-vec による chunks/vec_chunks ストレージ",
+      "status": "passing",
+      "verification": "cargo test db:: がパス"
+    },
+    {
+      "id": 5,
+      "category": "core",
+      "description": "SHA-256 ハッシュベースの差分インデックス",
+      "status": "passing",
+      "verification": "kb-mcp index を 2 回連続実行して 2 回目は updated = 0 になる"
+    },
+    {
+      "id": 6,
+      "category": "core",
+      "description": "MCP stdio transport で 5 ツール公開 (search/list_topics/get_document/get_best_practice/rebuild_index)",
+      "status": "passing",
+      "verification": "クライアントから全 5 ツールが呼び出し可能、特に search が vec0 エラーを出さない"
+    },
+    {
+      "id": 7,
+      "category": "upgrade-embedding",
+      "description": "多言語 embedding (BGE-M3 1024 次元) 対応。--model / --dim フラグで切替",
+      "status": "failing",
+      "verification": "kb-mcp index --model bge-m3 で再インデックスし、日本語クエリで関連チャンクが距離降順で返る"
+    },
+    {
+      "id": 8,
+      "category": "upgrade-embedding",
+      "description": "index_meta テーブルでモデル名・次元数を管理し、不整合時に再インデックスを促す",
+      "status": "failing",
+      "verification": "モデル変更後の serve 起動時に model mismatch を検出して警告を出す"
+    },
+    {
+      "id": 9,
+      "category": "upgrade-search",
+      "description": "FTS5 全文検索 + ベクトル検索の Reciprocal Rank Fusion ハイブリッド",
+      "status": "failing",
+      "verification": "エラーコード等の完全一致クエリで FTS5 ヒットが vector-only より上位に来る回帰テスト"
+    },
+    {
+      "id": 10,
+      "category": "upgrade-search",
+      "description": "fastembed-rs TextRerank (BGE-reranker-base) による検索結果の再ランク",
+      "status": "failing",
+      "verification": "--rerank フラグ有無で top-5 の順位が変わり、cargo test rerank がパス"
+    },
+    {
+      "id": 11,
+      "category": "upgrade-indexing",
+      "description": "content_hash ベースのファイル移動検出 (移動時に embedding 再利用)",
+      "status": "failing",
+      "verification": "ファイルをリネームした場合、embedding 再計算が走らず path だけ更新される"
+    },
+    {
+      "id": 12,
+      "category": "upgrade-indexing",
+      "description": "notify クレートによるライブ同期 (file watcher → debounce → 増分再インデックス)",
+      "status": "failing",
+      "verification": "serve 中にファイルを保存すると該当チャンクだけが数秒以内に再インデックスされる"
+    },
+    {
+      "id": 13,
+      "category": "upgrade-indexing",
+      "description": "品質ベースチャンクフィルタ (定型スタブや短文を検索結果から自動除外)",
+      "status": "failing",
+      "verification": "「次の深堀り候補」の見出し配下チャンクが検索結果に現れない"
+    },
+    {
+      "id": 14,
+      "category": "upgrade-config",
+      "description": "チャンキング除外見出しパターンの .kb-mcp.toml 設定ファイル化",
+      "status": "failing",
+      "verification": "exclude_headings 設定で指定した見出しがインデックス対象外になる"
+    },
+    {
+      "id": 15,
+      "category": "upgrade-tools",
+      "description": "Connection Graph ツール (起点ノートから深さ・閾値で類似連鎖を BFS 展開)",
+      "status": "failing",
+      "verification": "get_connection_graph MCP ツールを追加し、起点から深さ 2 で N 件を返す"
+    },
+    {
+      "id": 16,
+      "category": "upgrade-tools",
+      "description": "get_best_practice の汎用化 (任意パス構造に対応、設定ファイルでマッピング定義)",
+      "status": "failing",
+      "verification": ".kb-mcp.toml の [best_practice] セクションで指定したマッピングに従って動作する"
+    },
+    {
+      "id": 17,
+      "category": "upgrade-tools",
+      "description": "Frontmatter スキーマ検証 (schema_infer / schema_validate)",
+      "status": "failing",
+      "verification": "kb-mcp validate でスキーマ違反ファイルを検出しレポートを出力する"
+    },
+    {
+      "id": 18,
+      "category": "upgrade-transport",
+      "description": "HTTP/SSE トランスポート (複数クライアント同時接続)",
+      "status": "failing",
+      "verification": "kb-mcp serve --transport http --port 3100 で 2 クライアント同時検索が通る"
+    },
+    {
+      "id": 19,
+      "category": "upgrade-transport",
+      "description": "PostToolUse hook 連携 (スキル実行後に自動 rebuild_index)",
+      "status": "failing",
+      "verification": "サンプル hook 設定を提供し、スキル実行後にインデックスが更新される"
+    },
+    {
+      "id": 20,
+      "category": "upgrade-formats",
+      "description": "Markdown 以外のファイル対応 (.txt / .rst / .adoc)。パーサープラグイン化",
+      "status": "failing",
+      "verification": ".rst ファイルがインデックス対象になり、該当チャンクが検索できる"
+    },
+    {
+      "id": 21,
+      "category": "quality",
+      "description": "sqlite3_vec_init の transmute を型安全な方法に置換",
+      "status": "failing",
+      "verification": "cargo clippy -- -D warnings がパスし、unsafe transmute が削除されている"
+    },
+    {
+      "id": 22,
+      "category": "quality",
+      "description": "YAML frontmatter の CRLF 正規化強化",
+      "status": "failing",
+      "verification": "CRLF の .md ファイルで frontmatter の値に \\r が混入しないテスト追加"
+    }
+  ]
+}

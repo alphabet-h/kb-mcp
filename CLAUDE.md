@@ -112,3 +112,11 @@ db.rs: chunks (メタ) + vec_chunks (embedding) に UPSERT
 - **Cargo.lock はコミットする**（バイナリクレート）
 - **`.kb-mcp.db` はクライアントプロジェクト側の責務**。本リポジトリでは生成しない
 - **テストは 2 層構造**: 通常 `cargo test` では `#[ignore]` の embedding 実行テストはスキップされる。CI 等で検証したければ `-- --ignored` を付ける
+
+## 開発ワークフロー（harness-kit）
+
+- `features.json` でタスク管理。実装完了した機能は status を `"passing"` に変更
+- テストの削除・編集は禁止（機能が壊れる原因になる）
+- 各機能の実装後は `evaluator` エージェントで品質チェック
+- 進捗は `claude-progress.txt` に逐次記録（append-only）
+- 新セッション開始時: progress 確認 → features.json 確認 → 次タスク特定

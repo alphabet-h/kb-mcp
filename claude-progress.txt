@@ -1,0 +1,12 @@
+# Progress Log
+# プロジェクト: kb-mcp
+# 開始日: 2026-04-18
+
+## 2026-04-18
+- harness-kit 初期化完了
+- features.json 作成 (22 件の機能を登録: core 6 passing / upgrade 14 failing / quality 2 failing)
+- 次タスク候補: 優先度「高」の 3 件
+  - feature 7/8: 多言語 embedding (BGE-M3) + index_meta 可変次元化
+  - feature 9: FTS5 ハイブリッド検索 (RRF)
+  - feature 10: Reranking (BGE-reranker)
+- 推奨着手順: feature 8 (スキーマ土台) → feature 7 (BGE-M3 切替) → feature 9 → feature 10
