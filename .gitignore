@@ -2,3 +2,11 @@
 
 # fastembed-rs が cache_dir 未解決時に使うローカルフォールバック
 .fastembed_cache/
+
+# Claude Code (local settings, reproducible skills)
+CLAUDE.local.md
+*.local.md
+.claude/settings.local.json
+.agents/
+.remember/
+.mcp.json
