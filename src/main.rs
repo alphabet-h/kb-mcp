@@ -5,7 +5,7 @@ pub mod markdown;
 pub mod server;
 
 use clap::{Parser, Subcommand};
-use embedder::ModelChoice;
+use embedder::{ModelChoice, RerankerChoice};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -26,6 +26,14 @@ enum Commands {
         /// Embedding model to use (must match the one that built the index)
         #[arg(long, value_enum, default_value_t = ModelChoice::default())]
         model: ModelChoice,
+        /// Optional cross-encoder reranker applied after RRF hybrid search.
+        /// Default: none (disabled). Enabling requires a model download.
+        #[arg(long, value_enum, default_value_t = RerankerChoice::default())]
+        reranker: RerankerChoice,
+        /// When reranker is enabled, apply it by default for every `search` call
+        /// unless the tool invocation explicitly passes `rerank: false`.
+        #[arg(long, default_value_t = true)]
+        rerank_by_default: bool,
     },
     /// Build or rebuild the search index
     Index {
@@ -62,10 +70,10 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { kb_path, model } => {
+        Commands::Serve { kb_path, model, reranker, rerank_by_default } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                server::run_server(&kb_path, model).await
+                server::run_server(&kb_path, model, reranker, rerank_by_default).await
             })?;
         }
         Commands::Index { kb_path, force, model } => {

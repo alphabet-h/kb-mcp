@@ -9,7 +9,7 @@ use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
-use crate::embedder::{Embedder, ModelChoice};
+use crate::embedder::{Embedder, ModelChoice, Reranker, RerankerChoice};
 use crate::{indexer, markdown};
 
 // ---------------------------------------------------------------------------
@@ -19,6 +19,8 @@ use crate::{indexer, markdown};
 pub struct KbServer {
     db: Mutex<Database>,
     embedder: Mutex<Embedder>,
+    reranker: Mutex<Option<Reranker>>,
+    rerank_by_default: bool,
     kb_path: PathBuf,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -38,6 +40,9 @@ struct SearchParams {
     category: Option<String>,
     /// Filter by topic (e.g. "mcp", "chromadb")
     topic: Option<String>,
+    /// Override the server default for reranking. Requires the server to have
+    /// been started with `--reranker <model>` (otherwise ignored).
+    rerank: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -146,15 +151,38 @@ impl KbServer {
             }
         };
 
-        // Search the DB
+        // Search the DB (optionally followed by reranking)
+        let mut reranker_guard = self.reranker.lock().unwrap();
+        let use_rerank =
+            params.rerank.unwrap_or(self.rerank_by_default) && reranker_guard.is_some();
+
         let db = self.db.lock().unwrap();
-        match db.search_hybrid(
-            &params.query,
-            &query_embedding,
-            limit,
-            params.category.as_deref(),
-            params.topic.as_deref(),
-        ) {
+        let search_outcome: anyhow::Result<Vec<crate::db::SearchResult>> = if use_rerank {
+            // rerank 入力用に candidates を取得、score は cross-encoder で上書き
+            match db.search_hybrid_candidates(
+                &params.query,
+                &query_embedding,
+                limit.saturating_mul(5).max(50),
+                params.category.as_deref(),
+                params.topic.as_deref(),
+            ) {
+                Ok(cands) => {
+                    let r = reranker_guard.as_mut().expect("reranker Some checked above");
+                    r.rerank_candidates(&params.query, cands, limit)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            db.search_hybrid(
+                &params.query,
+                &query_embedding,
+                limit,
+                params.category.as_deref(),
+                params.topic.as_deref(),
+            )
+        };
+
+        match search_outcome {
             Ok(results) => {
                 let hits: Vec<SearchHit> = results
                     .into_iter()
@@ -424,19 +452,27 @@ fn list_h2_sections(content: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Run the MCP server on stdio transport.
-pub async fn run_server(kb_path: &std::path::Path, model: ModelChoice) -> Result<()> {
+pub async fn run_server(
+    kb_path: &std::path::Path,
+    model: ModelChoice,
+    reranker_choice: RerankerChoice,
+    rerank_by_default: bool,
+) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
 
     // モデル DL の前に meta 整合性を確認。不整合ならここで止めて DL を回避。
     db.verify_embedding_meta(model.model_id(), model.dimension() as u32)?;
     let embedder = Embedder::with_model(model)?;
+    let reranker = Reranker::try_new(reranker_choice)?;
 
     let kb_path = kb_path.canonicalize().unwrap_or_else(|_| kb_path.to_path_buf());
 
     let server = KbServer {
         db: Mutex::new(db),
         embedder: Mutex::new(embedder),
+        reranker: Mutex::new(reranker),
+        rerank_by_default,
         kb_path,
         tool_router: KbServer::tool_router(),
     };

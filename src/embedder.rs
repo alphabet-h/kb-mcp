@@ -1,6 +1,10 @@
 use anyhow::Result;
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{
+    EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
+};
 use std::path::PathBuf;
+
+use crate::db::SearchResult;
 
 /// Embedding モデル選択肢。CLI の `--model` と共有される。
 ///
@@ -125,6 +129,120 @@ fn resolve_cache_dir() -> PathBuf {
     PathBuf::from(".fastembed_cache")
 }
 
+// ---------------------------------------------------------------------------
+// Reranker
+// ---------------------------------------------------------------------------
+
+/// Cross-encoder reranker の選択肢。CLI `--reranker` と共有される。
+///
+/// デフォルトは `None` (reranker 無効)。モデル DL を避けるため、opt-in で
+/// 明示的に選択する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum RerankerChoice {
+    /// reranker 無効 (RRF 結果をそのまま返す)
+    #[default]
+    #[value(name = "none")]
+    None,
+    /// BAAI/bge-reranker-v2-m3 (多言語 100+ 言語, ~2.3 GB)。日本語 KB 推奨
+    #[value(name = "bge-v2-m3")]
+    BgeV2M3,
+    /// jinaai/jina-reranker-v2-base-multilingual (多言語, ~1.2 GB)。軽量多言語
+    #[value(name = "jina-v2-ml")]
+    JinaV2Multilingual,
+    /// BAAI/bge-reranker-base (英/中のみ, ~280 MB)。日本語用途には非推奨
+    #[value(name = "bge-base")]
+    BgeBase,
+}
+
+impl RerankerChoice {
+    pub fn model_id(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::BgeV2M3 => "bge-reranker-v2-m3",
+            Self::JinaV2Multilingual => "jina-reranker-v2-base-multilingual",
+            Self::BgeBase => "bge-reranker-base",
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn fastembed_model(self) -> Option<RerankerModel> {
+        match self {
+            Self::None => None,
+            Self::BgeV2M3 => Some(RerankerModel::BGERerankerV2M3),
+            Self::JinaV2Multilingual => Some(RerankerModel::JINARerankerV2BaseMultiligual),
+            Self::BgeBase => Some(RerankerModel::BGERerankerBase),
+        }
+    }
+
+    fn approx_download_mb(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::BgeV2M3 => 2300,
+            Self::JinaV2Multilingual => 1200,
+            Self::BgeBase => 280,
+        }
+    }
+}
+
+/// Cross-encoder reranker。`search_hybrid` が返した候補を query との共同
+/// エンコードで再スコア付けし、上位 `limit` 件に絞る。
+pub struct Reranker {
+    model: TextRerank,
+    #[allow(dead_code)] // choice は model_id ログ用に保持
+    choice: RerankerChoice,
+}
+
+impl Reranker {
+    /// `choice == None` のときは `Ok(None)` を返す (DL・ロード共にスキップ)。
+    /// それ以外は ONNX モデルをロードし `Some(Reranker)` を返す。
+    pub fn try_new(choice: RerankerChoice) -> Result<Option<Self>> {
+        let Some(fm) = choice.fastembed_model() else {
+            return Ok(None);
+        };
+        eprintln!(
+            "Loading reranker model: {} (~{} MB on first run)...",
+            choice.model_id(),
+            choice.approx_download_mb()
+        );
+        let model = TextRerank::try_new(
+            RerankInitOptions::new(fm)
+                .with_cache_dir(resolve_cache_dir())
+                .with_show_download_progress(true),
+        )?;
+        Ok(Some(Self { model, choice }))
+    }
+
+    /// `candidates` (chunk_id, SearchResult) を cross-encoder でスコア付けし、
+    /// 降順にソートした上位 `limit` 件の `SearchResult` を返す。
+    /// `score` フィールドには reranker の raw score が入る (大きいほど良い)。
+    pub fn rerank_candidates(
+        &mut self,
+        query: &str,
+        candidates: Vec<(i64, SearchResult)>,
+        limit: u32,
+    ) -> Result<Vec<SearchResult>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let documents: Vec<&str> = candidates.iter().map(|(_, r)| r.content.as_str()).collect();
+        let rerank_results = self.model.rerank(query, documents, false, None)?;
+
+        // rerank_results は score 降順でソート済み。index は documents (= candidates) の位置。
+        let mut out: Vec<SearchResult> = Vec::with_capacity(limit as usize);
+        for r in rerank_results.into_iter().take(limit as usize) {
+            let Some((_, mut row)) = candidates.get(r.index).cloned() else {
+                continue;
+            };
+            row.score = r.score;
+            out.push(row);
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +276,57 @@ mod tests {
         assert_eq!(ModelChoice::BgeM3.model_id(), "bge-m3");
         assert_eq!(ModelChoice::BgeM3.dimension(), 1024);
         assert_eq!(ModelChoice::default(), ModelChoice::BgeSmallEnV15);
+    }
+
+    #[test]
+    fn test_reranker_choice_values() {
+        assert!(!RerankerChoice::None.is_enabled());
+        assert!(RerankerChoice::BgeV2M3.is_enabled());
+        assert!(RerankerChoice::JinaV2Multilingual.is_enabled());
+        assert!(RerankerChoice::BgeBase.is_enabled());
+        assert_eq!(RerankerChoice::default(), RerankerChoice::None);
+        assert_eq!(RerankerChoice::BgeV2M3.model_id(), "bge-reranker-v2-m3");
+        assert_eq!(RerankerChoice::BgeV2M3.approx_download_mb(), 2300);
+    }
+
+    #[test]
+    fn test_reranker_none_returns_none() {
+        // DL を伴わない安全なテスト
+        let r = Reranker::try_new(RerankerChoice::None).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    #[ignore] // requires BGE-reranker-v2-m3 download (~2.3 GB)
+    fn test_bge_reranker_v2_m3_reorders_ja() {
+        let mut r = Reranker::try_new(RerankerChoice::BgeV2M3)
+            .expect("failed to load BGE-reranker-v2-m3")
+            .expect("reranker should be Some");
+        // SearchResult は db::SearchResult を使う
+        use crate::db::SearchResult;
+        let mk = |content: &str| SearchResult {
+            score: 0.0,
+            content: content.to_string(),
+            heading: None,
+            path: "x.md".to_string(),
+            title: None,
+            topic: None,
+            date: None,
+        };
+        let candidates = vec![
+            (1i64, mk("天気予報の話題です")),
+            (2, mk("E0382 は所有権が移動した後の値を使ったときに出るエラーです")),
+            (3, mk("映画のレビューについて")),
+        ];
+        let out = r
+            .rerank_candidates("Rust の E0382 エラーの意味は？", candidates, 3)
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(
+            out[0].content.contains("E0382"),
+            "top should be E0382 content, got: {}",
+            out[0].content
+        );
     }
 
     #[test]

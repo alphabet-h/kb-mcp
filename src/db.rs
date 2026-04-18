@@ -11,6 +11,11 @@ const RRF_K: f32 = 60.0;
 const FILTER_OVERFETCH_FACTOR: u32 = 10;
 const FILTER_OVERFETCH_CAP: u32 = 10_000;
 
+/// FTS5 bm25 の column weight。heading と content に重みを与え、
+/// 見出し一致を本文一致より強く評価する。
+const FTS_BM25_HEADING_WEIGHT: f32 = 2.0;
+const FTS_BM25_CONTENT_WEIGHT: f32 = 1.0;
+
 // ---------------------------------------------------------------------------
 // Public result types
 // ---------------------------------------------------------------------------
@@ -403,18 +408,24 @@ impl Database {
             limit
         };
 
-        let sql = "
-            SELECT c.id, bm25(fts_chunks) AS score,
+        // bm25 に column weight を与え、見出し一致を優遇する。
+        // 引数順は FTS5 の CREATE VIRTUAL TABLE の列宣言順 (heading, content)。
+        let sql = format!(
+            "
+            SELECT c.id, bm25(fts_chunks, {h}, {c}) AS score,
                    c.content, c.heading,
                    d.path, d.title, d.topic, d.date, d.category
             FROM fts_chunks f
             JOIN chunks c ON c.id = f.rowid
             JOIN documents d ON d.id = c.document_id
             WHERE fts_chunks MATCH ?1
-            ORDER BY bm25(fts_chunks)
+            ORDER BY bm25(fts_chunks, {h}, {c})
             LIMIT ?2
-        ";
-        let mut stmt = self.conn.prepare(sql)?;
+            ",
+            h = FTS_BM25_HEADING_WEIGHT,
+            c = FTS_BM25_CONTENT_WEIGHT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![fts_query, fetch_limit], |row| {
             let chunk_id: i64 = row.get(0)?;
             let score: f32 = row.get(1)?;
@@ -477,10 +488,25 @@ impl Database {
         category: Option<&str>,
         topic: Option<&str>,
     ) -> Result<Vec<SearchResult>> {
+        let hits = self.search_hybrid_candidates(
+            query_text, query_embedding, limit, category, topic,
+        )?;
+        Ok(hits.into_iter().map(|(_, r)| r).collect())
+    }
+
+    /// `search_hybrid` と同じ RRF 計算を行うが、呼び出し側で再ランク等に
+    /// 使うため `(chunk_id, SearchResult)` のタプル列を返す。
+    /// `SearchResult.score` には RRF スコア (大きいほど良い) が入る。
+    pub fn search_hybrid_candidates(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: u32,
+        category: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<Vec<(i64, SearchResult)>> {
         let candidates = limit.saturating_mul(5).max(50);
 
-        // vec 側: 既存の search_similar は SearchResult を返すだけで chunk_id を
-        // 外に出さないので、RRF 用に chunk_id を拾う最小 SELECT を別途組む。
         let vec_hits = self.search_vec_candidates(
             query_embedding,
             candidates,
@@ -510,7 +536,7 @@ impl Database {
             .filter_map(|(id, rrf)| {
                 rows.remove(&id).map(|mut r| {
                     r.score = rrf;
-                    r
+                    (id, r)
                 })
             })
             .collect();
@@ -1142,6 +1168,67 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].score > 0.0, "RRF スコアは正の有限値");
+    }
+
+    #[test]
+    fn test_search_hybrid_candidates_returns_chunk_ids() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
+            .unwrap();
+        let c1 = db
+            .insert_chunk(doc_id, 0, None, "E0382 moved value", &dummy_embedding(0.1))
+            .unwrap();
+        let c2 = db
+            .insert_chunk(doc_id, 1, None, "unrelated note", &dummy_embedding(0.9))
+            .unwrap();
+
+        let hits = db
+            .search_hybrid_candidates("E0382", &dummy_embedding(0.1), 5, None, None)
+            .unwrap();
+        assert!(!hits.is_empty());
+        // 返ってきた chunk_id は insert 時の id と一致
+        let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&c1) || ids.contains(&c2));
+    }
+
+    #[test]
+    fn test_fts_bm25_heading_weighted_higher() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
+            .unwrap();
+        // chunk A: content に keyword。heading には無し
+        let a_id = db
+            .insert_chunk(
+                doc_id,
+                0,
+                Some("Introduction"),
+                "This paragraph contains the kibarashi_unique_keyword only in content text",
+                &dummy_embedding(0.5),
+            )
+            .unwrap();
+        // chunk B: heading に keyword。content にも軽く含む
+        let b_id = db
+            .insert_chunk(
+                doc_id,
+                1,
+                Some("About kibarashi_unique_keyword"),
+                "short body here.",
+                &dummy_embedding(0.5),
+            )
+            .unwrap();
+
+        // 直接 FTS 候補を取り、B が A より上位 (低 bm25) になることを確認
+        let hits = db
+            .search_fts_candidates("kibarashi_unique_keyword", 10, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        let (top_id, _) = hits[0];
+        assert_eq!(
+            top_id, b_id,
+            "heading hit (B) should rank higher than content-only hit (A). ids={a_id},{b_id}"
+        );
     }
 
     #[test]

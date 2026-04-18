@@ -68,9 +68,9 @@
     {
       "id": 10,
       "category": "upgrade-search",
-      "description": "fastembed-rs TextRerank (BGE-reranker-base) による検索結果の再ランク",
-      "status": "failing",
-      "verification": "--rerank フラグ有無で top-5 の順位が変わり、cargo test rerank がパス"
+      "description": "fastembed-rs TextRerank (BGE-reranker-v2-m3 等) による検索結果の再ランク",
+      "status": "passing",
+      "verification": "--reranker フラグ有無で top-5 の順位が変わり、cargo test reranker がパス"
     },
     {
       "id": 11,

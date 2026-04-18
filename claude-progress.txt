@@ -94,3 +94,34 @@
   - 新規回帰テスト 1 件: test_search_hybrid_overfetches_when_filter_is_selective
   - テスト 38 件 (3 ignored) すべてパス、cargo clippy も軽微な doc 指摘のみ
   - 残 #5 (fts heading 重み) / #6 (BGE-M3 batch) は feature 10 と合わせて検討
+- feature 10 仕様化完了 (実装未着手、ユーザー GO/NO-GO 待ち)
+  - fastembed-rs v5 の TextRerank API 調査済み
+  - RerankerModel enum: BGERerankerBase / BGERerankerV2M3 / JINARerankerV1TurboEn
+    / JINARerankerV2BaseMultiligual の 4 variants を確認
+  - 選定: BGERerankerV2M3 (~2.3 GB、多言語、日本語 KB 推奨)
+    次点: JINARerankerV2BaseMultiligual (~1.2 GB 軽量)
+  - デフォルト OFF で opt-in (DL 回避)
+  - CLI: --reranker <none|bge-v2-m3|jina-v2-ml|bge-base> enum +
+    --rerank-by-default bool。MCP search に rerank: Option<bool> 追加
+  - db.search_hybrid_candidates を公開切り出し、search_hybrid は wrapper 化
+  - evaluator #5 (fts bm25 heading 重み 2.0/1.0) を同時対応
+  - evaluator #6 (BGE-M3 batch size) は分離し feature 10 後に別コミット
+  - 5 ステップ実装計画を保留中
+- feature 10 実装完了 (status: passing)
+  - RerankerChoice enum (None/BgeV2M3/JinaV2Multilingual/BgeBase) 追加
+  - Reranker struct: fastembed::TextRerank の薄いラッパ
+  - rerank_candidates: (chunk_id, SearchResult) を受け、cross-encoder で
+    スコア付け → 降順ソート → top limit 件を返す
+  - CLI: --reranker <value> + --rerank-by-default 追加 (Serve のみ)
+  - MCP search パラメータに rerank: Option<bool> 追加 (per-query override)
+  - KbServer に Mutex<Option<Reranker>> + rerank_by_default フィールド
+  - db.search_hybrid_candidates を公開化、search_hybrid は wrapper
+  - evaluator #5 同時対応: fts_chunks の bm25 に column weight (heading 2.0,
+    content 1.0) を付与。test_fts_bm25_heading_weighted_higher で検証
+  - テスト 42 件 (4 ignored) すべてパス
+    - 新規: test_search_hybrid_candidates_returns_chunk_ids,
+      test_fts_bm25_heading_weighted_higher, test_reranker_choice_values,
+      test_reranker_none_returns_none, test_bge_reranker_v2_m3_reorders_ja
+      (ignored: 2.3 GB DL 必要)
+  - evaluator #6 (BGE-M3 batch size) は feature 10 スコープ外、後続対応
+- 次タスク候補: evaluator #6、残 feature (11/15/16/19/20/21/22)
