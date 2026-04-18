@@ -46,6 +46,10 @@ pub struct GraphOptions {
     /// `true` のとき、同一 path からは 1 チャンクしか返さない (ドキュメント
     /// 単位で dedup)。`false` なら別チャンクは別ノードとして並ぶ (default)。
     pub dedup_by_path: bool,
+    /// 近傍 KNN 段階で適用する品質スコア (feature 13) のしきい値。
+    /// 0.0 ならフィルタ無効。seed ノードには適用しない (ユーザが明示指定した
+    /// 起点なので低品質でも残す)。
+    pub min_quality: f32,
 }
 
 /// 上限 (MCP スキーマでバリデーション) — サーバ側でも再度強制する。
@@ -67,6 +71,7 @@ impl Default for GraphOptions {
             topic: None,
             exclude_paths: Vec::new(),
             dedup_by_path: false,
+            min_quality: crate::quality::DEFAULT_QUALITY_THRESHOLD,
         }
     }
 }
@@ -269,6 +274,7 @@ pub fn build_connection_graph(
                 fetch_k,
                 opts.category.as_deref(),
                 opts.topic.as_deref(),
+                opts.min_quality,
             )
             .with_context(|| format!("knn failed at depth {current_depth}"))?;
         knn_queries += 1;
@@ -367,7 +373,7 @@ mod tests {
                 &format!("h-{path}"),
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some(heading), content, &dummy_embedding(val))
+        db.insert_chunk(doc_id, 0, Some(heading), content, &dummy_embedding(val), 1.0)
             .unwrap();
     }
 
@@ -564,9 +570,9 @@ mod tests {
         let doc_id = db
             .upsert_document("s.md", Some("T"), None, None, None, &[], None, "hs")
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("h1"), "c1", &dummy_embedding(0.0))
+        db.insert_chunk(doc_id, 0, Some("h1"), "c1", &dummy_embedding(0.0), 1.0)
             .unwrap();
-        db.insert_chunk(doc_id, 1, Some("h2"), "c2", &dummy_embedding(0.1))
+        db.insert_chunk(doc_id, 1, Some("h2"), "c2", &dummy_embedding(0.1), 1.0)
             .unwrap();
         insert_doc_with_chunk(&db, "x.md", "x", "x", 0.05);
 
@@ -619,9 +625,9 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", Some("T"), None, None, None, &[], None, "ha")
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("h1"), "c1", &dummy_embedding(0.001))
+        db.insert_chunk(doc_id, 0, Some("h1"), "c1", &dummy_embedding(0.001), 1.0)
             .unwrap();
-        db.insert_chunk(doc_id, 1, Some("h2"), "c2", &dummy_embedding(0.002))
+        db.insert_chunk(doc_id, 1, Some("h2"), "c2", &dummy_embedding(0.002), 1.0)
             .unwrap();
 
         // dedup_by_path=true なら a.md は 1 つだけ

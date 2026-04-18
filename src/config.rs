@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::embedder::{ModelChoice, RerankerChoice};
+use crate::quality::QualityFilterConfig;
 
 /// バイナリと同じディレクトリに置く `kb-mcp.toml` の表現。
 /// すべてのフィールドは optional で、指定しなかった項目は CLI 引数 or
@@ -31,6 +32,9 @@ pub struct Config {
     /// 省略時 (`None`) は [`crate::markdown::DEFAULT_EXCLUDED_HEADINGS`]。
     /// 明示的に `[]` を与えると「除外しない」という意味になる。
     pub exclude_headings: Option<Vec<String>>,
+    /// [feature 13] 検索時に適用するチャンク品質フィルタの設定。
+    /// 省略時は [`QualityFilterConfig::default()`] (enabled=true, threshold=0.3)。
+    pub quality_filter: Option<QualityFilterConfig>,
 }
 
 impl Config {
@@ -75,6 +79,7 @@ impl Config {
             && self.rerank_by_default.is_none()
             && self.fastembed_cache_dir.is_none()
             && self.exclude_headings.is_none()
+            && self.quality_filter.is_none()
     }
 
     /// `fastembed_cache_dir` が設定されていて、かつ環境変数

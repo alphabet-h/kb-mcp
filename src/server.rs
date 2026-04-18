@@ -26,6 +26,9 @@ pub struct KbServer {
     /// `rebuild_index` ツールで markdown パース時に使う除外見出し。
     /// `None` のときは [`markdown::DEFAULT_EXCLUDED_HEADINGS`] を使う。
     exclude_headings: Option<Vec<String>>,
+    /// feature 13: 既定の品質フィルタしきい値。`search` / graph で適用。
+    /// 0.0 ならフィルタ無効。
+    quality_threshold: f32,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -47,6 +50,12 @@ struct SearchParams {
     /// Override the server default for reranking. Requires the server to have
     /// been started with `--reranker <model>` (otherwise ignored).
     rerank: Option<bool>,
+    /// Override the quality filter threshold for this query (0.0-1.0). If
+    /// omitted, the server default (from `kb-mcp.toml` / CLI) is used.
+    min_quality: Option<f32>,
+    /// If true, disable the quality filter for this query (equivalent to
+    /// `min_quality: 0.0`, but more explicit).
+    include_low_quality: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -178,6 +187,19 @@ impl KbServer {
         let use_rerank =
             params.rerank.unwrap_or(self.rerank_by_default) && reranker_guard.is_some();
 
+        // per-query の品質フィルタ解決順序:
+        //   include_low_quality=true → 0.0 (無効)、
+        //   min_quality Some(x) → clamp(0, 1)、
+        //   それ以外 → server default (quality_threshold)
+        let effective_min_quality = if params.include_low_quality.unwrap_or(false) {
+            0.0
+        } else {
+            params
+                .min_quality
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(self.quality_threshold)
+        };
+
         let db = self.db.lock().unwrap();
         let search_outcome: anyhow::Result<Vec<crate::db::SearchResult>> = if use_rerank {
             // rerank 入力用に candidates を取得、score は cross-encoder で上書き
@@ -187,6 +209,7 @@ impl KbServer {
                 limit.saturating_mul(5).max(50),
                 params.category.as_deref(),
                 params.topic.as_deref(),
+                effective_min_quality,
             ) {
                 Ok(cands) => {
                     let r = reranker_guard.as_mut().expect("reranker Some checked above");
@@ -201,6 +224,7 @@ impl KbServer {
                 limit,
                 params.category.as_deref(),
                 params.topic.as_deref(),
+                effective_min_quality,
             )
         };
 
@@ -463,6 +487,7 @@ impl KbServer {
             topic: params.topic,
             exclude_paths: params.exclude_paths.unwrap_or_default(),
             dedup_by_path: params.dedup_by_path.unwrap_or(false),
+            min_quality: self.quality_threshold,
         };
 
         let db = self.db.lock().unwrap();
@@ -533,6 +558,7 @@ pub async fn run_server(
     reranker_choice: RerankerChoice,
     rerank_by_default: bool,
     exclude_headings: Option<Vec<String>>,
+    quality_threshold: f32,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -551,6 +577,7 @@ pub async fn run_server(
         rerank_by_default,
         kb_path,
         exclude_headings,
+        quality_threshold,
         tool_router: KbServer::tool_router(),
     };
 

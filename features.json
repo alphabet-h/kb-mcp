@@ -90,8 +90,8 @@
       "id": 13,
       "category": "upgrade-indexing",
       "description": "品質ベースチャンクフィルタ (定型スタブや短文を検索結果から自動除外)",
-      "status": "failing",
-      "verification": "「次の深堀り候補」の見出し配下チャンクが検索結果に現れない"
+      "status": "passing",
+      "verification": "見出しのみのスタブ / 定型語のみのチャンクが search / get_connection_graph の上位に現れず、--include-low-quality で含まれるようになる"
     },
     {
       "id": 14,

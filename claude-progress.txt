@@ -474,3 +474,62 @@ README.md 更新の続きで、他のドキュメントにも残っていた #14
 docs/design.md と docs/plan.md は「初期設計ドキュメント」として意図的に
 現時点のまま残した (実装履歴は claude-progress.txt + features.json 側の
 責務)。
+
+## 2026-04-18 Feature 13 — 品質ベースチャンクフィルタ
+
+planner 仕様を単一コミットで完走 (commit 1 の quality.rs 新設は先行済み)。
+
+### 評価シグナル (MVP)
+1. 長さ: content < 30 chars → -0.6
+2. 定型語のみ: TBD/TODO/WIP/N/A/未定/準備中/詳細は後述/後述/ここに書く/
+   後で書く/Coming soon 等に完全一致 → -0.5
+3. 構造貧弱: 改行なし + < 80 chars → -0.3
+基本 1.0 から減算、max(0.0) にクランプ。threshold 既定 0.3。
+
+### DB schema
+- `chunks.quality_score REAL NOT NULL DEFAULT 1.0` + idx
+- pre-feature-13 DB 互換: init 時に `ensure_quality_score_column()` で
+  PRAGMA table_info を読み、無ければ ALTER TABLE で追加
+- `backfill_quality()`: DEFAULT 1.0 のまま残るチャンクを再計算 UPDATE (冪等)
+- `chunk_count_by_quality(threshold)`: (above, below) を返す (status 用)
+
+### API
+- `kb-mcp.toml` に `[quality_filter] enabled, threshold` セクション
+- CLI search: `--min-quality <f32>` / `--include-low-quality`
+- MCP search ツール: `min_quality: Option<f32>` / `include_low_quality: Option<bool>`
+  優先順: include_low_quality=true > min_quality Some > server default
+- get_connection_graph: `GraphOptions.min_quality` で KNN 候補に適用。seed は除外対象外
+- status: threshold > 0 なら `N passing, M below threshold` を表示
+
+### 関数シグネチャ変更 (破壊的、crate 内のみ)
+- `insert_chunk(... embedding, quality_score: f32)`
+- `search_similar(... min_quality: f32)`
+- `search_hybrid(... min_quality: f32)` / `search_hybrid_candidates(... min_quality: f32)`
+- `search_vec_candidates(... min_quality: f32)` (pub(crate))
+- `search_fts_candidates(... min_quality: f32)` (private)
+- `server::run_server(... quality_threshold: f32)`
+- `KbServer.quality_threshold: f32` フィールド追加
+- `GraphOptions.min_quality: f32` フィールド追加 (default 0.3)
+- `Config.quality_filter: Option<QualityFilterConfig>` 追加
+
+### テスト
+- quality:: 16 件 (境界値、config パース、深度一致)
+- db::test_quality_filter_excludes_low_scored_chunks
+- db::test_backfill_quality_is_idempotent
+- db::test_chunk_count_by_quality_splits_correctly
+- 既存 search_* テスト 30+ 件の呼び出しに 0.0 を追加 (perl 一括置換 +
+  複数行呼び出しは手動編集)
+- cargo test: 92 passed / 4 ignored (77 → 92 で 15 増)
+- cargo clippy --all-targets -- -D warnings: クリーン
+
+### verification 読み替え
+元 "「次の深堀り候補」の見出し配下チャンクが検索結果に現れない" は
+feature 14 で既に達成済みなので、本 feature では:
+"見出しのみのスタブ / 定型語のみのチャンクが search / get_connection_graph
+の上位に現れず、--include-low-quality で含まれるようになる" に差し替え。
+
+### デフォルト挙動
+デフォルトで有効 (threshold 0.3)。既存 DB は ALTER TABLE で透過移行し、
+次回 `kb-mcp index` 実行時に `backfill_quality()` が 1 回だけ走って
+低品質チャンクにスコアが付く。ユーザが戻したい場合は `kb-mcp.toml` の
+`[quality_filter] enabled = false` または CLI `--include-low-quality` で可能。

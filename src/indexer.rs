@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 use crate::db::Database;
 use crate::embedder::Embedder;
-use crate::markdown;
+use crate::{markdown, quality};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -54,6 +54,13 @@ pub fn rebuild_index(
     let backfilled = db.backfill_fts()?;
     if backfilled > 0 {
         eprintln!("Backfilled {backfilled} chunks into FTS index");
+    }
+
+    // pre-feature-13 DB (quality_score = 1.0 のまま) を一度だけ再評価する。
+    // 既にスコアが入っているチャンクは触らないため冪等。
+    let quality_updated = db.backfill_quality()?;
+    if quality_updated > 0 {
+        eprintln!("Backfilled {quality_updated} chunks with quality scores");
     }
 
     // 1. Collect all .md files, skipping .obsidian/
@@ -127,14 +134,19 @@ pub fn rebuild_index(
             .embed_texts(&texts)
             .with_context(|| format!("failed to embed chunks for {rel_path}"))?;
 
-        // 2g. Insert each chunk with its embedding
+        // 2g. Insert each chunk with its embedding + quality score
         for (chunk, embedding) in parsed.chunks.iter().zip(embeddings.iter()) {
+            let score = quality::chunk_quality_score(
+                chunk.heading.as_deref(),
+                &chunk.content,
+            );
             db.insert_chunk(
                 doc_id,
                 chunk.index as i32,
                 chunk.heading.as_deref(),
                 &chunk.content,
                 embedding,
+                score,
             )?;
         }
 

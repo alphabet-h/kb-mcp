@@ -136,6 +136,14 @@ enum Commands {
         /// Output format: json (machine-readable) or text (LLM-friendly)
         #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
         format: SearchFormat,
+        /// Override quality filter threshold (0.0-1.0). Defaults to the
+        /// `[quality_filter].threshold` in kb-mcp.toml (0.3 if unset).
+        #[arg(long = "min-quality")]
+        min_quality: Option<f32>,
+        /// Disable the quality filter for this query (shorthand for
+        /// `--min-quality 0.0`).
+        #[arg(long = "include-low-quality", default_value_t = false)]
+        include_low_quality: bool,
     },
 }
 
@@ -203,6 +211,11 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(true);
 
             let exclude_headings = cfg.exclude_headings.clone();
+            let quality_threshold = cfg
+                .quality_filter
+                .clone()
+                .unwrap_or_default()
+                .effective_threshold();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 server::run_server(
@@ -211,6 +224,7 @@ fn main() -> anyhow::Result<()> {
                     reranker,
                     rerank_by_default,
                     exclude_headings,
+                    quality_threshold,
                 )
                 .await
             })?;
@@ -264,8 +278,19 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             let db = db::Database::open(&db_path.to_string_lossy())?;
-            eprintln!("Documents: {}", db.document_count()?);
-            eprintln!("Chunks: {}", db.chunk_count()?);
+            let total_docs = db.document_count()?;
+            let total_chunks = db.chunk_count()?;
+            eprintln!("Documents: {total_docs}");
+            eprintln!("Chunks: {total_chunks}");
+            // feature 13: 設定済みの threshold で filter される件数を表示
+            let qf = cfg.quality_filter.clone().unwrap_or_default();
+            let threshold = qf.effective_threshold();
+            if threshold > 0.0 {
+                let (above, below) = db.chunk_count_by_quality(threshold)?;
+                eprintln!(
+                    "Quality filter (threshold={threshold}): {above} passing, {below} below threshold"
+                );
+            }
         }
         Commands::Search {
             query,
@@ -276,6 +301,8 @@ fn main() -> anyhow::Result<()> {
             category,
             topic,
             format,
+            min_quality,
+            include_low_quality,
         } => {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
@@ -289,6 +316,17 @@ fn main() -> anyhow::Result<()> {
             let mut embedder = embedder::Embedder::with_model(model)?;
             let query_embedding = embedder.embed_single(&query)?;
 
+            let effective_min_quality = if include_low_quality {
+                0.0
+            } else {
+                min_quality.map(|v| v.clamp(0.0, 1.0)).unwrap_or(
+                    cfg.quality_filter
+                        .clone()
+                        .unwrap_or_default()
+                        .effective_threshold(),
+                )
+            };
+
             let results = if reranker_choice.is_enabled() {
                 let candidates = db.search_hybrid_candidates(
                     &query,
@@ -296,16 +334,15 @@ fn main() -> anyhow::Result<()> {
                     limit.saturating_mul(5).max(50),
                     category.as_deref(),
                     topic.as_deref(),
+                    effective_min_quality,
                 )?;
                 if let Some(mut r) = embedder::Reranker::try_new(reranker_choice)? {
                     r.rerank_candidates(&query, candidates, limit)?
                 } else {
-                    // Reranker::try_new returned None even though is_enabled was true;
-                    // fall back to hybrid.
-                    db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref())?
+                    db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref(), effective_min_quality)?
                 }
             } else {
-                db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref())?
+                db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref(), effective_min_quality)?
             };
 
             print_search_results(results, format);
@@ -348,6 +385,11 @@ fn main() -> anyhow::Result<()> {
                 topic,
                 exclude_paths: exclude,
                 dedup_by_path,
+                min_quality: cfg
+                    .quality_filter
+                    .clone()
+                    .unwrap_or_default()
+                    .effective_threshold(),
             };
             let g = graph::build_connection_graph(&db, &start, &opts)?;
             print_graph(g, format);

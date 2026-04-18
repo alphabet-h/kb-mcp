@@ -41,3 +41,12 @@
 #exclude_headings = ["次の深堀り候補", "参考リンク"]
 # 例: 既定の「次の深堀り候補」除外も外して何も除外しない場合:
 #exclude_headings = []
+
+# 検索時のチャンク品質フィルタ (feature 13)。
+# enabled を false にすると MCP search / CLI search / get_connection_graph
+# すべてでフィルタが無効になり、従来の全件返却動作に戻る。
+# threshold は 0.0 から 1.0 の範囲で、未満のスコアのチャンクを除外する。
+# 既定はフィルタ有効 + threshold 0.3。
+[quality_filter]
+enabled = true
+threshold = 0.3
