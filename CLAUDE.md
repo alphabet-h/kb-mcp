@@ -65,6 +65,12 @@ threshold = 0.3
 # 後方互換 (md のみ)。空配列はエラー。現在サポート: "md" / "txt"。
 [parsers]
 enabled = ["md", "txt"]
+
+# feature 12: ファイルウォッチャー (kb-mcp serve のみ)。既定 on。
+# --no-watch / --debounce-ms で per-run override 可能。
+[watch]
+enabled = true
+debounce_ms = 500
 ```
 
 - 全フィールド optional。テンプレートは `kb-mcp.toml.example` (リポジトリ同梱、`.gitignore` で `kb-mcp.toml` 本体は除外)
@@ -96,9 +102,10 @@ enabled = ["md", "txt"]
 | `src/main.rs` | clap CLI エントリ。`index` / `status` / `serve` / `search` サブコマンドの分岐、`kb-mcp.toml` の読み込みと CLI 引数へのマージ、JSON/text 出力フォーマッタ |
 | `src/config.rs` | バイナリ同居 `kb-mcp.toml` のロード。CLI / config / 既定値の優先順位解決、`FASTEMBED_CACHE_DIR` の注入 |
 | `src/server.rs` | rmcp `ServerHandler` 実装。5 つの MCP ツールをディスパッチ。`search` は `db.search_hybrid` (vec + FTS5 + RRF) 経由 |
-| `src/indexer.rs` | walkdir で対象拡張子 (`Registry::extensions()`) を走査 → Parser trait でパース → embedder.rs で embedding → db.rs で格納。SHA-256 で差分検出。冒頭で `backfill_fts()` を呼び pre-feature-9 DB を自動移行 |
+| `src/indexer.rs` | walkdir で対象拡張子 (`Registry::extensions()`) を走査 → Parser trait でパース → embedder.rs で embedding → db.rs で格納。SHA-256 で差分検出。冒頭で `backfill_fts()` を呼び pre-feature-9 DB を自動移行。[feature 12] 増分 API (`reindex_single_file` / `deindex_single_file` / `rename_single_file`) を切り出し watcher から共有 |
 | `src/parser/` | [feature 20] Parser trait + Registry。`mod.rs` に Frontmatter/Chunk/ParsedDocument、`markdown.rs` に `.md` 実装、`txt.rs` に `.txt` 実装、`registry.rs` に拡張子ルックアップ |
 | `src/markdown.rs` | Parser trait への移行後は `crate::parser::markdown::MarkdownParser` への薄い shim (legacy `parse()` / `parse_with_excludes()` 公開 API を維持) |
+| `src/watcher.rs` | [feature 12] `notify-debouncer-full` を tokio channel 越しに受信し、拡張子フィルタ + path filter (`.obsidian/`) を経由して `indexer::{reindex,deindex,rename}_single_file` にディスパッチ。server 並走は `tokio::spawn` |
 | `src/embedder.rs` | fastembed-rs の薄いラッパ。`ModelChoice` で埋め込みモデル (BGE-small-en-v1.5 / BGE-M3) を、`RerankerChoice` + `Reranker` で optional な cross-encoder 再ランクを提供 |
 | `src/db.rs` | rusqlite + sqlite-vec + FTS5 (trigram)。`chunks` / `vec_chunks` / `fts_chunks` の schema と CRUD、`search_hybrid` (RRF k=60) を提供 |
 

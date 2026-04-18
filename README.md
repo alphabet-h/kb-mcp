@@ -40,6 +40,15 @@ threshold = 0.3
 # Currently supported ids: "md", "txt".
 [parsers]
 enabled = ["md", "txt"]
+
+# Live-sync file watcher (feature 12). When `kb-mcp serve` is running, changes
+# under kb_path are detected and the affected files are re-indexed incrementally
+# within `debounce_ms`. Complementary to the PostToolUse hook: covers manual
+# edits, `git pull`, external scripts, etc. CLI `--no-watch` / `--debounce-ms`
+# overrides. Omitting the section keeps watcher on with a 500 ms debounce.
+[watch]
+enabled = true
+debounce_ms = 500
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
@@ -258,6 +267,16 @@ If you edit the knowledge base from inside a Claude Code session (or run a skill
 ```
 
 SHA-256 diffing in `kb-mcp index` makes the second-and-later invocations fast (usually sub-second on small KBs). A richer shell script that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH` ships with the repo: see [`examples/hooks/`](./examples/hooks/README.md). SQLite runs in WAL mode so the hook can safely run while the MCP server is still up.
+
+### Live-sync via file watcher (feature 12)
+
+`kb-mcp serve` runs a `notify`-based file watcher by default. Any change under `--kb-path` (create / modify / delete / rename) is detected, debounced, and only the affected file is re-indexed. This covers manual editor saves, `git pull`, and external scripts — cases the PostToolUse hook cannot intercept.
+
+- **Default on**. `[watch].enabled = false` in `kb-mcp.toml` or `--no-watch` on the command line disables it.
+- **Debounce** is 500 ms by default. Tune with `[watch].debounce_ms` or `--debounce-ms`.
+- **Coexists with the PostToolUse hook**. Both paths lock the same `Mutex<Database>` / `Mutex<Embedder>`, so concurrent triggers are serialized at the Rust layer and are idempotent.
+- **Extension-aware**. The watcher shares the Parser registry with `rebuild_index`, so only files whose extension is enabled in `[parsers].enabled` are re-indexed; other events are dropped.
+- **Resilience**. Errors inside the watcher task are logged to stderr (not silently dropped) and the MCP server keeps running. Local disk is assumed — inotify on WSL / SMB / network shares is not guaranteed.
 
 ### Working around HuggingFace TLS failures on first download
 

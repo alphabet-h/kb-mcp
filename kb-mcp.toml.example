@@ -72,3 +72,13 @@ path_templates = [
 # 下記は .txt も index したい場合の例 ("md" のみ既定なら [parsers] ごと削除)。
 [parsers]
 enabled = ["md", "txt"]
+
+# ファイルウォッチャー (feature 12)。`kb-mcp serve` 中のみ有効。
+# 有効時は kb_path 配下の変更 / 追加 / 削除 / rename を検知して
+# 該当ファイルだけを増分再インデックスする (PostToolUse hook が拾えない
+# 手動編集・git pull・外部スクリプト経由の更新もカバー)。
+# CLI `--no-watch` / `--debounce-ms <ms>` で per-run override 可能。
+# セクション自体を省略した場合も enabled=true / 500ms が既定。
+[watch]
+enabled = true
+debounce_ms = 500

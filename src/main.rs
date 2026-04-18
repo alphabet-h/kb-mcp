@@ -7,6 +7,7 @@ pub mod markdown;
 pub mod parser;
 pub mod quality;
 pub mod server;
+pub mod watcher;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -51,6 +52,14 @@ enum Commands {
         /// `rerank_by_default` value from `kb-mcp.toml`.
         #[arg(long, value_parser = clap::value_parser!(bool))]
         rerank_by_default: Option<bool>,
+        /// Disable the live-sync file watcher (feature 12).
+        /// Default: watcher is ON unless disabled here or via
+        /// `[watch].enabled = false` in kb-mcp.toml.
+        #[arg(long = "no-watch", default_value_t = false)]
+        no_watch: bool,
+        /// Override the watcher debounce in milliseconds. Default: 500ms.
+        #[arg(long = "debounce-ms")]
+        debounce_ms: Option<u64>,
     },
     /// Build or rebuild the search index
     Index {
@@ -203,6 +212,8 @@ fn main() -> anyhow::Result<()> {
             model,
             reranker,
             rerank_by_default,
+            no_watch,
+            debounce_ms,
         } => {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
@@ -224,6 +235,17 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_default()
                 .path_templates;
             let parser_registry = cfg.build_parser_registry()?;
+
+            // [feature 12] watch config の解決
+            // 優先順位: --no-watch CLI > [watch].enabled config > default(true)
+            let mut watch_config = cfg.watch.clone().unwrap_or_default();
+            if no_watch {
+                watch_config.enabled = false;
+            }
+            if let Some(d) = debounce_ms {
+                watch_config.debounce_ms = d;
+            }
+
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 server::run_server(
@@ -235,6 +257,7 @@ fn main() -> anyhow::Result<()> {
                     quality_threshold,
                     best_practice_templates,
                     parser_registry,
+                    watch_config,
                 )
                 .await
             })?;

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::embedder::{ModelChoice, RerankerChoice};
 use crate::parser::ParsersConfig;
 use crate::quality::QualityFilterConfig;
+use crate::watcher::WatchConfig;
 
 /// バイナリと同じディレクトリに置く `kb-mcp.toml` の表現。
 /// すべてのフィールドは optional で、指定しなかった項目は CLI 引数 or
@@ -44,6 +45,10 @@ pub struct Config {
     /// 等を取り込みたい場合は明示的に `enabled = ["md", "txt"]` と opt-in する。
     /// 空配列 `enabled = []` は誤設定として reject する。
     pub parsers: Option<ParsersConfig>,
+    /// [feature 12] serve 中のファイルウォッチャー設定。
+    /// 省略時 (`None`) は `WatchConfig::default()` (enabled=true, debounce=500ms)。
+    /// CLI `--no-watch` で即座に無効化できる。
+    pub watch: Option<WatchConfig>,
 }
 
 /// `get_best_practice` の汎用化設定 (feature 16)。
@@ -137,6 +142,7 @@ impl Config {
             && self.quality_filter.is_none()
             && self.best_practice.is_none()
             && self.parsers.is_none()
+            && self.watch.is_none()
     }
 
     /// [feature 20] 設定から `parser::Registry` を構築する。キー省略時は
@@ -329,6 +335,51 @@ mod tests {
         assert!(cfg.parsers.is_none());
         let reg = cfg.build_parser_registry().unwrap();
         assert_eq!(reg.extensions(), vec!["md"]);
+    }
+
+    #[test]
+    fn test_watch_unknown_field_in_config_is_rejected() {
+        // Config の [watch] でも deny_unknown_fields が効いて typo を reject する。
+        let mut file = tempfile("kb-mcp-config-watch-bad");
+        writeln!(
+            file,
+            "[watch]\n\
+             enabled = true\n\
+             bogus_field = 42\n"
+        )
+        .unwrap();
+        let err =
+            Config::load_from(file.path()).expect_err("unknown [watch] field must reject");
+        assert!(err.to_string().contains("failed to parse config"));
+    }
+
+    #[test]
+    fn test_watch_config_parses_from_toml() {
+        let mut file = tempfile("kb-mcp-config-watch");
+        writeln!(
+            file,
+            "[watch]\n\
+             enabled = false\n\
+             debounce_ms = 750\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let w = cfg.watch.expect("watch must be Some");
+        assert!(!w.enabled);
+        assert_eq!(w.debounce_ms, 750);
+    }
+
+    #[test]
+    fn test_watch_config_omitted_uses_defaults_via_unwrap_or_default() {
+        // セクション自体が無ければ cfg.watch == None。呼び出し側で
+        // `cfg.watch.unwrap_or_default()` すると enabled=true / 500ms が入る。
+        let mut file = tempfile("kb-mcp-config-watch-omit");
+        writeln!(file, r#"model = "bge-small-en-v1.5""#).unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        assert!(cfg.watch.is_none());
+        let w = cfg.watch.unwrap_or_default();
+        assert!(w.enabled);
+        assert_eq!(w.debounce_ms, 500);
     }
 
     #[test]

@@ -82,9 +82,9 @@
     {
       "id": 12,
       "category": "upgrade-indexing",
-      "description": "notify クレートによるライブ同期 (file watcher → debounce → 増分再インデックス)",
-      "status": "failing",
-      "verification": "serve 中にファイルを保存すると該当チャンクだけが数秒以内に再インデックスされる"
+      "description": "notify クレートによるライブ同期 (file watcher → debounce → 増分再インデックス)。[watch] セクションで既定 on、--no-watch / --debounce-ms で override",
+      "status": "passing",
+      "verification": "kb-mcp serve 起動時に 'watcher started' がログ出力され、serve 中に .md を保存すると debounce 窓内 (既定 500ms) に該当ファイルだけが再 index される (watcher: reindexed ... ログ)。--no-watch で opt-out 可"
     },
     {
       "id": 13,

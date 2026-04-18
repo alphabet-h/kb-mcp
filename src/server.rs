@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use rmcp::handler::server::tool::ToolRouter;
@@ -19,8 +19,9 @@ use crate::{indexer, markdown};
 // ---------------------------------------------------------------------------
 
 pub struct KbServer {
-    db: Mutex<Database>,
-    embedder: Mutex<Embedder>,
+    /// [feature 12] watcher と共有するため `Arc<Mutex<_>>` で保持。
+    db: Arc<Mutex<Database>>,
+    embedder: Arc<Mutex<Embedder>>,
     reranker: Mutex<Option<Reranker>>,
     rerank_by_default: bool,
     kb_path: PathBuf,
@@ -38,7 +39,8 @@ pub struct KbServer {
     /// feature 20: index 対象の拡張子レジストリ。`rebuild_index` MCP ツール
     /// から `indexer::rebuild_index` に渡す。`kb-mcp.toml` の
     /// `[parsers].enabled` が無ければ `Registry::defaults()` = `["md"]` のみ。
-    parser_registry: Registry,
+    /// [feature 12] watcher とも共有するため Arc。
+    parser_registry: Arc<Registry>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -622,6 +624,7 @@ pub async fn run_server(
     quality_threshold: f32,
     best_practice_templates: Vec<String>,
     parser_registry: Registry,
+    watch_config: crate::watcher::WatchConfig,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -633,26 +636,51 @@ pub async fn run_server(
 
     let kb_path = kb_path.canonicalize().unwrap_or_else(|_| kb_path.to_path_buf());
 
+    // [feature 12] watcher と共有するため Arc 化。
+    let db_shared = Arc::new(Mutex::new(db));
+    let embedder_shared = Arc::new(Mutex::new(embedder));
+    let registry_shared = Arc::new(parser_registry);
+    let exclude_for_watcher = exclude_headings.clone();
+
     let server = KbServer {
-        db: Mutex::new(db),
-        embedder: Mutex::new(embedder),
+        db: Arc::clone(&db_shared),
+        embedder: Arc::clone(&embedder_shared),
         reranker: Mutex::new(reranker),
         rerank_by_default,
-        kb_path,
+        kb_path: kb_path.clone(),
         exclude_headings,
         quality_threshold,
         best_practice_templates,
-        parser_registry,
+        parser_registry: Arc::clone(&registry_shared),
         tool_router: KbServer::tool_router(),
     };
 
     eprintln!("kb-mcp server ready (stdio transport)");
 
+    // [feature 12] watcher をバックグラウンドで並走。tokio::spawn で起動し、
+    // watcher 側のエラーは stderr に流すだけで MCP サーバ (service.waiting)
+    // は継続させる。service.waiting は self を moves するため select! は使わず
+    // 単純に spawn する方が素直。クライアント切断で run_server 全体が終われば
+    // watcher task の JoinHandle は drop され、bridge スレッドも自然終了する。
+    let watcher_state = crate::watcher::WatcherState {
+        kb_path: kb_path.clone(),
+        db: db_shared,
+        embedder: embedder_shared,
+        registry: registry_shared,
+        exclude_headings: exclude_for_watcher,
+        config: watch_config,
+    };
+    let watcher_handle = tokio::spawn(async move {
+        if let Err(e) = crate::watcher::run_watch_loop(watcher_state).await {
+            eprintln!("watcher exited with error: {e}");
+        }
+    });
+
     let transport = rmcp::transport::io::stdio();
     let service = rmcp::serve_server(server, transport).await?;
 
-    // Wait for the service to finish (client disconnects)
     service.waiting().await?;
+    watcher_handle.abort();
 
     Ok(())
 }

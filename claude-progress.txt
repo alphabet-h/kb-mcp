@@ -948,3 +948,151 @@ any other extensions enabled via [parsers].enabled in kb-mcp.toml)"
 - cargo test: 145 passed (142 → 145、+3)
 - cargo clippy --all-targets -- -D warnings: クリーン
 - cargo build --release: 成功
+
+## 2026-04-19: feature 12 MVP 実装完了 (F12-1 〜 F12-7)
+
+planner 仕様 docs/plans/feature-12-live-sync.md に基づき MVP を実装:
+
+### 新設
+- src/watcher.rs: notify-debouncer-full を std::sync::mpsc で受け、bridge thread
+  経由で tokio::mpsc に橋渡し。run_watch_loop が tokio::spawn で MCP サーバと
+  並走。Create/Modify → reindex, Remove → deindex, Modify(Name(_)) 2-path →
+  rename 分岐。path filter で .obsidian / .kb-mcp.db を除外、Registry の拡張子
+  リストに合致するものだけ dispatch。10 ユニットテスト (should_process_lite
+  の 5 ケース、WatchConfig の 4 ケース、to_rel の 1 ケース)
+- indexer.rs に SingleResult / RenameOutcome enum と reindex_single_file /
+  deindex_single_file / rename_single_file を追加。既存 rebuild_index の
+  per-file ブロックを index_single_disk_entry として抽出し、両者で共有。
+  deindex の 2 テスト追加
+
+### 変更
+- Cargo.toml: notify = "8", notify-debouncer-full = "0.6" を追加
+- src/config.rs: watch: Option<WatchConfig> を追加 (2 ユニットテスト)
+- src/server.rs: KbServer の db/embedder/parser_registry を Arc 化し watcher と
+  共有。run_server で tokio::spawn(watch_loop) を並走起動、service.waiting 終了
+  時に abort
+- src/main.rs: Serve に --no-watch / --debounce-ms flag 追加、config の
+  [watch] と合成
+
+### Config schema
+- [watch].enabled 省略 → default true
+- [watch].debounce_ms 省略 → default 500ms
+- CLI --no-watch → enabled=false を強制
+- CLI --debounce-ms <u64> → [watch].debounce_ms を上書き
+- deny_unknown_fields 準拠
+
+### 更新
+- kb-mcp.toml.example: [watch] 追記
+- README.md: [watch] の config 例 + 「Live-sync via file watcher」節を追加
+- CLAUDE.md: アーキテクチャ表に src/watcher.rs 追加、CLI 例に [watch] を記載
+- TODO.md: feature 12 を実装済にマーク、F12-8/9 を残タスクに降格
+- features.json: feature 12 を passing に
+
+### スコープ外 (拡張、TODO.md に残タスクとして記録)
+- F12-8 frontmatter-only skip: embedding 再計算を避ける最適化
+- F12-9 watcher self-heal: OS 側 watch ハンドル喪失時の backoff 再購読
+
+### verification
+- cargo test: 160 passed (145 → 160、+15: watcher 10 + indexer 2 + config 3)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功
+
+## 2026-04-19: feature 12 拡張 F12-8 + F12-9 を実装
+
+ユーザ要望 (「拡張まで含めて」) に応えて MVP 直後に拡張も実装。
+
+### F12-8: frontmatter-only skip (embedding 再計算回避)
+- db.rs に API を追加:
+  - chunk_texts_for_path(path) -> Vec<(Option<String>, String)>
+    (embedding なし、chunk_index 順)
+  - update_document_meta(path, title, topic, category, depth, tags, date,
+    content_hash) -> bool (meta のみ更新、last_indexed も更新)
+- indexer::index_single_disk_entry 内で parse 後に以下の条件で skip:
+  - force=false
+  - 既存 chunks が空でない
+  - 既存 chunks 数 == 新チャンク数
+  - (heading, content) が全て完全一致
+  - force=true / 新規 / チャンク数変化は通常経路 (embedding 再計算)
+- BGE-M3 で frontmatter だけ変更した場合、embedding 再計算 (数百 ms〜) を
+  完全に skip。content_hash は新値に更新するため次回も hash-skip 経路で OK
+
+### F12-9: watcher self-heal
+- watcher.rs の bridge thread を「外側 loop で debouncer 再構築、失敗時は
+  指数バックオフ (1s → 30s cap)」に。initial create 失敗 / watch() 失敗
+  (ディレクトリ削除等) 時に再試行し、MCP サーバは落とさない
+
+### テスト追加
+- indexer::test_update_document_meta_for_frontmatter_only_change
+- indexer::test_update_document_meta_missing_path_returns_false
+- indexer::test_chunk_texts_for_path_empty_when_not_indexed
+
+### verification
+- cargo test: 163 passed (160 → 163、+3)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功
+
+### 見落とし
+- last_indexed カラム名を最初 indexed_at と間違えた (schema は last_indexed)。
+  テストで検出して修正
+
+## 2026-04-19: feature 12 evaluator High/Med を反映 (FAIL 24/40 → PASS 見込)
+
+evaluator 評価 FAIL 24/40。本番データ破損レベルの High #1 を含む 3 件 High /
+3 件 Medium を反映。
+
+### High #1: rename 二重ディスパッチによる UNIQUE 違反
+問題: `handle_events` が Modify(Name(Both)) を Reindex 側ループと Rename 側
+ループで**両方**ディスパッチしていた → rename-to への upsert の後 path UPDATE
+で UNIQUE 制約違反、旧 path zombie 残存 → search が stale を返す。
+修正: classify(evt) 関数で 1 イベント → 1 分類に排他化
+  - Modify(Name(Both)) / Name(Any) + 2 paths → Rename
+  - Modify(Name(From)) → Deindex
+  - Modify(Name(To)) → Reindex
+  - 他 Modify / Create → Reindex
+  - Remove → Deindex
+  - 他 → Ignore
+
+### High #2: handle_events の分類ロジックが 0% カバー
+修正: classify() に 9 ユニットテストを追加
+  - Create → Reindex
+  - Modify(Data) → Reindex
+  - Remove → Deindex
+  - Rename(Both) 2-path → Rename
+  - Rename(From) 1-path → Deindex
+  - Rename(To) 1-path → Reindex
+  - Rename(Any) 2-path → Rename
+  - **Rename(Both) を Reindex に落とさない回帰ガード** (High #1 の再発防止)
+  - Access → Ignore
+
+### High #3: vacuous な test_reindex_single_file_nonexistent_returns_skipped
+修正: 実関数を呼ばない vacuous test を削除し、SingleResult / RenameOutcome
+の variants distinct テストに置換 (embedder 不要の build-block 検証)。
+実 embedder を要する e2e 検証は Embedder のトレイト化が必要なので今回は見送り、
+今後の F12 拡張で対応可能な形にする。
+
+### Med #4: F12-9 self-heal が初期化時のみで runtime loss に無反応
+修正: park_timeout(30s) で periodic liveness probe を入れ、kb_path が消滅
+したら debouncer を drop して outer loop で再構築 (指数バックオフ 1s→30s cap)。
+
+### Med #5: F12-8 の契約テスト欠如
+修正: test_f12_8_frontmatter_only_skip_db_contract を追加
+  - upsert + insert_chunk で初期状態を作る
+  - chunk_texts_for_path で chunks を取得し期待通りを確認
+  - update_document_meta (frontmatter-only simulation) を呼ぶ
+  - content_hash が新値に、chunks は変わらないことを確認
+
+### Med #6: config テストの欠落
+修正: test_watch_unknown_field_in_config_is_rejected を追加 (deny_unknown_fields
+が Config 経由でも効くことの e2e)。
+
+### Low #7: dead code (quality::DEFAULT_QUALITY_THRESHOLD)
+修正: 削除
+
+### 見送り
+- Low #8 bridge thread leak: コメントで ACK 済、実害なし、HTTP transport で再考
+- Low #9 tokio blocking with std::sync::Mutex: stdio transport では実害なし
+
+### verification
+- cargo test: 175 passed (163 → 175、+12)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功

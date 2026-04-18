@@ -435,6 +435,68 @@ impl Database {
         Ok(result)
     }
 
+    /// [feature 12 F12-8] 指定 path の chunk 本文 (heading, content) を
+    /// chunk_index 順に返す。frontmatter のみ変更かどうかを判定するために
+    /// 既存 chunks のテキストだけを読む。embedding は取得しない (軽量)。
+    pub fn chunk_texts_for_path(
+        &self,
+        path: &str,
+    ) -> Result<Vec<(Option<String>, String)>> {
+        let sql = "
+            SELECT c.heading, c.content
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.path = ?1
+            ORDER BY c.chunk_index
+        ";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![path], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// [feature 12 F12-8] frontmatter-only change 用の document meta 更新。
+    /// chunks は触らず、documents 行の title / date / topic / category /
+    /// depth / tags / content_hash のみ UPDATE する。存在しなければ no-op で
+    /// `Ok(false)`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_document_meta(
+        &self,
+        path: &str,
+        title: Option<&str>,
+        topic: Option<&str>,
+        category: Option<&str>,
+        depth: Option<&str>,
+        tags: &[String],
+        date: Option<&str>,
+        content_hash: &str,
+    ) -> Result<bool> {
+        let tags_json = serde_json::to_string(tags)?;
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        let n = self.conn.execute(
+            "UPDATE documents
+                SET title = ?1,
+                    topic = ?2,
+                    category = ?3,
+                    depth = ?4,
+                    tags = ?5,
+                    date = ?6,
+                    content_hash = ?7,
+                    last_indexed = ?8
+              WHERE path = ?9",
+            params![title, topic, category, depth, tags_json, date, content_hash, updated_at, path],
+        )?;
+        Ok(n > 0)
+    }
+
     /// 指定 `path` に属するチャンクを (chunk_id, embedding, SearchResult) で返す。
     /// Connection Graph の起点シード取得用。存在しなければ empty Vec。
     ///

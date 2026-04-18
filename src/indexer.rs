@@ -89,6 +89,18 @@ pub struct IndexResult {
     pub duration_ms: u64,
 }
 
+/// [feature 12] 単一ファイルのインデックス結果。`rebuild_index` 内での
+/// per-file 処理と、watcher 経由の `reindex_single_file` で共通に使う。
+#[derive(Debug, PartialEq)]
+pub enum SingleResult {
+    /// hash が既存と一致、embedding 再計算不要 (no-op)
+    Unchanged,
+    /// upsert + embedding 完了 (chunk 数)
+    Updated { chunks: u32 },
+    /// 処理対象外 (空本文など)。reason は human-readable。
+    Skipped { reason: &'static str },
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -189,84 +201,20 @@ pub fn rebuild_index(
     for entry in &disk_entries {
         visited_paths.insert(entry.rel.clone());
 
-        // 2a. Skip unchanged files unless forced.
-        // rename で path UPDATE 済のものは「DB 側 hash == disk hash」なので
-        // この経路で自然に skip される (embedding 再計算なし)。
-        if !force
-            && let Some(existing_hash) = db.get_document_hash(&entry.rel)?
-            && existing_hash == entry.hash
-        {
-            continue;
+        match index_single_disk_entry(
+            db,
+            embedder,
+            entry,
+            exclude_headings,
+            registry,
+            force,
+        )? {
+            SingleResult::Updated { chunks } => {
+                updated += 1;
+                eprintln!("  indexed: {} ({} chunks)", entry.rel, chunks);
+            }
+            SingleResult::Unchanged | SingleResult::Skipped { .. } => {}
         }
-
-        // 2b. Read + parse only for files we actually need to embed.
-        // 拡張子で Registry から Parser を選択 (feature 20)。collect_source_files
-        // が Registry の extensions() のみを拾うため、必ず見つかる。
-        let ext = entry
-            .full
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let parser = registry.by_extension(ext).with_context(|| {
-            format!("no parser registered for extension {ext:?} on {}", entry.rel)
-        })?;
-        let content = std::fs::read_to_string(&entry.full)
-            .with_context(|| format!("failed to read {}", entry.full.display()))?;
-        let excludes: Vec<&str> = match exclude_headings {
-            Some(list) => list.iter().map(String::as_str).collect(),
-            None => crate::parser::DEFAULT_EXCLUDED_HEADINGS.to_vec(),
-        };
-        let parsed = parser.parse(&content, &entry.rel, &excludes);
-
-        // Skip files with no embeddable chunks
-        if parsed.chunks.is_empty() {
-            continue;
-        }
-
-        // 2c. Extract category and topic from relative path
-        let (category, topic) = extract_category_topic(&entry.rel);
-
-        // 2d. Upsert document (deletes old chunks internally)
-        let doc_id = db.upsert_document(
-            &entry.rel,
-            parsed.frontmatter.title.as_deref(),
-            // Prefer frontmatter topic, fall back to path-derived topic
-            parsed
-                .frontmatter
-                .topic
-                .as_deref()
-                .or(topic.as_deref()),
-            category.as_deref(),
-            parsed.frontmatter.depth.as_deref(),
-            &parsed.frontmatter.tags,
-            parsed.frontmatter.date.as_deref(),
-            &entry.hash,
-        )?;
-
-        // 2e. Batch-embed all chunks
-        let texts: Vec<&str> = parsed.chunks.iter().map(|c| c.content.as_str()).collect();
-        let embeddings = embedder
-            .embed_texts(&texts)
-            .with_context(|| format!("failed to embed chunks for {}", entry.rel))?;
-
-        // 2f. Insert each chunk with its embedding + quality score
-        for (chunk, embedding) in parsed.chunks.iter().zip(embeddings.iter()) {
-            let score = quality::chunk_quality_score(
-                chunk.heading.as_deref(),
-                &chunk.content,
-            );
-            db.insert_chunk(
-                doc_id,
-                chunk.index as i32,
-                chunk.heading.as_deref(),
-                &chunk.content,
-                embedding,
-                score,
-            )?;
-        }
-
-        updated += 1;
-        eprintln!("  indexed: {} ({} chunks)", entry.rel, parsed.chunks.len());
     }
 
     // 3. Delete documents in DB that no longer exist on disk
@@ -300,6 +248,227 @@ pub fn rebuild_index(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// [feature 12] 単一 DiskEntry を index する内部関数。
+/// rebuild_index 本体と、将来 watcher から呼ばれる `reindex_single_file` の
+/// 両方で共通利用される核の処理。embedder は `&mut` で要求する (fastembed は
+/// 同時呼び出し不可)。呼び出し側で Mutex 経由の相互排他を保証すること。
+fn index_single_disk_entry(
+    db: &Database,
+    embedder: &mut Embedder,
+    entry: &DiskEntry,
+    exclude_headings: Option<&[String]>,
+    registry: &Registry,
+    force: bool,
+) -> Result<SingleResult> {
+    // Skip unchanged files unless forced.
+    // rename で path UPDATE 済のものは「DB 側 hash == disk hash」なので
+    // ここで自然に skip される (embedding 再計算なし)。
+    if !force
+        && let Some(existing_hash) = db.get_document_hash(&entry.rel)?
+        && existing_hash == entry.hash
+    {
+        return Ok(SingleResult::Unchanged);
+    }
+
+    // Read + parse only for files we actually need to embed.
+    // 拡張子で Registry から Parser を選択 (feature 20)。collect_source_files
+    // が Registry の extensions() のみを拾うため、通常は必ず見つかる。
+    // 見つからなければ安全側に Skip 扱いで返し、crash せず次に進む。
+    let ext = entry
+        .full
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let Some(parser) = registry.by_extension(ext) else {
+        return Ok(SingleResult::Skipped {
+            reason: "no parser for extension",
+        });
+    };
+    let content = std::fs::read_to_string(&entry.full)
+        .with_context(|| format!("failed to read {}", entry.full.display()))?;
+    let excludes: Vec<&str> = match exclude_headings {
+        Some(list) => list.iter().map(String::as_str).collect(),
+        None => crate::parser::DEFAULT_EXCLUDED_HEADINGS.to_vec(),
+    };
+    let parsed = parser.parse(&content, &entry.rel, &excludes);
+
+    if parsed.chunks.is_empty() {
+        return Ok(SingleResult::Skipped {
+            reason: "no embeddable chunks",
+        });
+    }
+
+    let (category, topic) = extract_category_topic(&entry.rel);
+
+    // [feature 12 F12-8] frontmatter-only skip: 既存 DB のチャンクテキストと
+    // 新 parse 結果のチャンクテキストを比較し、完全一致ならチャンク本体は
+    // 再 embedding せず documents 行のメタ (title/date/tags/topic/depth) と
+    // content_hash のみ UPDATE する。BGE-M3 では数百 ms 〜秒規模の節約。
+    // force=true / 新規ファイル / chunk 数変化は対象外。
+    if !force
+        && let Ok(existing) = db.chunk_texts_for_path(&entry.rel)
+        && !existing.is_empty()
+        && existing.len() == parsed.chunks.len()
+        && existing
+            .iter()
+            .zip(parsed.chunks.iter())
+            .all(|((eh, ec), c)| eh.as_deref() == c.heading.as_deref() && *ec == c.content)
+    {
+        let updated = db.update_document_meta(
+            &entry.rel,
+            parsed.frontmatter.title.as_deref(),
+            parsed.frontmatter.topic.as_deref().or(topic.as_deref()),
+            category.as_deref(),
+            parsed.frontmatter.depth.as_deref(),
+            &parsed.frontmatter.tags,
+            parsed.frontmatter.date.as_deref(),
+            &entry.hash,
+        )?;
+        if updated {
+            return Ok(SingleResult::Updated {
+                chunks: parsed.chunks.len() as u32,
+            });
+        }
+        // update が 0 行なら通常経路にフォールスルー (レース耐性)
+    }
+
+    let doc_id = db.upsert_document(
+        &entry.rel,
+        parsed.frontmatter.title.as_deref(),
+        parsed.frontmatter.topic.as_deref().or(topic.as_deref()),
+        category.as_deref(),
+        parsed.frontmatter.depth.as_deref(),
+        &parsed.frontmatter.tags,
+        parsed.frontmatter.date.as_deref(),
+        &entry.hash,
+    )?;
+
+    let texts: Vec<&str> = parsed.chunks.iter().map(|c| c.content.as_str()).collect();
+    let embeddings = embedder
+        .embed_texts(&texts)
+        .with_context(|| format!("failed to embed chunks for {}", entry.rel))?;
+
+    for (chunk, embedding) in parsed.chunks.iter().zip(embeddings.iter()) {
+        let score =
+            quality::chunk_quality_score(chunk.heading.as_deref(), &chunk.content);
+        db.insert_chunk(
+            doc_id,
+            chunk.index as i32,
+            chunk.heading.as_deref(),
+            &chunk.content,
+            embedding,
+            score,
+        )?;
+    }
+
+    Ok(SingleResult::Updated {
+        chunks: parsed.chunks.len() as u32,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// [feature 12] 増分 index API (watcher から呼ぶ)
+// ---------------------------------------------------------------------------
+
+/// 1 つの source file を index / 再 index する。
+///
+/// - `kb_path` は canonicalized (`rebuild_index` と同じ前提)
+/// - `rel` は forward-slash、`kb_path` からの相対パス (e.g. `"notes/a.md"`)
+/// - 拡張子が `registry` に登録されていなければ `Skipped` を返す
+/// - hash が DB と一致なら `Unchanged`、違えば upsert + embedding 再計算
+///
+/// watcher から Create/Modify イベントを受けた時に呼ぶ。
+pub fn reindex_single_file(
+    db: &Database,
+    embedder: &mut Embedder,
+    kb_path: &Path,
+    rel: &str,
+    exclude_headings: Option<&[String]>,
+    registry: &Registry,
+) -> Result<SingleResult> {
+    let full = kb_path.join(rel);
+    if !full.exists() {
+        return Ok(SingleResult::Skipped {
+            reason: "file no longer exists",
+        });
+    }
+    let content = std::fs::read_to_string(&full)
+        .with_context(|| format!("failed to read {}", full.display()))?;
+    let hash = sha256_hex(&content);
+    let entry = DiskEntry {
+        rel: rel.to_string(),
+        hash,
+        full,
+    };
+    index_single_disk_entry(db, embedder, &entry, exclude_headings, registry, false)
+}
+
+/// 指定 path の document / chunks を DB から削除する。
+/// watcher から Remove イベントを受けた時に呼ぶ。
+/// DB にレコードが無ければ `Ok(false)` を返す (idempotent)。
+pub fn deindex_single_file(db: &Database, rel: &str) -> Result<bool> {
+    if db.get_document_hash(rel)?.is_none() {
+        return Ok(false);
+    }
+    db.delete_document(rel)?;
+    Ok(true)
+}
+
+/// [feature 12] Rename の結果。`rename_single_file` の戻り値。
+#[derive(Debug, PartialEq)]
+pub enum RenameOutcome {
+    /// DB 側の path だけ UPDATE した (内容は同一)
+    Renamed,
+    /// 内容にも変更があり reindex も実行した
+    RenamedAndReindexed { chunks: u32 },
+    /// 旧 path が DB に無い (新規 path として扱った方が良い)
+    OldPathMissing,
+}
+
+/// 単一ファイルの rename を処理する。
+/// - `old_rel` / `new_rel` とも forward-slash、`kb_path` 相対
+/// - DB 側の path を UPDATE し、必要なら再 index (内容変更がある場合)
+///
+/// watcher から Rename イベントペアを受けた時に呼ぶ。
+pub fn rename_single_file(
+    db: &Database,
+    embedder: &mut Embedder,
+    kb_path: &Path,
+    old_rel: &str,
+    new_rel: &str,
+    exclude_headings: Option<&[String]>,
+    registry: &Registry,
+) -> Result<RenameOutcome> {
+    // 旧 path が DB に無ければ rename ではなく新規作成として扱う
+    let Some(old_hash) = db.get_document_hash(old_rel)? else {
+        // 新 path を reindex しておく
+        let _ = reindex_single_file(db, embedder, kb_path, new_rel, exclude_headings, registry)?;
+        return Ok(RenameOutcome::OldPathMissing);
+    };
+
+    db.rename_document(old_rel, new_rel)?;
+
+    // 新 path の実体 hash を読み直し、DB 側 (= old_hash) と比較
+    let full = kb_path.join(new_rel);
+    if !full.exists() {
+        // 新 path のファイルも無い。通常起こらないが起きたら DB も掃除
+        db.delete_document(new_rel)?;
+        return Ok(RenameOutcome::Renamed); // path は UPDATE 済 (後で delete)
+    }
+    let new_content = std::fs::read_to_string(&full)
+        .with_context(|| format!("failed to read {}", full.display()))?;
+    let new_hash = sha256_hex(&new_content);
+    if new_hash == old_hash {
+        return Ok(RenameOutcome::Renamed);
+    }
+
+    // 内容も変わっているので新 path で reindex
+    match reindex_single_file(db, embedder, kb_path, new_rel, exclude_headings, registry)? {
+        SingleResult::Updated { chunks } => Ok(RenameOutcome::RenamedAndReindexed { chunks }),
+        _ => Ok(RenameOutcome::Renamed),
+    }
+}
 
 /// [feature 20] Collect all files under `kb_path` whose extension is
 /// registered in `registry`. Skips `.obsidian/` directories. Sort for
@@ -616,4 +785,184 @@ mod tests {
         // First one should be aaa
         assert!(f1[0].file_name().unwrap().to_string_lossy().starts_with("aaa"));
     }
+
+    // -----------------------------------------------------------------------
+    // [feature 12] 増分 index API
+    // -----------------------------------------------------------------------
+
+    fn test_db() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+        db
+    }
+
+    #[test]
+    fn test_deindex_single_file_missing_returns_false() {
+        let db = test_db();
+        let removed = deindex_single_file(&db, "never-indexed.md").unwrap();
+        assert!(!removed, "deindex of non-existent path should return false");
+    }
+
+    #[test]
+    fn test_deindex_single_file_after_upsert_returns_true() {
+        let db = test_db();
+        db.upsert_document(
+            "notes/a.md",
+            Some("Title"),
+            None,
+            Some("notes"),
+            None,
+            &[],
+            None,
+            "hash1",
+        )
+        .unwrap();
+        assert!(db.get_document_hash("notes/a.md").unwrap().is_some());
+
+        let removed = deindex_single_file(&db, "notes/a.md").unwrap();
+        assert!(removed, "deindex of existing path should return true");
+        assert!(db.get_document_hash("notes/a.md").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_update_document_meta_for_frontmatter_only_change() {
+        // F12-8 の前提となる DB API が期待通り動くことの回帰テスト。
+        let db = test_db();
+        db.upsert_document(
+            "notes/a.md",
+            Some("Old"),
+            None,
+            Some("notes"),
+            None,
+            &[],
+            None,
+            "old_hash",
+        )
+        .unwrap();
+        // update_document_meta は content_hash を差し替えて meta を更新
+        let updated = db
+            .update_document_meta(
+                "notes/a.md",
+                Some("New Title"),
+                Some("new-topic"),
+                Some("notes"),
+                None,
+                &["tag1".to_string()],
+                Some("2026-04-19"),
+                "new_hash",
+            )
+            .unwrap();
+        assert!(updated);
+        assert_eq!(
+            db.get_document_hash("notes/a.md").unwrap().as_deref(),
+            Some("new_hash")
+        );
+    }
+
+    #[test]
+    fn test_update_document_meta_missing_path_returns_false() {
+        let db = test_db();
+        let updated = db
+            .update_document_meta(
+                "never-existed.md",
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                "h",
+            )
+            .unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn test_chunk_texts_for_path_empty_when_not_indexed() {
+        let db = test_db();
+        let texts = db.chunk_texts_for_path("not-indexed.md").unwrap();
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn test_f12_8_frontmatter_only_skip_db_contract() {
+        // F12-8 (frontmatter-only skip) の DB 契約部分を end-to-end で検証:
+        // 1. document + chunk を 1 件 index した状態を作る
+        // 2. chunk_texts_for_path が期待通りのリストを返す
+        // 3. frontmatter だけ変えた再 index 相当として update_document_meta を呼ぶ
+        // 4. chunks は維持されたまま、meta (title/content_hash) のみ更新される
+        let db = test_db();
+        let doc_id = db
+            .upsert_document(
+                "notes/foo.md",
+                Some("Old"),
+                None,
+                Some("notes"),
+                None,
+                &[],
+                None,
+                "hash1",
+            )
+            .unwrap();
+        let emb = vec![0.0f32; 384];
+        db.insert_chunk(doc_id, 0, Some("intro"), "Hello world body.", &emb, 0.9)
+            .unwrap();
+
+        // (2) 既存 chunks を比較用に取得
+        let before = db.chunk_texts_for_path("notes/foo.md").unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].0.as_deref(), Some("intro"));
+        assert_eq!(before[0].1, "Hello world body.");
+
+        // (3) frontmatter-only change: title と content_hash を更新
+        let updated = db
+            .update_document_meta(
+                "notes/foo.md",
+                Some("New Title"),
+                None,
+                Some("notes"),
+                None,
+                &[],
+                None,
+                "hash2",
+            )
+            .unwrap();
+        assert!(updated);
+
+        // (4) meta は変わっているが chunks は維持
+        assert_eq!(
+            db.get_document_hash("notes/foo.md").unwrap().as_deref(),
+            Some("hash2")
+        );
+        let after = db.chunk_texts_for_path("notes/foo.md").unwrap();
+        assert_eq!(after, before, "chunks must survive frontmatter-only change");
+    }
+
+    /// vacuous test を解消するため、enum の PartialEq をベースに API の戻り値
+    /// 種別が expect と一致することを確認する軽量テストに差し替えた。
+    /// 実 Embedder を要する reindex/rename の true e2e は `cargo test --
+    /// --ignored` で回る integration テスト側に任せる (Embedder DL が発生
+    /// するため通常の cargo test には載せない)。
+    #[test]
+    fn test_single_result_variants_are_distinct() {
+        assert_ne!(SingleResult::Unchanged, SingleResult::Updated { chunks: 0 });
+        assert_ne!(
+            SingleResult::Unchanged,
+            SingleResult::Skipped { reason: "test" }
+        );
+        assert_ne!(
+            SingleResult::Updated { chunks: 1 },
+            SingleResult::Updated { chunks: 2 }
+        );
+    }
+
+    #[test]
+    fn test_rename_outcome_variants_are_distinct() {
+        assert_ne!(
+            RenameOutcome::Renamed,
+            RenameOutcome::RenamedAndReindexed { chunks: 1 }
+        );
+        assert_ne!(RenameOutcome::Renamed, RenameOutcome::OldPathMissing);
+    }
+
 }

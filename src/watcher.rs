@@ -1,0 +1,616 @@
+//! [feature 12] File watcher that debounces OS events and dispatches them to
+//! the incremental index API (`indexer::reindex_single_file` /
+//! `deindex_single_file` / `rename_single_file`).
+//!
+//! Architecture:
+//!
+//! ```text
+//! notify-debouncer-full (std::sync::mpsc::Sender)
+//!        │  DebouncedEvent batches
+//!        ▼
+//!   bridge thread
+//!        │  tokio::mpsc::UnboundedSender
+//!        ▼
+//!   tokio task (run_watch_loop)
+//!        │  classify events, lookup Mutex<Database> / Mutex<Embedder>
+//!        ▼
+//!   indexer::{reindex,deindex,rename}_single_file
+//! ```
+//!
+//! The bridge thread is necessary because `notify-debouncer-full` ships with
+//! `std::sync::mpsc` and must run synchronously. Keeping the dispatch side on
+//! the tokio runtime lets us `select!` it against `service.waiting()` so the
+//! MCP server and the watcher run concurrently.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use anyhow::Result;
+use notify::RecursiveMode;
+use notify_debouncer_full::{
+    DebouncedEvent, new_debouncer,
+};
+use notify_debouncer_full::notify::event::{EventKind, ModifyKind, RenameMode};
+use serde::Deserialize;
+use tokio::sync::mpsc;
+
+use crate::db::Database;
+use crate::embedder::Embedder;
+use crate::indexer;
+use crate::parser::Registry;
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+/// [feature 12] `[watch]` セクション (`kb-mcp.toml`)。
+///
+/// - `enabled` 省略時: `true` (kb-mcp の値提案 = "常に fresh" を守るため)
+/// - `debounce_ms` 省略時: 500ms。エディタの save が複数イベントを生む
+///   ケースを吸収するのに十分な長さ
+///
+/// セクション自体が無ければ `WatchConfig::default()` (= enabled=true,
+/// debounce=500ms) が適用される。`--no-watch` CLI flag で opt-out 可能。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WatchConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+fn default_debounce_ms() -> u64 {
+    500
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            debounce_ms: default_debounce_ms(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// 共有状態。`run_watch_loop` が `tokio::select!` の一方として起動される。
+/// 各イベントは `Mutex<Database>` / `Mutex<Embedder>` を順にロックして直列化する
+/// (fastembed は同時呼び出し不可、rusqlite も writer 1 本想定)。
+#[allow(dead_code)]
+pub struct WatcherState {
+    pub kb_path: PathBuf,
+    pub db: Arc<Mutex<Database>>,
+    pub embedder: Arc<Mutex<Embedder>>,
+    pub registry: Arc<Registry>,
+    pub exclude_headings: Option<Vec<String>>,
+    pub config: WatchConfig,
+}
+
+/// Watcher タスク本体。notify の裏スレッドから tokio channel 越しにイベントを
+/// 受け取り、indexer 増分 API にディスパッチする。
+///
+/// `enabled = false` なら即座に `Ok(())` を返す (watcher は起動しない)。
+/// タスク内部での処理エラーはログに流して次のイベントへ進む (silent drop 禁止)。
+/// tokio task が panic しないよう各イベント処理は `catch_unwind` 相当の防衛線を
+/// 張らない代わりに、error 経路は `eprintln!` で可視化する。
+pub async fn run_watch_loop(state: WatcherState) -> Result<()> {
+    if !state.config.enabled {
+        return Ok(());
+    }
+
+    let (tx_async, mut rx_async) = mpsc::unbounded_channel::<Vec<DebouncedEvent>>();
+    let debounce = Duration::from_millis(state.config.debounce_ms);
+    let kb_watch_path = state.kb_path.clone();
+
+    // bridge thread: std::sync::mpsc → tokio::sync::mpsc
+    // [feature 12 F12-9] watch 初期化や watch() が失敗 (ディレクトリ削除等) した
+    // 場合は指数バックオフで再試行する。30 秒以内に復帰できなければ次周で延期。
+    let _bridge = std::thread::Builder::new()
+        .name("kb-mcp-watcher".to_string())
+        .spawn(move || {
+            // 外側ループ = self-heal。debouncer ハンドルが生きている間は
+            // inner parking で停止、壊れたら backoff して再構築。
+            let mut backoff = Duration::from_secs(1);
+            let max_backoff = Duration::from_secs(30);
+            loop {
+                let tx_clone = tx_async.clone();
+                let debouncer_result = new_debouncer(
+                    debounce,
+                    None,
+                    move |res: notify_debouncer_full::DebounceEventResult| match res {
+                        Ok(events) => {
+                            if tx_clone.send(events).is_err() {
+                                // receiver (tokio task) drop → 静かに終了
+                            }
+                        }
+                        Err(errs) => {
+                            for e in errs {
+                                eprintln!("watcher: debouncer error: {e:?}");
+                            }
+                        }
+                    },
+                );
+                let mut debouncer = match debouncer_result {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!(
+                            "watcher: failed to create debouncer: {e} (retry in {}s)",
+                            backoff.as_secs()
+                        );
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(max_backoff);
+                        continue;
+                    }
+                };
+                if let Err(e) = debouncer.watch(&kb_watch_path, RecursiveMode::Recursive)
+                {
+                    eprintln!(
+                        "watcher: failed to watch {}: {e} (retry in {}s)",
+                        kb_watch_path.display(),
+                        backoff.as_secs()
+                    );
+                    drop(debouncer);
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(max_backoff);
+                    continue;
+                }
+                // 成功: backoff をリセット
+                backoff = Duration::from_secs(1);
+                // [F12-9] periodic liveness probe: 30 秒ごとに kb_path の
+                // 存在確認をして、ディレクトリが消えていたら debouncer を
+                // drop して再構築する。inotify は親ディレクトリ削除時に
+                // 無音で死ぬため明示的な polling が必要。
+                let probe_interval = Duration::from_secs(30);
+                loop {
+                    std::thread::park_timeout(probe_interval);
+                    if !kb_watch_path.exists() {
+                        eprintln!(
+                            "watcher: kb_path {} vanished, will retry",
+                            kb_watch_path.display()
+                        );
+                        break;
+                    }
+                }
+                drop(debouncer);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("failed to spawn watcher thread: {e}"))?;
+
+    eprintln!(
+        "watcher started ({:?} debounce, {:?})",
+        debounce,
+        state.registry.extensions()
+    );
+
+    while let Some(events) = rx_async.recv().await {
+        handle_events(&state, &events);
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Internal
+// ---------------------------------------------------------------------------
+
+/// 単一 event を以下のどれかに分類する (evaluator High #1 対応):
+/// - Rename (from, to): notify-debouncer-full が paths.len()==2 で渡してきたペア
+/// - Reindex: Create / Data/Metadata/Any/Other Modify (Name は除外)
+/// - Deindex: Remove / Name(From) のみの 1-path 版
+/// - Ignore: Access / Other 種別
+///
+/// 1 パスを同じ batch 内で「reindex も rename も」両方ディスパッチすると、
+/// rename-to のパスに対して upsert + その後の path UPDATE で UNIQUE 制約違反が
+/// 起きるため、この関数で排他的に分類する。
+#[derive(Debug, PartialEq)]
+enum Classified<'a> {
+    Rename { from: &'a std::path::PathBuf, to: &'a std::path::PathBuf },
+    Reindex(&'a [std::path::PathBuf]),
+    Deindex(&'a [std::path::PathBuf]),
+    Ignore,
+}
+
+fn classify(evt: &DebouncedEvent) -> Classified<'_> {
+    match &evt.event.kind {
+        // rename ペアが debouncer で stitch 済みのケース (macOS / Windows で頻出)
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if evt.paths.len() == 2 => {
+            Classified::Rename {
+                from: &evt.paths[0],
+                to: &evt.paths[1],
+            }
+        }
+        // 一般的な Modify(Name(Any)) 等で paths.len()==2 のケース
+        EventKind::Modify(ModifyKind::Name(_)) if evt.paths.len() == 2 => {
+            Classified::Rename {
+                from: &evt.paths[0],
+                to: &evt.paths[1],
+            }
+        }
+        // Name(From) 単独 → 旧 path の削除として扱う
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Classified::Deindex(&evt.paths),
+        // Name(To) / Name(Any) で 1 path → 新 path の reindex として扱う
+        EventKind::Modify(ModifyKind::Name(_)) => Classified::Reindex(&evt.paths),
+        // その他の Modify (Data / Metadata / Any / Other) は reindex
+        EventKind::Modify(_) | EventKind::Create(_) => Classified::Reindex(&evt.paths),
+        EventKind::Remove(_) => Classified::Deindex(&evt.paths),
+        _ => Classified::Ignore,
+    }
+}
+
+/// debounced event batch を分類して indexer に流す。
+fn handle_events(state: &WatcherState, events: &[DebouncedEvent]) {
+    for evt in events {
+        match classify(evt) {
+            Classified::Rename { from, to } => {
+                let (Some(old_rel), Some(new_rel)) = (
+                    to_rel(&state.kb_path, from),
+                    to_rel(&state.kb_path, to),
+                ) else {
+                    continue;
+                };
+                if !should_process(&new_rel, to, state)
+                    && !should_process(&old_rel, from, state)
+                {
+                    continue;
+                }
+                dispatch_rename(state, &old_rel, &new_rel);
+            }
+            Classified::Reindex(paths) => {
+                for p in paths {
+                    if let Some(rel) = to_rel(&state.kb_path, p)
+                        && should_process(&rel, p, state)
+                    {
+                        dispatch_reindex(state, &rel);
+                    }
+                }
+            }
+            Classified::Deindex(paths) => {
+                for p in paths {
+                    if let Some(rel) = to_rel(&state.kb_path, p)
+                        && should_process(&rel, p, state)
+                    {
+                        dispatch_deindex(state, &rel);
+                    }
+                }
+            }
+            Classified::Ignore => {}
+        }
+    }
+}
+
+/// 対象ファイルの拡張子が `registry` にあり、`.obsidian/` 配下でないこと。
+fn should_process(rel: &str, full: &Path, state: &WatcherState) -> bool {
+    // `.obsidian/` 配下は無視 (rebuild_index と同じ扱い)
+    if rel.starts_with(".obsidian/") || rel.contains("/.obsidian/") {
+        return false;
+    }
+    // `.kb-mcp.db*` は kb_path の外にあるので通常ヒットしないが念のため
+    if rel.ends_with(".kb-mcp.db") || rel.ends_with(".kb-mcp.db-journal") {
+        return false;
+    }
+    let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
+    state
+        .registry
+        .extensions()
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// 絶対パスを kb_path 相対 (forward-slash) に変換。kb_path 外ならエラーを
+/// ログに出して `None`。
+fn to_rel(kb_path: &Path, full: &Path) -> Option<String> {
+    match full.strip_prefix(kb_path) {
+        Ok(rel) => Some(rel.to_string_lossy().replace('\\', "/")),
+        Err(_) => {
+            // canonicalize ズレで失敗することがある — 再度 canonicalize して再試行
+            full.canonicalize()
+                .ok()
+                .and_then(|c| c.strip_prefix(kb_path).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
+        }
+    }
+}
+
+fn dispatch_reindex(state: &WatcherState, rel: &str) {
+    let Ok(mut embedder) = state.embedder.lock() else {
+        eprintln!("watcher: embedder mutex poisoned");
+        return;
+    };
+    let Ok(db) = state.db.lock() else {
+        eprintln!("watcher: db mutex poisoned");
+        return;
+    };
+    match indexer::reindex_single_file(
+        &db,
+        &mut embedder,
+        &state.kb_path,
+        rel,
+        state.exclude_headings.as_deref(),
+        &state.registry,
+    ) {
+        Ok(indexer::SingleResult::Updated { chunks }) => {
+            eprintln!("watcher: reindexed {rel} ({chunks} chunks)");
+        }
+        Ok(indexer::SingleResult::Unchanged) => { /* no-op */ }
+        Ok(indexer::SingleResult::Skipped { reason }) => {
+            eprintln!("watcher: skipped {rel} ({reason})");
+        }
+        Err(e) => {
+            eprintln!("watcher: reindex {rel} failed: {e}");
+        }
+    }
+}
+
+fn dispatch_deindex(state: &WatcherState, rel: &str) {
+    let Ok(db) = state.db.lock() else {
+        eprintln!("watcher: db mutex poisoned");
+        return;
+    };
+    match indexer::deindex_single_file(&db, rel) {
+        Ok(true) => eprintln!("watcher: deindexed {rel}"),
+        Ok(false) => { /* no-op: not in DB */ }
+        Err(e) => eprintln!("watcher: deindex {rel} failed: {e}"),
+    }
+}
+
+fn dispatch_rename(state: &WatcherState, old_rel: &str, new_rel: &str) {
+    let Ok(mut embedder) = state.embedder.lock() else {
+        eprintln!("watcher: embedder mutex poisoned");
+        return;
+    };
+    let Ok(db) = state.db.lock() else {
+        eprintln!("watcher: db mutex poisoned");
+        return;
+    };
+    match indexer::rename_single_file(
+        &db,
+        &mut embedder,
+        &state.kb_path,
+        old_rel,
+        new_rel,
+        state.exclude_headings.as_deref(),
+        &state.registry,
+    ) {
+        Ok(indexer::RenameOutcome::Renamed) => {
+            eprintln!("watcher: renamed {old_rel} -> {new_rel}");
+        }
+        Ok(indexer::RenameOutcome::RenamedAndReindexed { chunks }) => {
+            eprintln!(
+                "watcher: renamed+reindexed {old_rel} -> {new_rel} ({chunks} chunks)"
+            );
+        }
+        Ok(indexer::RenameOutcome::OldPathMissing) => {
+            eprintln!("watcher: rename target {old_rel} not in DB, indexed {new_rel}");
+        }
+        Err(e) => eprintln!("watcher: rename {old_rel} -> {new_rel} failed: {e}"),
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_watch_config_default() {
+        let c = WatchConfig::default();
+        assert!(c.enabled);
+        assert_eq!(c.debounce_ms, 500);
+    }
+
+    #[test]
+    fn test_watch_config_from_toml_full() {
+        let toml = "enabled = false\ndebounce_ms = 1000\n";
+        let c: WatchConfig = toml::from_str(toml).unwrap();
+        assert!(!c.enabled);
+        assert_eq!(c.debounce_ms, 1000);
+    }
+
+    #[test]
+    fn test_watch_config_from_toml_partial_uses_defaults() {
+        let c: WatchConfig = toml::from_str("debounce_ms = 250\n").unwrap();
+        assert!(c.enabled, "missing enabled must default to true");
+        assert_eq!(c.debounce_ms, 250);
+    }
+
+    #[test]
+    fn test_watch_config_rejects_unknown_fields() {
+        let err: Result<WatchConfig, _> =
+            toml::from_str("enabled = true\nbogus = 1\n");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_to_rel_basic() {
+        let kb = std::env::temp_dir().join("kb-mcp-watcher-torel");
+        std::fs::create_dir_all(&kb).unwrap();
+        let kb = kb.canonicalize().unwrap();
+        let full = kb.join("notes").join("a.md");
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, "").unwrap();
+        let full = full.canonicalize().unwrap();
+        assert_eq!(to_rel(&kb, &full), Some("notes/a.md".to_string()));
+        let _ = std::fs::remove_dir_all(&kb);
+    }
+
+    /// `should_process` は WatcherState のうち `kb_path` と `registry` しか
+    /// 見ないので、test 用にその 2 つだけ差し込んだ軽量判定ヘルパを用意する
+    /// (`Database` / `Embedder` のダミー構築を避けるため)。
+    fn should_process_lite(rel: &str, full: &Path, registry: &Registry) -> bool {
+        if rel.starts_with(".obsidian/") || rel.contains("/.obsidian/") {
+            return false;
+        }
+        if rel.ends_with(".kb-mcp.db") || rel.ends_with(".kb-mcp.db-journal") {
+            return false;
+        }
+        let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
+        registry
+            .extensions()
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(ext))
+    }
+
+    #[test]
+    fn test_should_process_lite_md_ok() {
+        let reg = Registry::defaults();
+        let full = Path::new("/tmp/a/notes/a.md");
+        assert!(should_process_lite("notes/a.md", full, &reg));
+    }
+
+    #[test]
+    fn test_should_process_lite_obsidian_rejected() {
+        let reg = Registry::defaults();
+        let full = Path::new("/tmp/a/.obsidian/workspace.md");
+        assert!(!should_process_lite(".obsidian/workspace.md", full, &reg));
+        let full2 = Path::new("/tmp/a/sub/.obsidian/x.md");
+        assert!(!should_process_lite("sub/.obsidian/x.md", full2, &reg));
+    }
+
+    #[test]
+    fn test_should_process_lite_wrong_extension() {
+        let reg = Registry::defaults();
+        let full = Path::new("/tmp/a/notes/a.txt");
+        assert!(!should_process_lite("notes/a.txt", full, &reg));
+    }
+
+    #[test]
+    fn test_should_process_lite_txt_accepted_when_opted_in() {
+        let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
+        let full = Path::new("/tmp/a/notes/a.txt");
+        assert!(should_process_lite("notes/a.txt", full, &reg));
+    }
+
+    #[test]
+    fn test_should_process_lite_db_file_rejected() {
+        let reg = Registry::defaults();
+        let full = Path::new("/tmp/a/.kb-mcp.db");
+        assert!(!should_process_lite(".kb-mcp.db", full, &reg));
+    }
+
+    // -----------------------------------------------------------------------
+    // classify() のイベント分類テスト (evaluator High #1 / #2 回帰ガード)
+    // -----------------------------------------------------------------------
+
+    use notify_debouncer_full::notify::Event;
+    use std::time::Instant;
+
+    fn mk_evt(kind: EventKind, paths: Vec<PathBuf>) -> DebouncedEvent {
+        let mut event = Event::new(kind);
+        event.paths = paths;
+        DebouncedEvent {
+            event,
+            time: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn test_classify_create_is_reindex() {
+        let evt = mk_evt(
+            EventKind::Create(notify_debouncer_full::notify::event::CreateKind::File),
+            vec![PathBuf::from("/tmp/a.md")],
+        );
+        match classify(&evt) {
+            Classified::Reindex(paths) => assert_eq!(paths.len(), 1),
+            other => panic!("expected Reindex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_modify_data_is_reindex() {
+        let evt = mk_evt(
+            EventKind::Modify(ModifyKind::Data(
+                notify_debouncer_full::notify::event::DataChange::Content,
+            )),
+            vec![PathBuf::from("/tmp/a.md")],
+        );
+        assert!(matches!(classify(&evt), Classified::Reindex(_)));
+    }
+
+    #[test]
+    fn test_classify_remove_is_deindex() {
+        let evt = mk_evt(
+            EventKind::Remove(notify_debouncer_full::notify::event::RemoveKind::File),
+            vec![PathBuf::from("/tmp/a.md")],
+        );
+        assert!(matches!(classify(&evt), Classified::Deindex(_)));
+    }
+
+    #[test]
+    fn test_classify_rename_both_two_paths_is_rename() {
+        let evt = mk_evt(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            vec![PathBuf::from("/tmp/from.md"), PathBuf::from("/tmp/to.md")],
+        );
+        match classify(&evt) {
+            Classified::Rename { from, to } => {
+                assert!(from.ends_with("from.md"));
+                assert!(to.ends_with("to.md"));
+            }
+            other => panic!("expected Rename, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_rename_from_only_is_deindex() {
+        // Linux inotify で ペア化されなかった From 単独 → 旧 path 削除
+        let evt = mk_evt(
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            vec![PathBuf::from("/tmp/from.md")],
+        );
+        assert!(matches!(classify(&evt), Classified::Deindex(_)));
+    }
+
+    #[test]
+    fn test_classify_rename_to_only_is_reindex() {
+        let evt = mk_evt(
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            vec![PathBuf::from("/tmp/to.md")],
+        );
+        assert!(matches!(classify(&evt), Classified::Reindex(_)));
+    }
+
+    #[test]
+    fn test_classify_rename_name_any_two_paths_is_rename() {
+        // 古い notify / 別プラットフォームで Any + 2 paths が来ても rename 扱い
+        let evt = mk_evt(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            vec![PathBuf::from("/tmp/from.md"), PathBuf::from("/tmp/to.md")],
+        );
+        assert!(matches!(classify(&evt), Classified::Rename { .. }));
+    }
+
+    #[test]
+    fn test_classify_rename_both_event_does_not_also_trigger_reindex() {
+        // evaluator High #1 の回帰ガード: Modify(Name(Both)) は絶対に
+        // Reindex 経路に落ちないこと (二重ディスパッチ防止)。
+        let evt = mk_evt(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            vec![PathBuf::from("/tmp/from.md"), PathBuf::from("/tmp/to.md")],
+        );
+        let c = classify(&evt);
+        assert!(
+            !matches!(c, Classified::Reindex(_)),
+            "Modify(Name(Both)) must never be Reindex: {c:?}"
+        );
+    }
+
+    #[test]
+    fn test_classify_access_is_ignore() {
+        let evt = mk_evt(
+            EventKind::Access(notify_debouncer_full::notify::event::AccessKind::Any),
+            vec![PathBuf::from("/tmp/a.md")],
+        );
+        assert!(matches!(classify(&evt), Classified::Ignore));
+    }
+}
