@@ -202,8 +202,9 @@ impl Database {
                 token_count   INTEGER,
                 quality_score REAL NOT NULL DEFAULT 1.0
             );
-            CREATE INDEX IF NOT EXISTS idx_chunks_quality
-              ON chunks(quality_score);
+            -- quality_score のインデックスは `ensure_quality_score_column` で
+            -- 列存在保証の後にまとめて作成する (pre-feature-13 DB は ALTER が
+            -- 先に走る必要があるため、ここでは列だけ用意する)。
             ",
         )?;
 
@@ -237,6 +238,10 @@ impl Database {
     /// `chunks.quality_score` 列が存在しなければ追加する (idempotent)。
     /// feature 13 より前に作られた DB を開いても失敗しないよう init 経路から
     /// 呼ぶ。新規 DB では `CREATE TABLE` 時点で列があるので no-op。
+    ///
+    /// 2 プロセスが同時に open して race した場合、後着プロセスの ALTER が
+    /// `duplicate column name: quality_score` を返すので、このエラーだけは
+    /// 吸収して正常復帰する (他の SQLite エラーはそのまま伝播)。
     fn ensure_quality_score_column(&self) -> Result<()> {
         let has_col: bool = self
             .conn
@@ -245,11 +250,25 @@ impl Database {
             .filter_map(std::result::Result::ok)
             .any(|name| name == "quality_score");
         if !has_col {
-            self.conn.execute_batch(
-                "ALTER TABLE chunks ADD COLUMN quality_score REAL NOT NULL DEFAULT 1.0;
-                 CREATE INDEX IF NOT EXISTS idx_chunks_quality ON chunks(quality_score);",
-            )?;
+            match self.conn.execute_batch(
+                "ALTER TABLE chunks ADD COLUMN quality_score REAL NOT NULL DEFAULT 1.0;",
+            ) {
+                Ok(()) => {}
+                // 他プロセスが先に ALTER した場合 (race) はエラーを飲み込んで継続。
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(e.into()),
+            }
         }
+        // 新規 DB でも pre-feature-13 DB でも、列が確保された後に同じ
+        // INDEX (IF NOT EXISTS) を必ず張る。
+        //
+        // KNN / FTS 経由の search は vec_chunks / fts_chunks 駆動で chunks を
+        // JOIN 後に Rust 側で filter するため、このインデックスは検索パス
+        // では使われない。`chunk_count_by_quality` (status 表示) および
+        // 将来の「低品質チャンクだけ一覧」クエリ用の副次インデックス。
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_quality ON chunks(quality_score);",
+        )?;
         Ok(())
     }
 
@@ -553,8 +572,8 @@ impl Database {
             return Ok(Vec::new());
         };
 
-        let has_filters =
-            category.is_some() || topic.is_some() || min_quality > 0.0;
+        // min_quality による選択率低下は無視 (Med #5 と同じ理由)。
+        let has_filters = category.is_some() || topic.is_some();
         let fetch_limit = if has_filters {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)
@@ -734,8 +753,10 @@ impl Database {
         topic: Option<&str>,
         min_quality: f32,
     ) -> Result<Vec<(i64, SearchResult)>> {
-        let has_filters =
-            category.is_some() || topic.is_some() || min_quality > 0.0;
+        // category / topic は Rust 側フィルタなので over-fetch する。
+        // min_quality は SQL 側で選択率が変わるが、実運用で低品質チャンクは
+        // ごく一部のため常時 over-fetch は無駄 (evaluator 指摘 Med #5)。
+        let has_filters = category.is_some() || topic.is_some();
         let fetch_k = if has_filters {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)

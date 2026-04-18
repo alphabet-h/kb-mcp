@@ -27,6 +27,12 @@ fastembed_cache_dir = "/home/you/.cache/huggingface/hub"
 # Heading substrings to exclude from chunking. Omit the key for the default
 # ["次の深堀り候補"]. An explicit empty array disables exclusion entirely.
 exclude_headings = ["次の深堀り候補", "参考リンク"]
+
+# Per-chunk quality filter (feature 13). Enabled by default, threshold 0.3.
+# Set `enabled = false` to restore pre-feature-13 behavior (return every chunk).
+[quality_filter]
+enabled = true
+threshold = 0.3
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
@@ -122,7 +128,7 @@ kb-mcp search "E0382" --category deep-dive --format json | jq '.[] | .path'
 kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # optional per-invocation rerank
 ```
 
-`--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
+`--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The quality filter is on by default — pass `--include-low-quality` or `--min-quality 0` to restore pre-feature-13 behavior for a single query. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
 
 Typical skill-bin use: a Claude Code skill places `kb-mcp.exe` + `kb-mcp.toml` in its `bin/`, then a command like `kb-mcp search "{{user_query}}" --format text --limit 3` returns a focused reference excerpt for the LLM to cite.
 
@@ -249,7 +255,7 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 
 | Tool | Description | Key parameters |
 |---|---|---|
-| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion, optionally followed by cross-encoder reranking. Returns chunks ranked by relevance. | `query` (required), `limit`, `category`, `topic`, `rerank` (override server default) |
+| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion, optionally followed by cross-encoder reranking. Returns chunks ranked by relevance. | `query` (required), `limit`, `category`, `topic`, `rerank` (override server default), `min_quality` (override quality filter 0.0-1.0), `include_low_quality` (disable the filter for this query) |
 | `list_topics` | List all indexed topics and categories with document counts. | (none) |
 | `get_document` | Get the full content and metadata of a document by its relative path. | `path` (e.g. `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | Get a PERFECT.md best-practices document, optionally extracting a specific h2 section. | `target` (e.g. `"claude-code"`), `category` (optional) |
@@ -269,3 +275,4 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 - **Optional reranking**: With `--reranker <model>` the top candidates are re-scored by a cross-encoder before being returned. When rerank is applied, `score` is the cross-encoder raw score instead of the RRF value. Reranking is index-independent — you can toggle it at server start without re-indexing.
 - **Connection graph**: `get_connection_graph` / `kb-mcp graph` do BFS over the vector index starting from a document. No extra index is built; every hop runs a fresh sqlite-vec KNN. Bounded by `depth ≤ 3` / `fan_out ≤ 20` with client-side clamping, so worst-case is ~21 KNN queries per request. Scores are cosine similarity approximated from L2 distance (`1 - d²/2`, clamped to `[0,1]`) assuming unit-normalized embeddings (BGE-small / BGE-M3 are normalized internally).
 - **Heading exclusion**: Sections whose heading text contains any of `exclude_headings` (defaults to `["次の深堀り候補"]`) are dropped during chunking. Set `exclude_headings = []` in `kb-mcp.toml` to disable the default. Matching is substring-based (`heading.contains(pattern)`), so short patterns catch suffixed variants (`"## 次の深堀り候補 (案)"` etc.).
+- **Per-chunk quality filter** (feature 13, **enabled by default** with threshold `0.3`): each indexed chunk gets a `quality_score` computed from three signals — length (< 30 chars → -0.6), boilerplate-only content (TBD / TODO / 詳細は後述 / etc. → -0.5), poor structure (single line < 80 chars → -0.3). Chunks scoring below the threshold are hidden from `search`, `kb-mcp search`, and `get_connection_graph`. Seed chunks of `get_connection_graph` are exempt. Disable the filter with `[quality_filter] enabled = false` in `kb-mcp.toml`, or opt out per-query with `--include-low-quality` (CLI) / `include_low_quality: true` (MCP). Override the threshold with `--min-quality 0.5` / `min_quality: 0.5`. Upgrading an existing index: the next `kb-mcp index` run transparently adds the `quality_score` column (ALTER TABLE) and backfills scores once (idempotent).

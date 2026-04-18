@@ -533,3 +533,42 @@ feature 14 で既に達成済みなので、本 feature では:
 次回 `kb-mcp index` 実行時に `backfill_quality()` が 1 回だけ走って
 低品質チャンクにスコアが付く。ユーザが戻したい場合は `kb-mcp.toml` の
 `[quality_filter] enabled = false` または CLI `--include-low-quality` で可能。
+
+## 2026-04-18 evaluator 指摘対応 (feature 13)
+
+evaluator PASS (33/40)。High 1 + Med 5 + Low 5 のうち重要な 5 件を修正:
+
+- High #1 ドキュメント反映: README.md / CLAUDE.md / TODO.md に feature 13 を反映
+  - README の `search` tool parameters、Notes セクション、`[quality_filter]` 設定例、`kb-mcp search` セクションに `--min-quality` 説明追加
+  - CLAUDE.md の改善候補リストから「品質ベースチャンクフィルタ」を除去、kb-mcp.toml 例に `[quality_filter]` 追加
+  - TODO.md: ✅ 実装済み表に feature 13 を追加、未実装セクションを削除、優先度マトリクスからも除外
+- Med #2 優先順位ロジック重複: `quality::resolve_effective_threshold(
+  include_low_quality, min_quality, server_default)` ヘルパを追加し、
+  server.rs / main.rs の両方から参照。unit test も追加 (93 → 94 tests)
+- Med #3 idx_chunks_quality コメント明記: CREATE INDEX が search 経路では
+  使われず status 用の副次インデックスである旨を SQL コメント + Rust
+  コメントの両方に明記
+- Med #4 multi-process migration race: ALTER 実行を match でラップして
+  「duplicate column」エラーを飲み込み、先行プロセスの migration に
+  追随できるようにした
+- Med #5 10x overfetch 常時適用: `has_filters` 判定から `min_quality > 0.0`
+  を除外。category / topic 指定時のみ over-fetch するよう戻した
+- 副次修正: schema init の CREATE INDEX を ensure_quality_score_column
+  に移動 (pre-feature-13 DB 互換 + 新規 DB で INDEX が確保される順序に)
+
+### ai_organization への反映
+- target/release/kb-mcp.exe を ai_organization/kb-mcp.exe に配置 (32.0 MB)
+- `kb-mcp status` の動作確認:
+  - "Documents: 210 / Chunks: 3773 / Quality filter (threshold=0.3):
+     3773 passing, 0 below threshold"
+  - backfill は index 実行時に走るため、まだ旧 DB (score=1.0) の状態
+- `kb-mcp search "RAG retrieval"` も問題なく返却
+- MCP 再接続時に `get_connection_graph` / `search` の新パラメータが利用可能
+
+### verification
+- cargo test: 94 passed / 4 ignored (93 → 94 で resolve_effective_threshold テスト分)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- release binary のサイズ 32.0 MB
+
+Low (8-11) は軽微: is_boilerplate_only の trim 順序 / range reject は
+最終的な挙動に影響しないので見送り。

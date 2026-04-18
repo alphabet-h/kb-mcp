@@ -126,6 +126,27 @@ pub fn passes_quality_filter(score: f32, threshold: f32) -> bool {
     score >= threshold
 }
 
+/// per-query の閾値解決ヘルパ。CLI / MCP search ツール / CLI search subcommand
+/// 全てで同じロジックを使うため単一関数に寄せる (evaluator 指摘 Med #2)。
+///
+/// 優先順位:
+/// 1. `include_low_quality=true`  → `0.0` (フィルタ無効、明示的 opt-out を最優先)
+/// 2. `min_quality = Some(v)`     → `v.clamp(0.0, 1.0)`
+/// 3. どちらも指定なし             → `server_default`
+pub fn resolve_effective_threshold(
+    include_low_quality: bool,
+    min_quality: Option<f32>,
+    server_default: f32,
+) -> f32 {
+    if include_low_quality {
+        return 0.0;
+    }
+    match min_quality {
+        Some(v) => v.clamp(0.0, 1.0),
+        None => server_default,
+    }
+}
+
 fn is_boilerplate_only(content: &str) -> bool {
     // 末尾の句読点と空白を剥がして比較する。
     // 「TBD」「TBD。」「TBD.」「TBD 」をすべて同一視したい。
@@ -248,6 +269,25 @@ mod tests {
         assert!(passes_quality_filter(0.3, 0.3), "equal must pass");
         assert!(passes_quality_filter(0.31, 0.3));
         assert!(!passes_quality_filter(0.29, 0.3));
+    }
+
+    #[test]
+    fn test_resolve_effective_threshold_priority_order() {
+        // include_low_quality=true はすべてに勝つ
+        assert_eq!(
+            resolve_effective_threshold(true, Some(0.8), 0.5),
+            0.0,
+            "include_low_quality must override min_quality + default"
+        );
+        assert_eq!(resolve_effective_threshold(true, None, 0.5), 0.0);
+
+        // include_low_quality=false かつ min_quality Some → clamp
+        assert_eq!(resolve_effective_threshold(false, Some(0.7), 0.3), 0.7);
+        assert_eq!(resolve_effective_threshold(false, Some(1.5), 0.3), 1.0);
+        assert_eq!(resolve_effective_threshold(false, Some(-0.1), 0.3), 0.0);
+
+        // どちらもなしなら server default
+        assert_eq!(resolve_effective_threshold(false, None, 0.3), 0.3);
     }
 
     #[test]

@@ -53,6 +53,13 @@ rerank_by_default = true
 fastembed_cache_dir = "/home/you/.cache/huggingface/hub"
 # 省略時は ["次の深堀り候補"]。[] で除外無効化。
 exclude_headings = ["次の深堀り候補", "参考リンク"]
+
+# feature 13: 既定で有効 (threshold 0.3)。enabled=false で pre-feature-13 の
+# 従来挙動 (全件返却) に戻る。CLI は --include-low-quality / --min-quality で
+# per-query override、MCP search ツールも同名の optional パラメータで override 可能。
+[quality_filter]
+enabled = true
+threshold = 0.3
 ```
 
 - 全フィールド optional。テンプレートは `kb-mcp.toml.example` (リポジトリ同梱、`.gitignore` で `kb-mcp.toml` 本体は除外)
@@ -149,14 +156,13 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub kb-mcp index --kb-path ... --model 
 
 - HTTP/SSE トランスポート (複数クライアント同時接続)
 - ライブ同期 (`notify` クレートによる file watcher 駆動の増分再インデックス)
-- 品質ベースチャンクフィルタ
 - `get_best_practice` の汎用化
 - コンテンツハッシュベースのファイル移動検出
 - Markdown 以外のファイル対応 (.txt / .rst / .adoc)
 - Frontmatter スキーマ検証
 - PostToolUse hook 連携
 
-実装済みの履歴 (feature 7-10, 14, 15, 21-24 + evaluator 指摘対応) は `claude-progress.txt` と `features.json` を参照。
+実装済みの履歴 (feature 7-10, 13, 14, 15, 21-24 + evaluator 指摘対応) は `claude-progress.txt` と `features.json` を参照。
 
 ## 運用の細則
 

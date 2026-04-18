@@ -316,16 +316,16 @@ fn main() -> anyhow::Result<()> {
             let mut embedder = embedder::Embedder::with_model(model)?;
             let query_embedding = embedder.embed_single(&query)?;
 
-            let effective_min_quality = if include_low_quality {
-                0.0
-            } else {
-                min_quality.map(|v| v.clamp(0.0, 1.0)).unwrap_or(
-                    cfg.quality_filter
-                        .clone()
-                        .unwrap_or_default()
-                        .effective_threshold(),
-                )
-            };
+            let server_default = cfg
+                .quality_filter
+                .clone()
+                .unwrap_or_default()
+                .effective_threshold();
+            let effective_min_quality = quality::resolve_effective_threshold(
+                include_low_quality,
+                min_quality,
+                server_default,
+            );
 
             let results = if reranker_choice.is_enabled() {
                 let candidates = db.search_hybrid_candidates(

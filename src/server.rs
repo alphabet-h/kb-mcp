@@ -187,18 +187,11 @@ impl KbServer {
         let use_rerank =
             params.rerank.unwrap_or(self.rerank_by_default) && reranker_guard.is_some();
 
-        // per-query の品質フィルタ解決順序:
-        //   include_low_quality=true → 0.0 (無効)、
-        //   min_quality Some(x) → clamp(0, 1)、
-        //   それ以外 → server default (quality_threshold)
-        let effective_min_quality = if params.include_low_quality.unwrap_or(false) {
-            0.0
-        } else {
-            params
-                .min_quality
-                .map(|v| v.clamp(0.0, 1.0))
-                .unwrap_or(self.quality_threshold)
-        };
+        let effective_min_quality = crate::quality::resolve_effective_threshold(
+            params.include_low_quality.unwrap_or(false),
+            params.min_quality,
+            self.quality_threshold,
+        );
 
         let db = self.db.lock().unwrap();
         let search_outcome: anyhow::Result<Vec<crate::db::SearchResult>> = if use_rerank {
