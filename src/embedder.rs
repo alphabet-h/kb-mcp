@@ -6,9 +6,13 @@ use std::path::PathBuf;
 ///
 /// 追加時の手順: variant を足し、`model_id` / `dimension` /
 /// `fastembed_model` / `approx_download_mb` の 4 メソッドに分岐を追加する。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+///
+/// デフォルトは既存 DB 互換のため `BgeSmallEnV15` に固定 (`#[default]`)。
+/// BGE-M3 へ切り替えたい場合は CLI で明示オプトインする。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ModelChoice {
     /// BAAI/bge-small-en-v1.5 (384 dim, 英語特化, ~130 MB)
+    #[default]
     #[value(name = "bge-small-en-v1.5")]
     BgeSmallEnV15,
     /// BAAI/bge-m3 (1024 dim, 多言語, ~2.3 GB)
@@ -47,12 +51,6 @@ impl ModelChoice {
     }
 }
 
-impl Default for ModelChoice {
-    // 既存 DB 互換のため据え置き。BGE-M3 へ切り替えたい場合は明示オプトイン。
-    fn default() -> Self {
-        Self::BgeSmallEnV15
-    }
-}
 
 /// Thin wrapper around fastembed for generating text embeddings.
 ///

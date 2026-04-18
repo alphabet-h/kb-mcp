@@ -45,3 +45,52 @@
     = 合計 37 パス (3 ignored)
   - README / CLAUDE.md 更新 (hybrid 動作・RRF score 意味・trigram 下限告知)
 - 次タスク候補: feature 10 (Reranking BGE-reranker) または feature 11 以降
+
+## 2026-04-18 (追加セッション)
+- ai_organization/kb-mcp.exe を最新バイナリ (feature 7/8/9 込み) に更新済
+- BGE-M3 への切替試行 → **ネットワーク接続エラーで中断**
+  - `kb-mcp index --model bge-m3 --force` 実行 → TLS "Connection was reset"
+    (os error 10054) で HuggingFace から model.onnx の取得失敗
+  - curl で huggingface.co への接続も同じく reset → マシン側の NW 問題
+    (firewall / AV の TLS inspection 等が疑わしい)
+  - DB は無傷 (197 docs / 3610 chunks, bge-small-en-v1.5 のまま)
+  - 対応案をユーザへ提示済 (A: NW 変更 / B: HTTPS_PROXY / C: HF_ENDPOINT
+    ミラー / D: 手動 DL / E: 切替見送り)
+  - `.kb-mcp.db.pre-bge-m3.bak` バックアップ作成済 (Apr 18 07:32)
+- evaluator による feature 7/8/9 の品質チェックは未実施 (ユーザ判断待ち)
+- BGE-M3 再インデックス完了
+  - `hf download BAAI/bge-m3 --include 'onnx/*' ...` で HF CLI (Python TLS)
+    経由で model.onnx + model.onnx_data 等を 1:39 で DL 成功
+    (fastembed-rs の native_tls 経路は引き続きブロックされる)
+  - 回避策: `FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub` 経由で
+    fastembed-rs に HF Hub 標準キャッシュを読ませる
+  - 再インデックス: 197 docs / 3610 chunks / 約 66 分 (CPU 推論)
+  - DB は BGE-M3 (1024 dim) でインデックス済、serve も
+    `--model bge-m3` 指定で起動する必要あり
+  - kb-mcp リポジトリの .mcp.json を更新:
+    - args に "--model", "bge-m3" 追加
+    - env.FASTEMBED_CACHE_DIR を ~/.cache/huggingface/hub に設定
+    - (.mcp.json は .gitignore で除外、マシンローカル)
+  - ai_organization 側には .mcp.json なし (自己参照回避ポリシー)
+  - MCP 再接続で BGE-M3 が稼働する状態
+- evaluator による feature 7/8/9 品質評価完了: **PASS (26/30, 約 34.7/40)**
+  - Product Depth 9, Functionality 9, Code Quality 8
+  - ブロッキングなし
+  - 非ブロッキング改善候補 6 件:
+    1. search_similar と search_vec_candidates の SQL 重複 (dead-code
+       化はせず regression ガードとして残すか、chunk_id optional 返却で統合)
+    2. filter + RRF 候補数ミスマッチ (filter 選択性高時の件数不足リスク)
+    3. ModelChoice::Default は #[derive(Default)] に derive 化可能 (clippy)
+    4. insert_chunk docstring の「384-element」記述を動的 dim 記述へ更新
+    5. fts_chunks heading の bm25 重み調整余地 (feature 10 と合わせて検討)
+    6. BGE-M3 batch size の明示制御 (大規模データ OOM リスク)
+- evaluator 指摘 #1-4 を反映 (non-blocking 改善)
+  - #1 search_similar を search_vec_candidates への thin wrapper に統合
+    (SQL 重複解消、chunk_id 剥ぐだけの委譲)
+  - #2 filter over-fetch を search_vec_candidates / search_fts_candidates
+    両方に適用 (FILTER_OVERFETCH_FACTOR=10、cap 10_000)
+  - #3 ModelChoice::Default を手動実装 → #[derive(Default)] + #[default]
+  - #4 insert_chunk docstring の「384-element」を動的 dim 記述へ更新
+  - 新規回帰テスト 1 件: test_search_hybrid_overfetches_when_filter_is_selective
+  - テスト 38 件 (3 ignored) すべてパス、cargo clippy も軽微な doc 指摘のみ
+  - 残 #5 (fts heading 重み) / #6 (BGE-M3 batch) は feature 10 と合わせて検討

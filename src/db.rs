@@ -6,6 +6,11 @@ use std::sync::Once;
 /// RRF の定数項。原論文および多くの実装で慣例 60。
 const RRF_K: f32 = 60.0;
 
+/// filter (category / topic) を Rust 側で適用する際の KNN / FTS の over-fetch 倍率。
+/// filter が選択的な場合に target `limit` 件に届くよう多めに候補を取る。
+const FILTER_OVERFETCH_FACTOR: u32 = 10;
+const FILTER_OVERFETCH_CAP: u32 = 10_000;
+
 // ---------------------------------------------------------------------------
 // Public result types
 // ---------------------------------------------------------------------------
@@ -277,9 +282,10 @@ impl Database {
         }
     }
 
-    /// Insert a chunk row **and** its corresponding vec_chunks embedding.
+    /// Insert a chunk row **and** its corresponding vec_chunks embedding + FTS row.
     ///
-    /// `embedding` must be a 384-element f32 slice (matching the vec0 schema).
+    /// `embedding` の長さは現在の `vec_chunks` の宣言次元 (`ModelChoice` に連動、
+    /// BGE-small-en-v1.5 で 384 / BGE-M3 で 1024) と一致する必要がある。
     /// Returns the chunk `id`.
     pub fn insert_chunk(
         &self,
@@ -356,11 +362,11 @@ impl Database {
         Ok(())
     }
 
-    /// Vector-similarity search. Returns up to `limit` results ordered by
-    /// ascending distance (lower = more similar).
+    /// ベクトル単体類似検索。最大 `limit` 件を距離昇順 (小さい = より類似) で返す。
     ///
-    /// Optional `category` / `topic` filters restrict the search to documents
-    /// matching those metadata values.
+    /// `search_hybrid` とのロジック統一のため、内部では [`Self::search_vec_candidates`]
+    /// に委譲し、`chunk_id` を剥いだ `SearchResult` のみを返す。
+    /// 主に単体ベクトル検索のテスト / ツール用途で残している。
     pub fn search_similar(
         &self,
         query_embedding: &[f32],
@@ -368,105 +374,15 @@ impl Database {
         category: Option<&str>,
         topic: Option<&str>,
     ) -> Result<Vec<SearchResult>> {
-        let embedding_json = serde_json::to_string(query_embedding)?;
-
-        // When no filters are supplied we can query vec_chunks directly and
-        // join afterwards. With filters we need a sub-select to restrict the
-        // candidate set.
-        let has_filters = category.is_some() || topic.is_some();
-
-        if has_filters {
-            // Build a filtered query: first find matching chunk_ids, then
-            // search within those using vec_chunks.
-            // sqlite-vec does not support arbitrary WHERE on the virtual table
-            // together with MATCH, so we do a two-step approach: fetch
-            // candidates from vec_chunks (generous limit), then filter in Rust.
-            let generous_limit = limit.saturating_mul(10).min(10_000); // over-fetch, capped at 10k
-            // sqlite-vec requires the KNN bound to be known at xBestIndex time;
-            // a bound `LIMIT ?` is not visible there, so we use `k = ?` instead.
-            let sql = "
-                SELECT v.chunk_id, v.distance,
-                       c.content, c.heading,
-                       d.path, d.title, d.topic, d.date, d.category
-                FROM vec_chunks v
-                JOIN chunks c ON c.id = v.chunk_id
-                JOIN documents d ON d.id = c.document_id
-                WHERE v.embedding MATCH ?1 AND k = ?2
-                ORDER BY v.distance
-            ";
-            let mut stmt = self.conn.prepare(sql)?;
-            let rows = stmt.query_map(params![embedding_json, generous_limit], |row| {
-                Ok((
-                    row.get::<_, f32>(1)?,         // distance
-                    row.get::<_, String>(2)?,       // content
-                    row.get::<_, Option<String>>(3)?, // heading
-                    row.get::<_, String>(4)?,       // path
-                    row.get::<_, Option<String>>(5)?, // title
-                    row.get::<_, Option<String>>(6)?, // topic
-                    row.get::<_, Option<String>>(7)?, // date
-                    row.get::<_, Option<String>>(8)?, // category
-                ))
-            })?;
-
-            let mut results = Vec::new();
-            for row in rows {
-                let (distance, content, heading, path, title, r_topic, date, r_category) =
-                    row?;
-
-                // Apply metadata filters
-                if let Some(cat) = category
-                    && r_category.as_deref() != Some(cat) {
-                        continue;
-                    }
-                if let Some(top) = topic
-                    && r_topic.as_deref() != Some(top) {
-                        continue;
-                    }
-                results.push(SearchResult {
-                    score: distance,
-                    content,
-                    heading,
-                    path,
-                    title,
-                    topic: r_topic,
-                    date,
-                });
-                if results.len() >= limit as usize {
-                    break;
-                }
-            }
-            Ok(results)
-        } else {
-            let sql = "
-                SELECT v.chunk_id, v.distance,
-                       c.content, c.heading,
-                       d.path, d.title, d.topic, d.date
-                FROM vec_chunks v
-                JOIN chunks c ON c.id = v.chunk_id
-                JOIN documents d ON d.id = c.document_id
-                WHERE v.embedding MATCH ?1 AND k = ?2
-                ORDER BY v.distance
-            ";
-            let mut stmt = self.conn.prepare(sql)?;
-            let rows = stmt.query_map(params![embedding_json, limit], |row| {
-                Ok(SearchResult {
-                    score: row.get(1)?,
-                    content: row.get(2)?,
-                    heading: row.get(3)?,
-                    path: row.get(4)?,
-                    title: row.get(5)?,
-                    topic: row.get(6)?,
-                    date: row.get(7)?,
-                })
-            })?;
-            rows.into_iter()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
-        }
+        let hits = self.search_vec_candidates(query_embedding, limit, category, topic)?;
+        Ok(hits.into_iter().map(|(_, r)| r).collect())
     }
 
-    /// FTS5 側の候補検索。`limit` 件を bm25 昇順 (小さい = 関連度高) で返す。
-    /// 返値は `(chunk_id, bm25_score, SearchResult の雛形)` のタプル列。
+    /// FTS5 側の候補検索。最大 `limit` 件を bm25 昇順 (小さい = 関連度高) で返す。
+    /// 返値は `(chunk_id, SearchResult の雛形)` のタプル列 (`score` は bm25)。
+    ///
+    /// `search_vec_candidates` と同様に、category / topic フィルタが指定されて
+    /// いる場合は `FILTER_OVERFETCH_FACTOR` 倍を取りに行き、Rust 側で絞り込む。
     fn search_fts_candidates(
         &self,
         query_text: &str,
@@ -476,6 +392,15 @@ impl Database {
     ) -> Result<Vec<(i64, SearchResult)>> {
         let Some(fts_query) = sanitize_fts_query(query_text) else {
             return Ok(Vec::new());
+        };
+
+        let has_filters = category.is_some() || topic.is_some();
+        let fetch_limit = if has_filters {
+            limit
+                .saturating_mul(FILTER_OVERFETCH_FACTOR)
+                .min(FILTER_OVERFETCH_CAP)
+        } else {
+            limit
         };
 
         let sql = "
@@ -490,7 +415,7 @@ impl Database {
             LIMIT ?2
         ";
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_query, limit], |row| {
+        let rows = stmt.query_map(params![fts_query, fetch_limit], |row| {
             let chunk_id: i64 = row.get(0)?;
             let score: f32 = row.get(1)?;
             Ok((
@@ -532,6 +457,9 @@ impl Database {
                     date,
                 },
             ));
+            if results.len() >= limit as usize {
+                break;
+            }
         }
         Ok(results)
     }
@@ -591,6 +519,12 @@ impl Database {
 
     /// RRF 用: ベクトル検索の候補を `(chunk_id, SearchResult)` で返す。
     /// 既存の `search_similar` とロジックは同じだが chunk_id を外に出す。
+    /// ベクトル検索で最大 `limit` 件の候補を `(chunk_id, SearchResult)` で返す。
+    /// `score` フィールドには距離 (小さいほど類似) が入る。
+    ///
+    /// category / topic フィルタが指定されている場合は、Rust 側でフィルタが
+    /// 適用されて候補が減る分を補うため `FILTER_OVERFETCH_FACTOR` 倍の
+    /// KNN を SQLite へ投げる ([`FILTER_OVERFETCH_CAP`] 上限)。
     fn search_vec_candidates(
         &self,
         query_embedding: &[f32],
@@ -598,6 +532,14 @@ impl Database {
         category: Option<&str>,
         topic: Option<&str>,
     ) -> Result<Vec<(i64, SearchResult)>> {
+        let has_filters = category.is_some() || topic.is_some();
+        let fetch_k = if has_filters {
+            limit
+                .saturating_mul(FILTER_OVERFETCH_FACTOR)
+                .min(FILTER_OVERFETCH_CAP)
+        } else {
+            limit
+        };
         let embedding_json = serde_json::to_string(query_embedding)?;
         let sql = "
             SELECT v.chunk_id, v.distance,
@@ -610,7 +552,7 @@ impl Database {
             ORDER BY v.distance
         ";
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![embedding_json, limit], |row| {
+        let rows = stmt.query_map(params![embedding_json, fetch_k], |row| {
             let chunk_id: i64 = row.get(0)?;
             let distance: f32 = row.get(1)?;
             Ok((
@@ -626,7 +568,7 @@ impl Database {
             ))
         })?;
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(limit as usize);
         for row in rows {
             let (chunk_id, distance, content, heading, path, title, r_topic, date, r_category) =
                 row?;
@@ -652,6 +594,9 @@ impl Database {
                     date,
                 },
             ));
+            if out.len() >= limit as usize {
+                break;
+            }
         }
         Ok(out)
     }
@@ -1197,6 +1142,30 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].score > 0.0, "RRF スコアは正の有限値");
+    }
+
+    #[test]
+    fn test_search_hybrid_overfetches_when_filter_is_selective() {
+        // filter で多数の候補が落ちるケース: BGE-small-en-v1.5 の 384 dim で
+        // 20 ドキュメント挿入するが、category 一致は 1 件のみ。
+        // limit=5 のとき、filter がなければ 5 件返るが、選択的な filter で
+        // 1 件 しか残らない。over-fetch で target 側を 10 倍広げているため、
+        // その 1 件を取りこぼさない。
+        let db = db_with_384();
+        for i in 0..20 {
+            let path = format!("noise/doc_{i}.md");
+            let cat = if i == 0 { "target" } else { "noise" };
+            let doc_id = db
+                .upsert_document(&path, Some("x"), None, Some(cat), None, &[], None, "h")
+                .unwrap();
+            db.insert_chunk(doc_id, 0, None, "content", &dummy_embedding(0.5))
+                .unwrap();
+        }
+
+        let hits = db
+            .search_hybrid("noexistent_query", &dummy_embedding(0.5), 5, Some("target"), None)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "target カテゴリの 1 件を取りこぼさない");
     }
 
     #[test]
