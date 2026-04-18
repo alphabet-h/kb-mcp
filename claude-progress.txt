@@ -125,3 +125,11 @@
       (ignored: 2.3 GB DL 必要)
   - evaluator #6 (BGE-M3 batch size) は feature 10 スコープ外、後続対応
 - 次タスク候補: evaluator #6、残 feature (11/15/16/19/20/21/22)
+- evaluator 指摘 #6 対応完了
+  - ModelChoice::batch_size() を追加 (BGE-small: 256 / BGE-M3: 32)
+  - Embedder::embed_texts が self.choice.batch_size() を Some で渡す
+  - 計算根拠: batch * 512 * hidden_dim * 4 = BGE-M3@32 で ~67 MB 目安
+  - 回帰テスト: test_model_choice_batch_size_is_smaller_for_large_model
+    (invariant: BGE-M3 の batch < BGE-small の batch)
+  - 既存 DB の再インデックス不要 (embedding 値は batch に依存しない)
+  - テスト 43 件 (4 ignored) すべてパス

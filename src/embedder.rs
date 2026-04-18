@@ -53,6 +53,20 @@ impl ModelChoice {
             Self::BgeM3 => 2300,
         }
     }
+
+    /// fastembed の `embed()` に渡すバッチサイズ。モデルの 1 トークンあたりの
+    /// activation memory が違うため、大きなモデルでは小さめのバッチに絞って
+    /// OOM を避ける。
+    ///
+    /// 計算根拠: `batch * max_length(=512) * hidden_dim * 4 bytes`
+    /// - BgeSmallEnV15 (384 dim) @ 256 → ~200 MB
+    /// - BgeM3         (1024 dim) @ 32 → ~67 MB
+    pub fn batch_size(self) -> usize {
+        match self {
+            Self::BgeSmallEnV15 => 256,
+            Self::BgeM3 => 32,
+        }
+    }
 }
 
 
@@ -94,9 +108,10 @@ impl Embedder {
         Ok(Self { model, choice })
     }
 
-    /// Embed multiple texts in a batch.
+    /// Embed multiple texts in a batch. バッチサイズは `ModelChoice::batch_size()`
+    /// から決定 (大きなモデルで OOM を起こさないよう明示的に絞る)。
     pub fn embed_texts(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let embeddings = self.model.embed(texts, None)?;
+        let embeddings = self.model.embed(texts, Some(self.choice.batch_size()))?;
         Ok(embeddings)
     }
 
@@ -276,6 +291,17 @@ mod tests {
         assert_eq!(ModelChoice::BgeM3.model_id(), "bge-m3");
         assert_eq!(ModelChoice::BgeM3.dimension(), 1024);
         assert_eq!(ModelChoice::default(), ModelChoice::BgeSmallEnV15);
+    }
+
+    #[test]
+    fn test_model_choice_batch_size_is_smaller_for_large_model() {
+        // 大きなモデルは activation memory が多いので batch を絞る。
+        // OOM 防止のための invariant を固定化 (将来値を変えるときはここも更新)。
+        assert!(
+            ModelChoice::BgeM3.batch_size() < ModelChoice::BgeSmallEnV15.batch_size(),
+            "BGE-M3 batch must be smaller than BGE-small-en-v1.5 batch"
+        );
+        assert!(ModelChoice::BgeM3.batch_size() > 0);
     }
 
     #[test]
