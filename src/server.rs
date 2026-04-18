@@ -22,6 +22,9 @@ pub struct KbServer {
     reranker: Mutex<Option<Reranker>>,
     rerank_by_default: bool,
     kb_path: PathBuf,
+    /// `rebuild_index` ツールで markdown パース時に使う除外見出し。
+    /// `None` のときは [`markdown::DEFAULT_EXCLUDED_HEADINGS`] を使う。
+    exclude_headings: Option<Vec<String>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -363,7 +366,13 @@ impl KbServer {
         let mut embedder = self.embedder.lock().unwrap();
         let db = self.db.lock().unwrap();
 
-        match indexer::rebuild_index(&db, &mut embedder, &self.kb_path, force) {
+        match indexer::rebuild_index(
+            &db,
+            &mut embedder,
+            &self.kb_path,
+            force,
+            self.exclude_headings.as_deref(),
+        ) {
             Ok(result) => {
                 let stats = IndexStats {
                     total_documents: result.total_documents,
@@ -438,6 +447,7 @@ pub async fn run_server(
     model: ModelChoice,
     reranker_choice: RerankerChoice,
     rerank_by_default: bool,
+    exclude_headings: Option<Vec<String>>,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -455,6 +465,7 @@ pub async fn run_server(
         reranker: Mutex::new(reranker),
         rerank_by_default,
         kb_path,
+        exclude_headings,
         tool_router: KbServer::tool_router(),
     };
 

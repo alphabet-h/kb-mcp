@@ -82,12 +82,25 @@ impl From<RawFrontmatter> for Frontmatter {
 /// The parser:
 /// 1. Extracts YAML frontmatter delimited by `---` at the start of the file.
 /// 2. Splits the body on `## ` and `### ` headings.
-/// 3. Excludes the `## 次の深堀り候補` section (and everything below it).
+/// 3. Excludes [`DEFAULT_EXCLUDED_HEADINGS`] sections (substring match).
 /// 4. Merges short chunks (< 50 chars of content) into the previous chunk.
 /// 5. Re-indexes chunks sequentially starting from 0.
+///
+/// Use [`parse_with_excludes`] if you need a custom exclude list (loaded from
+/// `kb-mcp.toml` via `exclude_headings`).
 pub fn parse(raw: &str) -> ParsedDocument {
+    parse_with_excludes(raw, DEFAULT_EXCLUDED_HEADINGS)
+}
+
+/// Same as [`parse`] but lets the caller supply the list of heading patterns
+/// to exclude from chunk output. A heading is excluded when it *contains*
+/// any entry in `excludes` as a substring (so short patterns like
+/// `"次の深堀り候補"` match `"## 次の深堀り候補"`, `"### 次の深堀り候補 (案)"`
+/// etc.). Empty list means "nothing is excluded".
+pub fn parse_with_excludes(raw: &str, excludes: &[impl AsRef<str>]) -> ParsedDocument {
     let (frontmatter, body) = extract_frontmatter(raw);
-    let chunks = chunk_body(&body);
+    let excludes: Vec<&str> = excludes.iter().map(AsRef::as_ref).collect();
+    let chunks = chunk_body(&body, &excludes);
 
     ParsedDocument {
         frontmatter,
@@ -150,10 +163,11 @@ fn extract_frontmatter(raw: &str) -> (Frontmatter, String) {
 // Heading-based chunking
 // ---------------------------------------------------------------------------
 
-/// Section headings we exclude entirely from chunked output.
-const EXCLUDED_HEADINGS: &[&str] = &["次の深堀り候補"];
+/// Section headings excluded by default when the caller does not override.
+/// Matching is substring-based inside [`chunk_body`].
+pub const DEFAULT_EXCLUDED_HEADINGS: &[&str] = &["次の深堀り候補"];
 
-fn chunk_body(body: &str) -> Vec<Chunk> {
+fn chunk_body(body: &str, excludes: &[&str]) -> Vec<Chunk> {
     let mut raw_chunks: Vec<(Option<String>, String)> = Vec::new();
     let mut current_heading: Option<String> = None;
     let mut current_lines: Vec<&str> = Vec::new();
@@ -162,7 +176,7 @@ fn chunk_body(body: &str) -> Vec<Chunk> {
     for line in body.lines() {
         if let Some(heading_text) = strip_heading(line) {
             // Check if this heading is excluded.
-            if EXCLUDED_HEADINGS.iter().any(|&ex| heading_text.contains(ex)) {
+            if excludes.iter().any(|ex| heading_text.contains(ex)) {
                 // Flush accumulated lines for the *previous* section first.
                 if !excluded {
                     let content = current_lines.join("\n").trim().to_string();
@@ -312,6 +326,58 @@ mod tests {
                 "Content under '次の深堀り候補' should not appear in any chunk"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_with_empty_excludes_keeps_everything() {
+        // 空配列を渡すと「次の深堀り候補」もチャンクとして残ることを確認。
+        // kb-mcp.toml で `exclude_headings = []` を指定した場合の挙動。
+        let empty: &[&str] = &[];
+        let doc = parse_with_excludes(&fixture("sample.md"), empty);
+        let has_next_heading = doc
+            .chunks
+            .iter()
+            .any(|c| c.heading.as_deref() == Some("次の深堀り候補"));
+        assert!(
+            has_next_heading,
+            "With empty excludes, '次の深堀り候補' section should be present"
+        );
+    }
+
+    #[test]
+    fn test_parse_with_custom_excludes() {
+        // デフォルトの除外リストを上書きして「参考リンク」見出しを除外する。
+        // 同時に、既定で除外されていた「次の深堀り候補」は上書き後のリストに
+        // 含まれないのでチャンクとして残ることも確認する。
+        let md = "\
+# タイトル
+
+## 概要
+
+本文 1 を ある程度 十分な長さで 書く必要がある ので埋める埋める埋める。
+
+## 参考リンク
+
+リンク集 本文 十分な長さで 書く必要がある ので埋める埋める埋める。
+
+## 次の深堀り候補
+
+候補 本文 十分な長さで 書く必要がある ので埋める埋める埋める。
+";
+        let doc = parse_with_excludes(md, &["参考リンク"]);
+        let headings: Vec<Option<&str>> = doc
+            .chunks
+            .iter()
+            .map(|c| c.heading.as_deref())
+            .collect();
+        assert!(
+            !headings.contains(&Some("参考リンク")),
+            "custom excluded heading should not appear: {headings:?}"
+        );
+        assert!(
+            headings.contains(&Some("次の深堀り候補")),
+            "previously-default excluded heading should now appear: {headings:?}"
+        );
     }
 
     #[test]

@@ -27,6 +27,10 @@ pub struct Config {
     /// `FASTEMBED_CACHE_DIR` 環境変数の既定値。
     /// 既に env が設定されていればそちらを優先し、未設定のときだけ適用する。
     pub fastembed_cache_dir: Option<PathBuf>,
+    /// Markdown チャンク化時に除外する見出し文字列の一覧 (substring match)。
+    /// 省略時 (`None`) は [`crate::markdown::DEFAULT_EXCLUDED_HEADINGS`]。
+    /// 明示的に `[]` を与えると「除外しない」という意味になる。
+    pub exclude_headings: Option<Vec<String>>,
 }
 
 impl Config {
@@ -70,6 +74,7 @@ impl Config {
             && self.reranker.is_none()
             && self.rerank_by_default.is_none()
             && self.fastembed_cache_dir.is_none()
+            && self.exclude_headings.is_none()
     }
 
     /// `fastembed_cache_dir` が設定されていて、かつ環境変数
@@ -134,7 +139,8 @@ mod tests {
              model = \"bge-m3\"\n\
              reranker = \"bge-v2-m3\"\n\
              rerank_by_default = true\n\
-             fastembed_cache_dir = \"{cache}\"\n"
+             fastembed_cache_dir = \"{cache}\"\n\
+             exclude_headings = [\"次の深堀り候補\", \"参考リンク\"]\n"
         )
         .unwrap();
 
@@ -144,6 +150,21 @@ mod tests {
         assert_eq!(cfg.reranker, Some(RerankerChoice::BgeV2M3));
         assert_eq!(cfg.rerank_by_default, Some(true));
         assert_eq!(cfg.fastembed_cache_dir.as_deref(), Some(Path::new(cache)));
+        assert_eq!(
+            cfg.exclude_headings.as_deref(),
+            Some(&["次の深堀り候補".to_string(), "参考リンク".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_parse_empty_exclude_headings_overrides_default() {
+        // `exclude_headings = []` を明示すると「除外しない」という意図になるため、
+        // Option::None と区別して保持されていることを確認する。
+        let mut file = tempfile("kb-mcp-config-empty-excludes");
+        writeln!(file, "exclude_headings = []").unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let list = cfg.exclude_headings.expect("Some(vec![]) must be preserved");
+        assert!(list.is_empty());
     }
 
     #[test]

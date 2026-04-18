@@ -262,3 +262,40 @@
   - cargo test: 53 passed / 4 ignored (既存テスト全てパス)
   - src/ から std::mem::transmute が完全除去されたことを grep で確認
 - features.json の #21 を passing に
+
+## 2026-04-18 Feature 14 — exclude_headings 設定ファイル化
+
+- src/markdown.rs:
+  - `EXCLUDED_HEADINGS` を `pub const DEFAULT_EXCLUDED_HEADINGS` に rename
+  - `parse_with_excludes(raw, &[impl AsRef<str>])` を追加
+  - 既存 `parse(raw)` は `parse_with_excludes(raw, DEFAULT_EXCLUDED_HEADINGS)` に委譲
+  - `chunk_body(body, excludes: &[&str])` に引数を追加 (以前はハードコード)
+- src/config.rs:
+  - `Config.exclude_headings: Option<Vec<String>>` を追加
+  - `is_empty()` の判定に含める
+  - 既存の `test_parse_full_config` に exclude_headings も書き足し
+  - `test_parse_empty_exclude_headings_overrides_default`: `[]` を None と区別して保持することを検証
+- src/indexer.rs:
+  - `rebuild_index(... force, exclude_headings: Option<&[String]>)` にシグネチャ拡張
+  - None → `markdown::parse` (既定), Some(list) → `parse_with_excludes(list)`
+- src/server.rs:
+  - `KbServer.exclude_headings: Option<Vec<String>>` を保持
+  - `rebuild_index` ツール呼び出しで `self.exclude_headings.as_deref()` を渡す
+  - `run_server` にも `exclude_headings` 引数を追加
+- src/main.rs:
+  - Serve/Index それぞれで `cfg.exclude_headings` を server/indexer に伝搬
+- kb-mcp.toml.example:
+  - `exclude_headings = ["次の深堀り候補", "参考リンク"]` をコメント例に追加
+- 新規テスト:
+  - markdown: test_parse_with_empty_excludes_keeps_everything / test_parse_with_custom_excludes
+  - config: test_parse_empty_exclude_headings_overrides_default
+- verification:
+  - cargo test: 56 passed / 4 ignored (53 → 56 で 3 増)
+  - cargo clippy --all-targets -- -D warnings: クリーン
+- features.json の #14 を passing に
+
+セマンティクス:
+  - `None` (未指定) = ["次の深堀り候補"] (後方互換)
+  - `Some([])` (明示的な空) = 除外なし
+  - `Some([...])` = デフォルトを完全上書き (merge ではなく replace)
+  マッチは substring (`heading_text.contains(pattern)`) で、短いパターンで柔軟にヒット。

@@ -31,11 +31,17 @@ pub struct IndexResult {
 ///
 /// If `force` is `false`, files whose SHA-256 content hash has not changed
 /// since the last index run are skipped.
+///
+/// `exclude_headings`:
+/// - `None` → use [`markdown::DEFAULT_EXCLUDED_HEADINGS`]
+/// - `Some(list)` → completely overrides the default list (pass `&[]` to
+///   disable heading-based exclusion entirely).
 pub fn rebuild_index(
     db: &Database,
     embedder: &mut Embedder,
     kb_path: &Path,
     force: bool,
+    exclude_headings: Option<&[String]>,
 ) -> Result<IndexResult> {
     let start = Instant::now();
 
@@ -84,8 +90,11 @@ pub fn rebuild_index(
                     continue;
                 }
 
-        // 2c. Parse markdown
-        let parsed = markdown::parse(&content);
+        // 2c. Parse markdown (with optional heading exclude override)
+        let parsed = match exclude_headings {
+            Some(list) => markdown::parse_with_excludes(&content, list),
+            None => markdown::parse(&content),
+        };
 
         // Skip files with no embeddable chunks
         if parsed.chunks.is_empty() {

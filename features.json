@@ -97,7 +97,7 @@
       "id": 14,
       "category": "upgrade-config",
       "description": "チャンキング除外見出しパターンの .kb-mcp.toml 設定ファイル化",
-      "status": "failing",
+      "status": "passing",
       "verification": "exclude_headings 設定で指定した見出しがインデックス対象外になる"
     },
     {

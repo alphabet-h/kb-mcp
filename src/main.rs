@@ -144,9 +144,17 @@ fn main() -> anyhow::Result<()> {
                 .or(cfg.rerank_by_default)
                 .unwrap_or(true);
 
+            let exclude_headings = cfg.exclude_headings.clone();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                server::run_server(&kb_path, model, reranker, rerank_by_default).await
+                server::run_server(
+                    &kb_path,
+                    model,
+                    reranker,
+                    rerank_by_default,
+                    exclude_headings,
+                )
+                .await
             })?;
         }
         Commands::Index {
@@ -170,7 +178,13 @@ fn main() -> anyhow::Result<()> {
                 db.reset_for_model(embedder.model_id(), dim)?;
             }
             eprintln!("Indexing {}...", kb_path.display());
-            let result = indexer::rebuild_index(&db, &mut embedder, &kb_path, force)?;
+            let result = indexer::rebuild_index(
+                &db,
+                &mut embedder,
+                &kb_path,
+                force,
+                cfg.exclude_headings.as_deref(),
+            )?;
             eprintln!(
                 "Done in {}ms: {} docs ({} updated, {} deleted), {} chunks",
                 result.duration_ms,

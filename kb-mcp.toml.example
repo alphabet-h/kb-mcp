@@ -30,3 +30,8 @@
 # `hf download` で事前 DL した HF Hub キャッシュ (~/.cache/huggingface/hub)
 # を指しておくと、fastembed の TLS で DL 失敗する環境でも流用できる。
 #fastembed_cache_dir = "/home/yabushita/.cache/huggingface/hub"
+
+# Markdown チャンク化時に除外する見出しの substring リスト。
+# 省略時は ["次の深堀り候補"]。明示的に [] を与えると除外なしになる。
+# 例: 「参考リンク」セクションと、深堀り候補の 2 つを落としたい場合:
+#exclude_headings = ["次の深堀り候補", "参考リンク"]
