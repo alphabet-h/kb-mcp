@@ -12,6 +12,21 @@ cargo build --release
 
 The binary is produced at `target/release/kb-mcp` (or `kb-mcp.exe` on Windows).
 
+## Optional config file
+
+Any CLI option below can be given a default via `kb-mcp.toml` placed **next to the binary**. CLI arguments always win; the file just removes repetition for a given deployment. Copy `kb-mcp.toml.example` to `kb-mcp.toml` and edit:
+
+```toml
+# kb-mcp.toml (sits next to kb-mcp / kb-mcp.exe)
+kb_path = "/path/to/knowledge-base"
+model = "bge-m3"
+reranker = "bge-v2-m3"
+rerank_by_default = true
+fastembed_cache_dir = "/home/you/.cache/huggingface/hub"
+```
+
+With the file in place `kb-mcp serve` / `index` / `status` work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
+
 ## Usage
 
 ### Build / rebuild the search index

@@ -10,3 +10,6 @@ CLAUDE.local.md
 .agents/
 .remember/
 .mcp.json
+
+# Runtime config placed next to the binary (user-local). Template is kb-mcp.toml.example.
+kb-mcp.toml

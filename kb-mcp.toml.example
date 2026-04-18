@@ -1,0 +1,32 @@
+# kb-mcp 設定ファイルのサンプル。
+#
+# このファイルをバイナリ (kb-mcp / kb-mcp.exe) と**同じディレクトリ**に
+# `kb-mcp.toml` という名前でコピーして使う。
+# CLI 引数で明示指定した項目が常に優先されるため、ここでは運用時の既定値を
+# 書いておく想定。すべてのキーは optional (省略すればビルトイン既定値)。
+
+# 対象 knowledge-base ディレクトリの絶対パス。
+# 指定すると `--kb-path` を省略できる。
+#kb_path = "/path/to/knowledge-base"
+
+# 既定の埋め込みモデル。
+#   bge-small-en-v1.5 … 英語特化、384 次元、~130 MB (既定)
+#   bge-m3            … 多言語 (日本語 OK)、1024 次元、~2.3 GB
+#model = "bge-m3"
+
+# 既定の cross-encoder reranker。
+#   none       … 無効 (既定)
+#   bge-v2-m3  … BAAI/bge-reranker-v2-m3 (多言語、~2.3 GB、日本語推奨)
+#   jina-v2-ml … jinaai/jina-reranker-v2-base-multilingual (~1.2 GB、軽量多言語)
+#   bge-base   … BAAI/bge-reranker-base (英/中、~280 MB)
+#reranker = "bge-v2-m3"
+
+# reranker が有効なとき、各 `search` 呼び出しで自動的に rerank を適用するか。
+# MCP ツール `search` の `rerank` パラメータで個別上書き可能。
+#rerank_by_default = true
+
+# fastembed のモデルキャッシュディレクトリ。
+# 既に環境変数 `FASTEMBED_CACHE_DIR` が設定されていれば env が優先される。
+# `hf download` で事前 DL した HF Hub キャッシュ (~/.cache/huggingface/hub)
+# を指しておくと、fastembed の TLS で DL 失敗する環境でも流用できる。
+#fastembed_cache_dir = "/home/yabushita/.cache/huggingface/hub"

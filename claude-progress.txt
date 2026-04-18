@@ -145,3 +145,20 @@
   - docs/plan.md: 冒頭に「全タスク完了・履歴」バナー追加、現行仕様は
     docs/design.md を参照する旨を明記
   - README.md: BGE-M3 + reranker 込みの .mcp.json 設定例、HF 事前 DL 手順を追記
+- feature 23 実装完了 (status: passing)
+  - バイナリ同居 kb-mcp.toml 設定ファイル対応
+  - Cargo.toml に toml = "0.8" 追加
+  - src/config.rs 新設: Config 構造体 (全フィールド optional,
+    deny_unknown_fields)、load_alongside_binary / load_from /
+    apply_cache_dir_env
+  - ModelChoice / RerankerChoice に Deserialize + serde(rename) を追加
+    (clap::ValueEnum の名前と一致させる)
+  - src/main.rs: CLI のすべての kb_path/model/reranker/rerank_by_default を
+    Option<T> に変更し、CLI > config > default の優先順位で解決
+  - FASTEMBED_CACHE_DIR は env が未設定のときのみ config から注入
+    (embedder 初期化より前)
+  - kb-mcp.toml.example を同梱、kb-mcp.toml は .gitignore
+  - 新規テスト 5 件: missing_file / full / partial / unknown_fields /
+    env_precedence
+  - テスト 48 件 (4 ignored) すべてパス
+  - 実機確認: config のみで --kb-path / --model 省略で動作、CLI override も確認

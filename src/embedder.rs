@@ -2,6 +2,7 @@ use anyhow::Result;
 use fastembed::{
     EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
 };
+use serde::Deserialize;
 use std::path::PathBuf;
 
 use crate::db::SearchResult;
@@ -13,14 +14,16 @@ use crate::db::SearchResult;
 ///
 /// デフォルトは既存 DB 互換のため `BgeSmallEnV15` に固定 (`#[default]`)。
 /// BGE-M3 へ切り替えたい場合は CLI で明示オプトインする。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum, Deserialize)]
 pub enum ModelChoice {
     /// BAAI/bge-small-en-v1.5 (384 dim, 英語特化, ~130 MB)
     #[default]
     #[value(name = "bge-small-en-v1.5")]
+    #[serde(rename = "bge-small-en-v1.5")]
     BgeSmallEnV15,
     /// BAAI/bge-m3 (1024 dim, 多言語, ~2.3 GB)
     #[value(name = "bge-m3")]
+    #[serde(rename = "bge-m3")]
     BgeM3,
 }
 
@@ -152,20 +155,24 @@ fn resolve_cache_dir() -> PathBuf {
 ///
 /// デフォルトは `None` (reranker 無効)。モデル DL を避けるため、opt-in で
 /// 明示的に選択する。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum, Deserialize)]
 pub enum RerankerChoice {
     /// reranker 無効 (RRF 結果をそのまま返す)
     #[default]
     #[value(name = "none")]
+    #[serde(rename = "none")]
     None,
     /// BAAI/bge-reranker-v2-m3 (多言語 100+ 言語, ~2.3 GB)。日本語 KB 推奨
     #[value(name = "bge-v2-m3")]
+    #[serde(rename = "bge-v2-m3")]
     BgeV2M3,
     /// jinaai/jina-reranker-v2-base-multilingual (多言語, ~1.2 GB)。軽量多言語
     #[value(name = "jina-v2-ml")]
+    #[serde(rename = "jina-v2-ml")]
     JinaV2Multilingual,
     /// BAAI/bge-reranker-base (英/中のみ, ~280 MB)。日本語用途には非推奨
     #[value(name = "bge-base")]
+    #[serde(rename = "bge-base")]
     BgeBase,
 }
 

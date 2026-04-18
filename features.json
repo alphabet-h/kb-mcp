@@ -155,6 +155,13 @@
       "description": "YAML frontmatter の CRLF 正規化強化",
       "status": "failing",
       "verification": "CRLF の .md ファイルで frontmatter の値に \\r が混入しないテスト追加"
+    },
+    {
+      "id": 23,
+      "category": "upgrade-config",
+      "description": "バイナリ同居 kb-mcp.toml で CLI オプションの既定値を与える",
+      "status": "passing",
+      "verification": "kb-mcp.toml に model/reranker/kb_path 等を書けば CLI で省略でき、CLI 指定時はそちらが優先される"
     }
   ]
 }
