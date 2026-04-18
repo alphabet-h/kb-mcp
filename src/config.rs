@@ -216,6 +216,77 @@ mod tests {
         assert_eq!(out, abs);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_unc_and_verbatim_paths_not_rebased() {
+        // UNC パスと \\?\ verbatim プレフィックスは std::path::Path::is_absolute
+        // で true を返すので、resolve_relative は touch しない。
+        let base = Path::new("C:/some/base");
+
+        let unc = PathBuf::from(r"\\server\share\foo");
+        assert!(unc.is_absolute(), "UNC should be absolute");
+        assert_eq!(resolve_relative(base, unc.clone()), unc);
+
+        let verbatim = PathBuf::from(r"\\?\C:\verbatim\bar");
+        assert!(verbatim.is_absolute(), "verbatim prefix should be absolute");
+        assert_eq!(resolve_relative(base, verbatim.clone()), verbatim);
+    }
+
+    #[test]
+    fn test_toml_example_parses_with_all_keys_uncommented() {
+        // kb-mcp.toml.example のすべてのキーが Config で受け入れられるかを検証。
+        // Config にフィールドが追加されたのに example を更新し忘れたり、逆に
+        // example に古いキーが残って deny_unknown_fields に引っかかるのを
+        // 回帰テストで検知する。
+        //
+        // example はコメント (`#`) で各フィールド例を書いているので、
+        // 行頭 `#` を剥がして「全行有効」な設定としてパースする。
+        let example_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("kb-mcp.toml.example");
+        let raw = std::fs::read_to_string(&example_path)
+            .expect("kb-mcp.toml.example must exist at repository root");
+
+        let uncommented: String = raw
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                // 見出しコメントや空行はそのまま (除外しても同じ挙動)
+                if trimmed.is_empty() {
+                    return Some(String::new());
+                }
+                // `# key = value` 行を剥がす。ただし純粋な説明コメント
+                // (例: `# Copy this file...`) はそのまま残す (toml には
+                // 影響しないので除外しても同じ)。判定は `# <ident> =` の形。
+                if let Some(rest) = trimmed.strip_prefix('#') {
+                    let rest = rest.trim_start();
+                    if rest.contains('=')
+                        && rest
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    {
+                        return Some(rest.to_string());
+                    }
+                }
+                Some(line.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let cfg: Config = toml::from_str(&uncommented).unwrap_or_else(|e| {
+            panic!(
+                "kb-mcp.toml.example failed to parse with all keys enabled: {e}\n\
+                 --- generated TOML ---\n{uncommented}\n---"
+            )
+        });
+
+        // 全フィールドが埋まっていれば is_empty は false。example に少なくとも
+        // 1 つのキーが書かれていることの最低限チェック。
+        assert!(
+            !cfg.is_empty(),
+            "kb-mcp.toml.example contains no parseable keys"
+        );
+    }
+
     #[test]
     fn test_apply_cache_dir_env_respects_existing_env() {
         // 既に env が設定されていれば config 値は適用しない。

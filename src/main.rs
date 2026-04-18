@@ -41,7 +41,11 @@ enum Commands {
         reranker: Option<RerankerChoice>,
         /// When reranker is enabled, apply it by default for every `search` call
         /// unless the tool invocation explicitly passes `rerank: false`.
-        #[arg(long)]
+        ///
+        /// Default: `true` (when `--reranker` is set). Has no effect while
+        /// `--reranker none`. Omit this flag to take the default or the
+        /// `rerank_by_default` value from `kb-mcp.toml`.
+        #[arg(long, value_parser = clap::value_parser!(bool))]
         rerank_by_default: Option<bool>,
     },
     /// Build or rebuild the search index

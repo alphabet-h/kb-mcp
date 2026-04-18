@@ -224,3 +224,14 @@
     従来と bit-exact (shape 互換) であることを確認
   - 残 #3-#5 (CLI help の default 明示、UNC テスト、example 同期) は
     小粒で後回し
+- evaluator 指摘 #3-#5 対応完了
+  - #3: --rerank-by-default の長文 help に "Default: true (when --reranker
+    is set). Has no effect while --reranker none." を明記 (clap long_help)
+  - #4: test_windows_unc_and_verbatim_paths_not_rebased 追加 (#[cfg(windows)])。
+    \\server\share\foo と \\?\C:\verbatim\bar の両方で Path::is_absolute が
+    true、resolve_relative で rebase されないことを確認
+  - #5: test_toml_example_parses_with_all_keys_uncommented 追加。
+    kb-mcp.toml.example を読み、`# key = value` 形式のコメントを剥がして
+    Config::toml::from_str でパース。deny_unknown_fields により、example に
+    Config から削除されたキーが残ると検知される (削除時の回帰ガード)
+  - テスト 52 件 (4 ignored) すべてパス。config テスト 9 件に拡充
