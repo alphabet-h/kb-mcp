@@ -784,3 +784,167 @@ evaluator FAIL (29/40) の High 2 + Med 3-4 + Low 8 を反映。
 - cargo clippy --all-targets -- -D warnings: クリーン
 
 ### 破壊的変更: なし (crate 内 API 変更のみ、IndexResult/IndexStats は既存のまま)
+
+
+## 2026-04-19: feature 12 (live sync) 仕様策定
+
+feature 11 完了後、context compact 実施。残 4 件 (#12 / #17 / #18 / #20) のうち
+優先度中の #12 (notify ライブ同期) に着手するため harness-kit:planner で仕様策定。
+実装はまだ。MCP 切断確認の上、バイナリは commit 673641d 時点のものを
+ai_organization/kb-mcp.exe にデプロイ済み。
+
+### 生成物
+- docs/plans/feature-12-live-sync.md (planner 出力をファイル化)
+
+### 採用予定の方針
+- notify = "8" + notify-debouncer-full = "0.6" (rename ペア化)
+- src/watcher.rs 新設、serve と tokio::select! で並走
+- indexer に reindex_single_file / deindex_single_file / rename_single_file を抽出
+  (rebuild_index 本体は変更せず per-file ブロックを切り出すだけ)
+- [watch] セクション (enabled / debounce_ms)、CLI --watch / --no-watch / --debounce-ms
+
+### ユーザ確認待ち
+1. 既定 on で進めてよいか
+2. MVP (F12-1〜F12-7) に絞り F12-8/9 は別機会にするか
+3. feature 20 (非 Markdown) との実装順序
+
+## 2026-04-19: feature 20 (非 Markdown 対応) 仕様策定
+
+feature 12 のユーザ決定事項が確定:
+  1. 既定 on
+  2. 拡張 (F12-8 frontmatter-only + F12-9 self-heal) も含める
+  3. feature 20 を**先に**実装、feature 12 watcher で registry.extensions() 流用
+
+feature 20 の planner 仕様を策定、docs/plans/feature-20-non-markdown.md に保存。
+
+### 採用予定の方針
+- 対象: .md / .txt / .rst / .adoc の 4 種 (全自前実装、依存追加ゼロ)
+- src/parser/ サブモジュール新設 (mod.rs + registry.rs + markdown.rs + txt.rs + rst.rs + adoc.rs)
+- 既存 src/markdown.rs は shim に縮退、公開 API 維持 (regression guard)
+- [parsers] enabled = [...] 設定、空配列は error
+- indexer の collect_md_files → collect_source_files(&kb_path, &registry)
+- DB schema 変更なし (既存 .kb-mcp.db は無改変で動作)
+
+### ユーザ確認待ち
+1. MVP 対象拡張子 (4 種 vs .txt のみ)
+2. .txt のチャンク境界 (単一 vs 段落分割)
+3. empty array をエラー扱いでよいか
+
+## 2026-04-19: feature 20 スコープを .md + .txt に縮小 (ユーザ決定)
+
+ユーザからの質問「.rst や .adoc の利用者はどのぐらい?」を受け、ユーザ規模を整理:
+- .rst は Python エコシステム限定 (Sphinx / Read the Docs / NumPy)、重なり中以下
+- .adoc は技術ライター community 限定、重なり小
+- .pdf は企業/学術で需要大だが別 crate 依存で実装重い
+
+### 決定
+- feature 20 MVP は **.md + .txt** の 2 種に縮小
+- Parser trait 抽象は入れて、将来の .pdf / .docx / .rst / .adoc 追加を無改修で可能にする
+- .pdf / .docx は特に将来候補として優先度高めで TODO.md に記録
+
+### 反映
+- docs/plans/feature-20-non-markdown.md: 対象拡張子 / config / LOC / リスクを .md+.txt 用に縮小更新
+- TODO.md: Markdown 以外のファイル対応を「決定済み高優先」に移動、追加フォーマット (.pdf/.docx/.rst/.adoc/.org 等) を将来候補テーブルで整理
+- 優先度マトリクスを更新 (feature 20 を最上位に)
+
+### 実装コスト見直し
+- MVP 合計: ~290 LOC / 2.5 日 (feature 20) + feature 12 (拡張込み)
+- 将来拡張 (.pdf/.docx/.rst/.adoc): 4-6 日 (ユーザ需要次第)
+
+## 2026-04-19: feature 20 残り論点を決定 (ユーザ確認済み)
+
+- .txt チャンク境界: **MVP は単一 chunk** (EXT-4 で段落分割)
+- [parsers].enabled = [] はエラー扱い
+- **キー省略時のデフォルトは ["md"] のみ** (pre-feature-20 完全後方互換、.txt は明示 opt-in)
+- 仕様書 docs/plans/feature-20-non-markdown.md に反映済み
+
+### 次
+feature 20 の実装に着手。実装順 (planner 通り):
+  MVP-1 Parser trait + Registry → MVP-5 indexer 分岐 → MVP-6 config → MVP-2 .txt → MVP-7/8 regression
+feature 12 着手はこの後。
+
+## 2026-04-19: feature 20 実装完了 (.md + .txt MVP)
+
+ユーザ決定事項 (.md + .txt MVP / デフォルト md のみ / [] はエラー / .txt 単一 chunk)
+を全て反映して実装。
+
+### 新設
+- src/parser/mod.rs: Parser trait, Frontmatter/Chunk/ParsedDocument 移動,
+  DEFAULT_EXCLUDED_HEADINGS, ParsersConfig (with validate)
+- src/parser/markdown.rs: pulldown 時代の markdown.rs 実装を MarkdownParser に
+  寄せ替え (挙動は identical、既存 tests は markdown.rs shim 経由で無改変 pass)
+- src/parser/txt.rs: TxtParser 新規 (ファイル名から title derive、CRLF/BOM 正規化、
+  単一 chunk、exclude_headings 無視、11 ユニットテスト)
+- src/parser/registry.rs: Registry::{from_enabled, defaults, by_extension,
+  extensions}、6 ユニットテスト
+
+### 変更
+- src/markdown.rs: shim 化 (公開 API 維持、既存 9 テストが無改変で通る)
+- src/indexer.rs: collect_md_files → collect_source_files(&kb_path, &registry)
+  + rebuild_index 署名に registry: &Registry を追加。拡張子で Parser 選択。
+  5 ユニットテスト追加 (md-only / md+txt / .obsidian skip / case-insensitive /
+  deterministic sort)
+- src/config.rs: parsers: Option<ParsersConfig>、build_parser_registry()、
+  [] reject 検証。4 ユニットテスト追加
+- src/server.rs: KbServer に parser_registry: Registry を追加、run_server に
+  注入、rebuild_index MCP ツール経由で渡す
+- src/main.rs: cfg.build_parser_registry() を Index / Serve 両方で構築
+
+### Config schema
+- [parsers] セクション省略時 → Registry::defaults() = ["md"] (後方互換)
+- enabled = [] → エラー (silent failure 防止)
+- 未知 id (pdf/rst/adoc/docx 等) → エラー ("supported in this build: md, txt")
+- id は case-insensitive、重複もエラー
+
+### 更新
+- kb-mcp.toml.example: [parsers] 追記 (enabled = ["md", "txt"] を例に)
+- README.md: .txt opt-in と derive title 仕様を追記、[parsers] 設定例
+- CLAUDE.md: アーキテクチャ表に src/parser/ 追加、データフロー図を更新
+- features.json: feature 20 を passing に、description と verification を更新
+
+### 検証
+- cargo test: 142 passed (133 → 142、+9: parser 20 new + indexer 5 new +
+  config 4 new、markdown 9 は shim 経由で通過)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功
+
+### 破壊的変更
+- indexer::rebuild_index の署名に registry: &Registry を追加 (crate 内のみ呼出)
+- server::run_server の署名に parser_registry: Registry を追加 (crate 内のみ)
+- KbServer 構造体に parser_registry フィールド追加 (non-public)
+公開 API (MCP ツール / CLI / kb-mcp.toml) は完全に後方互換
+
+## 2026-04-19: feature 20 evaluator High #1 + Med #2-3 を反映
+
+evaluator (PASS 33/40) 指摘を反映:
+
+### High #1: get_document MCP ツールの拡張子認識漏れ
+`get_document` は `markdown::parse` 決め打ちで呼ばれていたため .txt で
+title=null、search ツールとの間で title が食い違う問題があった。
+server.rs に build_document_response() ヘルパを切り出し、Registry から
+拡張子で Parser を選択する実装に変更。フォールバックは markdown::parse
+(pre-feature-20 相当)。3 ユニットテスト追加:
+  - test_build_document_response_md_with_frontmatter
+  - test_build_document_response_txt_derives_title_from_filename
+  - test_build_document_response_unknown_ext_falls_back_to_markdown
+
+### Med #2: rebuild_index ツール description を改訂
+"scanning all Markdown files" → "scanning all source files (Markdown plus
+any other extensions enabled via [parsers].enabled in kb-mcp.toml)"
+
+### Med #3: Cli about を改訂
+"MCP server for semantic search over a Markdown knowledge base" →
+"... over a knowledge base of Markdown and plain-text files"
+(long_about も「Markdown (and optionally plain-text, opt-in via
+[parsers].enabled) files」に改訂)
+
+### 見送り
+- Low #4 Registry::extensions() のアロケーション: MVP 規模で実害なし
+- Low #5 derive_title case コメント/spec: 実装は case 保存でユーザ意図に合致、
+  spec の「小文字のまま」記述は今回見直さず (将来整理)
+- Low #6 .txt 単一 chunk の大容量問題: MVP 仕様通り、EXT-4 で対応予定
+
+### verification
+- cargo test: 145 passed (142 → 145、+3)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功

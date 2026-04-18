@@ -138,9 +138,9 @@
     {
       "id": 20,
       "category": "upgrade-formats",
-      "description": "Markdown 以外のファイル対応 (.txt / .rst / .adoc)。パーサープラグイン化",
-      "status": "failing",
-      "verification": ".rst ファイルがインデックス対象になり、該当チャンクが検索できる"
+      "description": "Markdown 以外のファイル対応 (.md + .txt MVP)。Parser trait + Registry で .pdf/.docx/.rst/.adoc を将来拡張可能",
+      "status": "passing",
+      "verification": "kb-mcp.toml の [parsers] enabled = [\"md\", \"txt\"] で .txt もインデックス対象になる (title はファイル名 derive、単一 chunk)。省略時は [\"md\"] のみで pre-feature-20 と完全後方互換。[]= はエラー"
     },
     {
       "id": 21,

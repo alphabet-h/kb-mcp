@@ -7,7 +7,8 @@ use walkdir::WalkDir;
 
 use crate::db::Database;
 use crate::embedder::Embedder;
-use crate::{markdown, quality};
+use crate::parser::Registry;
+use crate::quality;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -108,6 +109,7 @@ pub fn rebuild_index(
     kb_path: &Path,
     force: bool,
     exclude_headings: Option<&[String]>,
+    registry: &Registry,
 ) -> Result<IndexResult> {
     let start = Instant::now();
 
@@ -129,9 +131,14 @@ pub fn rebuild_index(
         eprintln!("Backfilled {quality_updated} chunks with quality scores");
     }
 
-    // 1. Collect all .md files, skipping .obsidian/
-    let md_files = collect_md_files(&kb_path)?;
-    eprintln!("Found {} markdown files", md_files.len());
+    // [feature 20] Registry の対応拡張子リストで source files を収集する。
+    // 旧 collect_md_files は .md 固定だったが、.txt 等にも対応。
+    let source_files = collect_source_files(&kb_path, registry)?;
+    eprintln!(
+        "Found {} source files (extensions: {:?})",
+        source_files.len(),
+        registry.extensions()
+    );
 
     // [feature 11] ファイル移動検出の前段階として、disk 側の全ファイルの
     // **hash だけ** を先に計算する。content は持ち回らない (evaluator 指摘
@@ -139,7 +146,7 @@ pub fn rebuild_index(
     // もう一度 read_to_string する — ファイル OS キャッシュで 2 度目の
     // read は十分安く、代わりにピークメモリを `filecount * avg_size` から
     // `filecount * avg_path_len + 1 file worth of content` に圧縮できる。
-    let disk_entries: Vec<DiskEntry> = md_files
+    let disk_entries: Vec<DiskEntry> = source_files
         .iter()
         .map(|p| -> Result<DiskEntry> {
             let content = std::fs::read_to_string(p)
@@ -192,13 +199,24 @@ pub fn rebuild_index(
             continue;
         }
 
-        // 2b. Read + parse markdown only for files we actually need to embed.
+        // 2b. Read + parse only for files we actually need to embed.
+        // 拡張子で Registry から Parser を選択 (feature 20)。collect_source_files
+        // が Registry の extensions() のみを拾うため、必ず見つかる。
+        let ext = entry
+            .full
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let parser = registry.by_extension(ext).with_context(|| {
+            format!("no parser registered for extension {ext:?} on {}", entry.rel)
+        })?;
         let content = std::fs::read_to_string(&entry.full)
             .with_context(|| format!("failed to read {}", entry.full.display()))?;
-        let parsed = match exclude_headings {
-            Some(list) => markdown::parse_with_excludes(&content, list),
-            None => markdown::parse(&content),
+        let excludes: Vec<&str> = match exclude_headings {
+            Some(list) => list.iter().map(String::as_str).collect(),
+            None => crate::parser::DEFAULT_EXCLUDED_HEADINGS.to_vec(),
         };
+        let parsed = parser.parse(&content, &entry.rel, &excludes);
 
         // Skip files with no embeddable chunks
         if parsed.chunks.is_empty() {
@@ -283,15 +301,20 @@ pub fn rebuild_index(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Collect all `.md` files under `kb_path`, skipping `.obsidian/` directories.
-fn collect_md_files(kb_path: &Path) -> Result<Vec<std::path::PathBuf>> {
+/// [feature 20] Collect all files under `kb_path` whose extension is
+/// registered in `registry`. Skips `.obsidian/` directories. Sort for
+/// deterministic ordering.
+fn collect_source_files(
+    kb_path: &Path,
+    registry: &Registry,
+) -> Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
+    let extensions = registry.extensions();
 
     for entry in WalkDir::new(kb_path)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
-            // Skip .obsidian/ directories
             let name = e.file_name().to_string_lossy();
             !(e.file_type().is_dir() && name == ".obsidian")
         })
@@ -299,12 +322,15 @@ fn collect_md_files(kb_path: &Path) -> Result<Vec<std::path::PathBuf>> {
         let entry = entry.context("walkdir error")?;
         if entry.file_type().is_file()
             && let Some(ext) = entry.path().extension()
-                && ext.eq_ignore_ascii_case("md") {
-                    files.push(entry.into_path());
-                }
+            && let Some(ext_str) = ext.to_str()
+            && extensions
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(ext_str))
+        {
+            files.push(entry.into_path());
+        }
     }
 
-    // Sort for deterministic ordering
     files.sort();
     Ok(files)
 }
@@ -463,5 +489,131 @@ mod tests {
         let hash1 = sha256_hex("hello");
         let hash2 = sha256_hex("world");
         assert_ne!(hash1, hash2);
+    }
+
+    // -----------------------------------------------------------------------
+    // [feature 20] collect_source_files
+    // -----------------------------------------------------------------------
+
+    struct TmpDir(std::path::PathBuf);
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn mk_tmp(prefix: &str) -> TmpDir {
+        let pid = std::process::id();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!("kb-mcp-idxtest-{prefix}-{pid}-{nonce}"));
+        std::fs::create_dir_all(&p).unwrap();
+        TmpDir(p)
+    }
+
+    fn write_file(dir: &std::path::Path, rel: &str, content: &str) {
+        let full = dir.join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full, content).unwrap();
+    }
+
+    #[test]
+    fn test_collect_source_files_md_only_by_default() {
+        let tmp = mk_tmp("mdonly");
+        write_file(&tmp.0, "a.md", "# A");
+        write_file(&tmp.0, "b.txt", "plain b");
+        write_file(&tmp.0, "sub/c.md", "# C");
+        write_file(&tmp.0, "ignore.rst", "rst");
+
+        let reg = Registry::defaults(); // md only
+        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        let rels: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&tmp.0)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert!(rels.contains(&"a.md".to_string()));
+        assert!(rels.contains(&"sub/c.md".to_string()));
+        assert!(!rels.iter().any(|r| r.ends_with(".txt")));
+        assert!(!rels.iter().any(|r| r.ends_with(".rst")));
+    }
+
+    #[test]
+    fn test_collect_source_files_md_and_txt_opt_in() {
+        let tmp = mk_tmp("mdtxt");
+        write_file(&tmp.0, "a.md", "# A");
+        write_file(&tmp.0, "b.txt", "plain");
+        write_file(&tmp.0, "ignore.rst", "rst");
+
+        let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
+        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        let rels: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&tmp.0)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert!(rels.contains(&"a.md".to_string()));
+        assert!(rels.contains(&"b.txt".to_string()));
+        assert!(!rels.iter().any(|r| r.ends_with(".rst")));
+    }
+
+    #[test]
+    fn test_collect_source_files_skips_obsidian() {
+        let tmp = mk_tmp("obsidian");
+        write_file(&tmp.0, "keep.md", "# keep");
+        write_file(&tmp.0, ".obsidian/workspace.md", "# should be skipped");
+        write_file(&tmp.0, ".obsidian/nested/evil.md", "# skip too");
+
+        let reg = Registry::defaults();
+        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        let rels: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&tmp.0)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(rels, vec!["keep.md".to_string()]);
+    }
+
+    #[test]
+    fn test_collect_source_files_case_insensitive_extension() {
+        let tmp = mk_tmp("case");
+        write_file(&tmp.0, "lower.md", "# lower");
+        write_file(&tmp.0, "UPPER.MD", "# upper");
+        write_file(&tmp.0, "note.TXT", "txt");
+
+        let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
+        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        assert_eq!(files.len(), 3, "should match regardless of case: {files:?}");
+    }
+
+    #[test]
+    fn test_collect_source_files_deterministic_ordering() {
+        let tmp = mk_tmp("sort");
+        write_file(&tmp.0, "zzz.md", "z");
+        write_file(&tmp.0, "aaa.md", "a");
+        write_file(&tmp.0, "mmm.md", "m");
+
+        let reg = Registry::defaults();
+        let f1 = collect_source_files(&tmp.0, &reg).unwrap();
+        let f2 = collect_source_files(&tmp.0, &reg).unwrap();
+        assert_eq!(f1, f2);
+        // First one should be aaa
+        assert!(f1[0].file_name().unwrap().to_string_lossy().starts_with("aaa"));
     }
 }

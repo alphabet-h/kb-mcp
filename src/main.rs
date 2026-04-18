@@ -4,6 +4,7 @@ pub mod embedder;
 pub mod graph;
 pub mod indexer;
 pub mod markdown;
+pub mod parser;
 pub mod quality;
 pub mod server;
 
@@ -16,8 +17,9 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(name = "kb-mcp")]
 #[command(
-    about = "MCP server for semantic search over a Markdown knowledge base",
-    long_about = "MCP server for semantic search over a Markdown knowledge base.\n\
+    about = "MCP server for semantic search over a knowledge base of Markdown and plain-text files",
+    long_about = "MCP server for semantic search over a knowledge base of Markdown\n\
+                  (and optionally plain-text, opt-in via [parsers].enabled) files.\n\
                   \n\
                   Any of the options below can be provided via `kb-mcp.toml` placed\n\
                   in the same directory as the binary. CLI arguments override the file."
@@ -221,6 +223,7 @@ fn main() -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_default()
                 .path_templates;
+            let parser_registry = cfg.build_parser_registry()?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 server::run_server(
@@ -231,6 +234,7 @@ fn main() -> anyhow::Result<()> {
                     exclude_headings,
                     quality_threshold,
                     best_practice_templates,
+                    parser_registry,
                 )
                 .await
             })?;
@@ -255,6 +259,7 @@ fn main() -> anyhow::Result<()> {
             if force {
                 db.reset_for_model(embedder.model_id(), dim)?;
             }
+            let registry = cfg.build_parser_registry()?;
             eprintln!("Indexing {}...", kb_path.display());
             let result = indexer::rebuild_index(
                 &db,
@@ -262,6 +267,7 @@ fn main() -> anyhow::Result<()> {
                 &kb_path,
                 force,
                 cfg.exclude_headings.as_deref(),
+                &registry,
             )?;
             eprintln!(
                 "Done in {}ms: {} docs ({} updated, {} renamed, {} deleted), {} chunks",

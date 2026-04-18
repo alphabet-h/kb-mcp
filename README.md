@@ -33,6 +33,13 @@ exclude_headings = ["次の深堀り候補", "参考リンク"]
 [quality_filter]
 enabled = true
 threshold = 0.3
+
+# Indexing extensions (feature 20). Omit the section to keep the pre-feature-20
+# behavior (.md only). Opt-in to .txt via an explicit list. An empty array is
+# rejected to prevent silent "nothing is indexed" failures.
+# Currently supported ids: "md", "txt".
+[parsers]
+enabled = ["md", "txt"]
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
@@ -47,7 +54,7 @@ kb-mcp index --kb-path /path/to/knowledge-base --force   # full re-index
 kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # switch to BGE-M3 (1024 dim, multilingual)
 ```
 
-Scans all `.md` files under the given directory, skipping `.obsidian/`. Files whose content hash has not changed since the last run are skipped unless `--force` is passed.
+Scans source files under the given directory, skipping `.obsidian/`. By default only `.md` is picked up (pre-feature-20 behavior). Add `[parsers].enabled = ["md", "txt"]` to `kb-mcp.toml` to also index `.txt` files — their title is derived from the filename (`deep-dive-2026.txt` → `"deep dive 2026"`) and the whole body becomes a single chunk. Files whose content hash has not changed since the last run are skipped unless `--force` is passed.
 
 `--model` accepts:
 - `bge-small-en-v1.5` (default) — 384 dim, English-focused, ~130 MB first download.

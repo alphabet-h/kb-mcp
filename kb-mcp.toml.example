@@ -61,3 +61,14 @@ path_templates = [
   "docs/{target}.md",                    # docs/ 配置
   "guides/{target}/README.md",           # guide 風
 ]
+
+# Indexing 対象の拡張子レジストリ (feature 20)。
+# 3 状態セマンティクス:
+#   - セクション自体なし        … ["md"] のみ (pre-feature-20 完全後方互換)
+#   - 明示的な空配列           … エラー (silent failure 防止)
+#   - 独自リスト                … そのリストに含まれる拡張子だけを対象に
+# 現状のバイナリで対応する id: "md" / "txt"
+# ("pdf" / "docx" / "rst" / "adoc" 等は将来追加予定、現在指定するとエラー)
+# 下記は .txt も index したい場合の例 ("md" のみ既定なら [parsers] ごと削除)。
+[parsers]
+enabled = ["md", "txt"]

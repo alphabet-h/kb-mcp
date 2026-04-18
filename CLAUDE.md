@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## プロジェクト概要
 
-Markdown ナレッジベースに対するセマンティック検索を提供する MCP (Model Context Protocol) サーバ。YAML frontmatter 付き `.md` ファイルを見出し単位でチャンク化し、選択可能な埋め込みモデル (BGE-small-en-v1.5 / BGE-M3) でベクトルを生成、sqlite-vec のベクトル検索と FTS5 全文検索を RRF で融合し、任意で cross-encoder reranker を適用する。stdio transport で Claude Code / Cursor に接続する。
+Markdown / テキストナレッジベースに対するセマンティック検索を提供する MCP (Model Context Protocol) サーバ。YAML frontmatter 付き `.md` ファイルを見出し単位でチャンク化し、選択可能な埋め込みモデル (BGE-small-en-v1.5 / BGE-M3) でベクトルを生成、sqlite-vec のベクトル検索と FTS5 全文検索を RRF で融合し、任意で cross-encoder reranker を適用する。stdio transport で Claude Code / Cursor に接続する。feature 20 で Parser trait 抽象を導入し `.txt` も opt-in 対応 (将来 `.pdf` / `.docx` / `.rst` / `.adoc` を拡張可能)。
 
 元は `ai_organization` リポジトリ内のサブディレクトリとして開発されていたが、独立プロジェクト化した。
 
@@ -60,6 +60,11 @@ exclude_headings = ["次の深堀り候補", "参考リンク"]
 [quality_filter]
 enabled = true
 threshold = 0.3
+
+# feature 20: index 対象の拡張子レジストリ。セクション省略で pre-feature-20 完全
+# 後方互換 (md のみ)。空配列はエラー。現在サポート: "md" / "txt"。
+[parsers]
+enabled = ["md", "txt"]
 ```
 
 - 全フィールド optional。テンプレートは `kb-mcp.toml.example` (リポジトリ同梱、`.gitignore` で `kb-mcp.toml` 本体は除外)
@@ -91,19 +96,20 @@ threshold = 0.3
 | `src/main.rs` | clap CLI エントリ。`index` / `status` / `serve` / `search` サブコマンドの分岐、`kb-mcp.toml` の読み込みと CLI 引数へのマージ、JSON/text 出力フォーマッタ |
 | `src/config.rs` | バイナリ同居 `kb-mcp.toml` のロード。CLI / config / 既定値の優先順位解決、`FASTEMBED_CACHE_DIR` の注入 |
 | `src/server.rs` | rmcp `ServerHandler` 実装。5 つの MCP ツールをディスパッチ。`search` は `db.search_hybrid` (vec + FTS5 + RRF) 経由 |
-| `src/indexer.rs` | walkdir で `.md` を走査 → markdown.rs でパース → embedder.rs で embedding → db.rs で格納。SHA-256 で差分検出。冒頭で `backfill_fts()` を呼び pre-feature-9 DB を自動移行 |
-| `src/markdown.rs` | pulldown-cmark で Markdown をパース、frontmatter 抽出、見出し単位でチャンク分割 |
+| `src/indexer.rs` | walkdir で対象拡張子 (`Registry::extensions()`) を走査 → Parser trait でパース → embedder.rs で embedding → db.rs で格納。SHA-256 で差分検出。冒頭で `backfill_fts()` を呼び pre-feature-9 DB を自動移行 |
+| `src/parser/` | [feature 20] Parser trait + Registry。`mod.rs` に Frontmatter/Chunk/ParsedDocument、`markdown.rs` に `.md` 実装、`txt.rs` に `.txt` 実装、`registry.rs` に拡張子ルックアップ |
+| `src/markdown.rs` | Parser trait への移行後は `crate::parser::markdown::MarkdownParser` への薄い shim (legacy `parse()` / `parse_with_excludes()` 公開 API を維持) |
 | `src/embedder.rs` | fastembed-rs の薄いラッパ。`ModelChoice` で埋め込みモデル (BGE-small-en-v1.5 / BGE-M3) を、`RerankerChoice` + `Reranker` で optional な cross-encoder 再ランクを提供 |
 | `src/db.rs` | rusqlite + sqlite-vec + FTS5 (trigram)。`chunks` / `vec_chunks` / `fts_chunks` の schema と CRUD、`search_hybrid` (RRF k=60) を提供 |
 
 ### データフロー
 
 ```
-.md ファイル群
+.md / .txt ファイル群 (Registry::extensions() で filter)
      ↓ walkdir
 indexer.rs: 差分検出 (SHA-256 vs .kb-mcp.db の chunks.hash)
      ↓ 変更ありのものだけ
-markdown.rs: frontmatter 抽出 + 見出しでチャンク化
+parser/: 拡張子で Parser を選択 → frontmatter/title 抽出 + チャンク化
      ↓
 embedder.rs: fastembed でベクトル生成 (BGE-small-en-v1.5 で 384 次元、BGE-M3 で 1024 次元)
      ↓

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::{Database, SearchHit};
 use crate::embedder::{Embedder, ModelChoice, Reranker, RerankerChoice};
 use crate::graph::{self, GraphOptions, SeedStrategy};
+use crate::parser::Registry;
 use crate::{indexer, markdown};
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,10 @@ pub struct KbServer {
     /// ものを読む。kb-mcp.toml 未指定時は legacy 既定
     /// `["best-practices/{target}/PERFECT.md"]`。
     best_practice_templates: Vec<String>,
+    /// feature 20: index 対象の拡張子レジストリ。`rebuild_index` MCP ツール
+    /// から `indexer::rebuild_index` に渡す。`kb-mcp.toml` の
+    /// `[parsers].enabled` が無ければ `Registry::defaults()` = `["md"]` のみ。
+    parser_registry: Registry,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -300,15 +305,12 @@ impl KbServer {
 
         match std::fs::read_to_string(&canonical) {
             Ok(raw) => {
-                let parsed = markdown::parse(&raw);
-                let resp = DocumentResponse {
-                    path: params.path,
-                    title: parsed.frontmatter.title,
-                    date: parsed.frontmatter.date,
-                    topic: parsed.frontmatter.topic,
-                    tags: parsed.frontmatter.tags,
-                    content: raw,
-                };
+                let ext = canonical
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let resp =
+                    build_document_response(&self.parser_registry, &params.path, ext, raw);
                 serde_json::to_string_pretty(&resp).unwrap_or_default()
             }
             Err(e) => serde_json::to_string_pretty(&ErrorResponse {
@@ -398,7 +400,7 @@ impl KbServer {
 
     #[tool(
         name = "rebuild_index",
-        description = "Rebuild the search index by scanning all Markdown files in the knowledge base."
+        description = "Rebuild the search index by scanning all source files in the knowledge base (Markdown plus any other extensions enabled via `[parsers].enabled` in kb-mcp.toml)."
     )]
     async fn rebuild_index(
         &self,
@@ -416,6 +418,7 @@ impl KbServer {
             &self.kb_path,
             force,
             self.exclude_headings.as_deref(),
+            &self.parser_registry,
         ) {
             Ok(result) => {
                 let stats = IndexStats {
@@ -498,6 +501,33 @@ impl KbServer {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// [feature 20] `get_document` ツール用に、拡張子に対応する Parser で
+/// frontmatter (title/date/topic/tags) を抽出し DocumentResponse を組む。
+/// 純粋関数化してテスト可能にしている。
+///
+/// 登録されていない拡張子はフォールバックで Markdown parser を使う (pre-
+/// feature-20 と同じ挙動)。`.txt` はファイル名から title を derive するため
+/// `path_hint` を必ず渡す。
+fn build_document_response(
+    registry: &Registry,
+    path_hint: &str,
+    ext: &str,
+    raw: String,
+) -> DocumentResponse {
+    let parsed = match registry.by_extension(ext) {
+        Some(p) => p.parse(&raw, path_hint, &[]),
+        None => markdown::parse(&raw),
+    };
+    DocumentResponse {
+        path: path_hint.to_string(),
+        title: parsed.frontmatter.title,
+        date: parsed.frontmatter.date,
+        topic: parsed.frontmatter.topic,
+        tags: parsed.frontmatter.tags,
+        content: raw,
+    }
+}
 
 /// `get_best_practice` のパス解決結果。
 #[derive(Debug, PartialEq)]
@@ -582,6 +612,7 @@ fn list_h2_sections(content: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Run the MCP server on stdio transport.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     kb_path: &std::path::Path,
     model: ModelChoice,
@@ -590,6 +621,7 @@ pub async fn run_server(
     exclude_headings: Option<Vec<String>>,
     quality_threshold: f32,
     best_practice_templates: Vec<String>,
+    parser_registry: Registry,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -610,6 +642,7 @@ pub async fn run_server(
         exclude_headings,
         quality_threshold,
         best_practice_templates,
+        parser_registry,
         tool_router: KbServer::tool_router(),
     };
 
@@ -747,5 +780,55 @@ mod tests {
             ResolveOutcome::NotFound(tried) => assert!(tried.is_empty()),
             ResolveOutcome::Found(_) => panic!("expected NotFound"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // [feature 20] build_document_response の拡張子認識
+    // evaluator 指摘 High #1: .txt で title が落ちる不整合を防ぐ回帰テスト。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_document_response_md_with_frontmatter() {
+        let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
+        let md = "---\ntitle: Hello\ntags: [a, b]\n---\n\n# body";
+        let resp =
+            build_document_response(&reg, "notes/hello.md", "md", md.to_string());
+        assert_eq!(resp.title.as_deref(), Some("Hello"));
+        assert_eq!(resp.tags, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(resp.path, "notes/hello.md");
+        assert!(resp.content.contains("# body"));
+    }
+
+    #[test]
+    fn test_build_document_response_txt_derives_title_from_filename() {
+        let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
+        let raw = "forest ecosystem notes body.";
+        let resp = build_document_response(
+            &reg,
+            "nature/forest-ecosystem-notes.txt",
+            "txt",
+            raw.to_string(),
+        );
+        // .txt has no frontmatter — title must come from the filename
+        assert_eq!(
+            resp.title.as_deref(),
+            Some("forest ecosystem notes"),
+            "search and get_document must return the same derived title"
+        );
+        assert!(resp.date.is_none());
+        assert!(resp.tags.is_empty());
+        assert_eq!(resp.content, raw);
+    }
+
+    #[test]
+    fn test_build_document_response_unknown_ext_falls_back_to_markdown() {
+        // 登録外の拡張子は markdown::parse にフォールバック (pre-feature-20 相当)。
+        // 通常は collect_source_files が registry の extensions しか拾わないため
+        // 到達しないが、外部からの直接 path 指定でも落ちないように。
+        let reg = Registry::defaults(); // md only
+        let raw = "---\ntitle: x\n---\n\nbody";
+        let resp = build_document_response(&reg, "a.unknown", "unknown", raw.to_string());
+        // markdown::parse が frontmatter を拾う
+        assert_eq!(resp.title.as_deref(), Some("x"));
     }
 }

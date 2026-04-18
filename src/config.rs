@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::embedder::{ModelChoice, RerankerChoice};
+use crate::parser::ParsersConfig;
 use crate::quality::QualityFilterConfig;
 
 /// バイナリと同じディレクトリに置く `kb-mcp.toml` の表現。
@@ -38,6 +39,11 @@ pub struct Config {
     /// [feature 16] `get_best_practice` MCP ツールで使うパス候補テンプレート。
     /// 省略時は `["best-practices/{target}/PERFECT.md"]` (後方互換)。
     pub best_practice: Option<BestPracticeConfig>,
+    /// [feature 20] Indexing 対象の拡張子リスト。
+    /// 省略時 (`None`) は `["md"]` のみ (pre-feature-20 完全後方互換)。`.txt`
+    /// 等を取り込みたい場合は明示的に `enabled = ["md", "txt"]` と opt-in する。
+    /// 空配列 `enabled = []` は誤設定として reject する。
+    pub parsers: Option<ParsersConfig>,
 }
 
 /// `get_best_practice` の汎用化設定 (feature 16)。
@@ -108,6 +114,14 @@ impl Config {
             );
         }
 
+        // feature 20: [parsers].enabled = [] は誤設定として reject。キー省略
+        // (parsers: None) の場合は Registry::defaults() = ["md"] が適用される
+        // ため silent failure の心配は無い。
+        if let Some(p) = &cfg.parsers {
+            p.validate()
+                .with_context(|| format!("{}: invalid [parsers] config", path.display()))?;
+        }
+
         Ok(cfg)
     }
 
@@ -122,6 +136,16 @@ impl Config {
             && self.exclude_headings.is_none()
             && self.quality_filter.is_none()
             && self.best_practice.is_none()
+            && self.parsers.is_none()
+    }
+
+    /// [feature 20] 設定から `parser::Registry` を構築する。キー省略時は
+    /// `Registry::defaults()` = `["md"]` のみ (pre-feature-20 後方互換)。
+    pub fn build_parser_registry(&self) -> Result<crate::parser::Registry> {
+        match &self.parsers {
+            Some(p) => crate::parser::Registry::from_enabled(&p.enabled),
+            None => Ok(crate::parser::Registry::defaults()),
+        }
     }
 
     /// `fastembed_cache_dir` が設定されていて、かつ環境変数
@@ -259,6 +283,67 @@ mod tests {
             err.to_string().contains("path_templates"),
             "error should mention path_templates, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_parsers_config_parses_from_toml() {
+        let mut file = tempfile("kb-mcp-config-parsers");
+        writeln!(
+            file,
+            "[parsers]\n\
+             enabled = [\"md\", \"txt\"]\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let p = cfg.parsers.expect("parsers must be Some");
+        assert_eq!(p.enabled, vec!["md".to_string(), "txt".to_string()]);
+    }
+
+    #[test]
+    fn test_parsers_config_empty_array_is_rejected() {
+        // [parsers].enabled = [] は誤設定として reject。キー省略なら defaults()
+        // = ["md"] が適用されて問題ない、という規約。
+        let mut file = tempfile("kb-mcp-config-parsers-empty");
+        writeln!(
+            file,
+            "[parsers]\n\
+             enabled = []\n"
+        )
+        .unwrap();
+        let err = Config::load_from(file.path()).expect_err("must reject empty array");
+        // anyhow::Context で包まれているので root cause まで辿る
+        let full = format!("{err:?}");
+        assert!(
+            full.contains("empty array") || full.contains("at least one id"),
+            "error should mention empty config, got: {full}"
+        );
+    }
+
+    #[test]
+    fn test_parsers_omitted_uses_md_default() {
+        // [parsers] セクション自体が無い場合は cfg.parsers は None、
+        // build_parser_registry() は Registry::defaults() = ["md"] を返す。
+        let mut file = tempfile("kb-mcp-config-parsers-omitted");
+        writeln!(file, r#"model = "bge-small-en-v1.5""#).unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        assert!(cfg.parsers.is_none());
+        let reg = cfg.build_parser_registry().unwrap();
+        assert_eq!(reg.extensions(), vec!["md"]);
+    }
+
+    #[test]
+    fn test_parsers_unknown_id_is_rejected() {
+        let mut file = tempfile("kb-mcp-config-parsers-unknown");
+        writeln!(
+            file,
+            "[parsers]\n\
+             enabled = [\"md\", \"pdf\"]\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        // validate is passed, but build_parser_registry should fail on "pdf"
+        let err = cfg.build_parser_registry().expect_err("pdf must be rejected");
+        assert!(err.to_string().contains("pdf"));
     }
 
     #[test]
