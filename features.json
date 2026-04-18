@@ -146,7 +146,7 @@
       "id": 21,
       "category": "quality",
       "description": "sqlite3_vec_init の transmute を型安全な方法に置換",
-      "status": "failing",
+      "status": "passing",
       "verification": "cargo clippy -- -D warnings がパスし、unsafe transmute が削除されている"
     },
     {

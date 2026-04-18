@@ -101,18 +101,28 @@ fn parse_dim_from_create_sql(sql: &str) -> Option<u32> {
 
 static INIT_VEC: Once = Once::new();
 
+// sqlite-vec crate (0.1.x) は `lib.rs` で `fn sqlite3_vec_init()` を引数なし
+// として宣言しているため、そのまま `sqlite3_auto_extension` に渡すには
+// transmute が必要だった。ここでは SQLite 拡張エントリポイントの正しい ABI
+// で同シンボルを再宣言することで、transmute を用いずに関数ポインタとして
+// 渡せるようにする。
+//
+// `#[link(name = "sqlite_vec0")]` は sqlite-vec crate 側の build.rs で用意
+// される静的ライブラリを引くためのもの。sqlite-vec crate 側の関数を直接
+// 呼ばなくなると dead-code eliminate でリンクから落ちることがあるため、
+// こちらでも同じ lib を link 指定する。
+#[link(name = "sqlite_vec0", kind = "static")]
+unsafe extern "C" {
+    fn sqlite3_vec_init(
+        db: *mut rusqlite::ffi::sqlite3,
+        pz_err_msg: *mut *mut std::ffi::c_char,
+        p_api: *const rusqlite::ffi::sqlite3_api_routines,
+    ) -> std::ffi::c_int;
+}
+
 fn ensure_vec_extension() {
     INIT_VEC.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut i8,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
+        rusqlite::ffi::sqlite3_auto_extension(Some(sqlite3_vec_init));
     });
 }
 

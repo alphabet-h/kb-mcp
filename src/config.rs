@@ -247,11 +247,11 @@ mod tests {
 
         let uncommented: String = raw
             .lines()
-            .filter_map(|line| {
+            .map(|line| {
                 let trimmed = line.trim_start();
                 // 見出しコメントや空行はそのまま (除外しても同じ挙動)
                 if trimmed.is_empty() {
-                    return Some(String::new());
+                    return String::new();
                 }
                 // `# key = value` 行を剥がす。ただし純粋な説明コメント
                 // (例: `# Copy this file...`) はそのまま残す (toml には
@@ -264,10 +264,10 @@ mod tests {
                             .next()
                             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                     {
-                        return Some(rest.to_string());
+                        return rest.to_string();
                     }
                 }
-                Some(line.to_string())
+                line.to_string()
             })
             .collect::<Vec<_>>()
             .join("\n");

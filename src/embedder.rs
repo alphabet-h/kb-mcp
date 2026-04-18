@@ -89,7 +89,7 @@ impl Embedder {
     /// 1. `FASTEMBED_CACHE_DIR` environment variable if set
     /// 2. OS-standard cache directory joined with `fastembed`
     ///    (Linux: `~/.cache/fastembed`, macOS: `~/Library/Caches/fastembed`,
-    ///     Windows: `%LOCALAPPDATA%\fastembed`)
+    ///    Windows: `%LOCALAPPDATA%\fastembed`)
     /// 3. `.fastembed_cache` relative to the working directory (fastembed's own default)
     pub fn new() -> Result<Self> {
         Self::with_model(ModelChoice::default())

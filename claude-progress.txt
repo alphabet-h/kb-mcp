@@ -243,3 +243,22 @@
     (CRLF 入力で title / topic / tags の値に \r が含まれないことを検証)
   - features.json の #22 を passing に
   - テスト 53 件 (4 ignored) 全てパス
+
+## 2026-04-18 Feature 21 — sqlite3_vec_init の transmute 除去
+
+- src/db.rs: `sqlite3_vec_init` の `std::mem::transmute` を廃止
+  - sqlite-vec 0.1.x は `fn sqlite3_vec_init()` を引数なしで宣言しているため
+    `sqlite3_auto_extension` に渡すには transmute で別 ABI にキャストが必要だった
+  - 本プロジェクト側で同シンボルを SQLite 拡張 ABI (db / pzErrMsg / pApi -> c_int)
+    で再宣言し、transmute なしで関数ポインタとしてそのまま渡せるようにした
+  - `#[link(name = "sqlite_vec0", kind = "static")]` を明示
+    (sqlite-vec crate 側の関数を参照しなくなるので dead-code 除去防止 +
+     MSVC で __imp_ lookup にならないよう kind=static 指定)
+  - unsafe ブロックは `sqlite3_auto_extension` 呼び出しだけに限定
+- src/embedder.rs: doc comment の overindented list warning を修正 (clippy)
+- src/config.rs: すべての分岐が Some(...) を返す filter_map を map に変更 (clippy)
+- verification:
+  - cargo clippy --all-targets -- -D warnings がクリーン (warning ゼロ)
+  - cargo test: 53 passed / 4 ignored (既存テスト全てパス)
+  - src/ から std::mem::transmute が完全除去されたことを grep で確認
+- features.json の #21 を passing に
