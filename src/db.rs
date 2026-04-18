@@ -111,6 +111,11 @@ static INIT_VEC: Once = Once::new();
 // される静的ライブラリを引くためのもの。sqlite-vec crate 側の関数を直接
 // 呼ばなくなると dead-code eliminate でリンクから落ちることがあるため、
 // こちらでも同じ lib を link 指定する。
+//
+// `kind = "static"` は sqlite-vec 0.1.x の build.rs が `cc::Build::compile()`
+// で静的 .lib を emit している前提に揃えている。将来 sqlite-vec が dylib に
+// 切り替えたら rustc が link 種別衝突エラーを出すので、その時点でこちらも
+// 追随する。
 #[link(name = "sqlite_vec0", kind = "static")]
 unsafe extern "C" {
     fn sqlite3_vec_init(

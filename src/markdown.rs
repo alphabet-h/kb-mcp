@@ -186,7 +186,9 @@ fn chunk_body(body: &str, excludes: &[&str]) -> Vec<Chunk> {
                 }
                 excluded = true;
                 current_lines.clear();
-                current_heading = Some(heading_text);
+                // excluded モードでは以降の行を flush しないので heading 名
+                // の保持は不要 (evaluator 指摘: 無意味な代入を除去)。
+                current_heading = None;
                 continue;
             }
 

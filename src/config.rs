@@ -266,6 +266,13 @@ mod tests {
         let raw = std::fs::read_to_string(&example_path)
             .expect("kb-mcp.toml.example must exist at repository root");
 
+        // 同じキーを 2 回以上コメント化して例示することがある
+        // (例: exclude_headings の `[...]` と `[]` の両方を示す)。
+        // uncomment 後に重複キーになると toml::from_str がエラーになるので、
+        // 「同じキーは最初の 1 行だけ uncomment、以降はコメントのまま残す」
+        // 方針で剥がす。
+        let mut seen_keys: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let uncommented: String = raw
             .lines()
             .map(|line| {
@@ -279,13 +286,17 @@ mod tests {
                 // 影響しないので除外しても同じ)。判定は `# <ident> =` の形。
                 if let Some(rest) = trimmed.strip_prefix('#') {
                     let rest = rest.trim_start();
-                    if rest.contains('=')
+                    if let Some(eq_idx) = rest.find('=')
                         && rest
                             .chars()
                             .next()
                             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                     {
-                        return rest.to_string();
+                        let key = rest[..eq_idx].trim().to_string();
+                        if seen_keys.insert(key) {
+                            return rest.to_string();
+                        }
+                        // 2 回目以降はコメントのまま残して重複を避ける
                     }
                 }
                 line.to_string()

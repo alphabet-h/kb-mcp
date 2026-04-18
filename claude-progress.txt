@@ -299,3 +299,24 @@
   - `Some([])` (明示的な空) = 除外なし
   - `Some([...])` = デフォルトを完全上書き (merge ではなく replace)
   マッチは substring (`heading_text.contains(pattern)`) で、短いパターンで柔軟にヒット。
+
+## 2026-04-18 evaluator 指摘対応 (21+14 レビュー後)
+
+evaluator PASS (34/40) の Low 指摘 3 件を軽微修正:
+
+- #1 db.rs コメント補強: `kind = "static"` が sqlite-vec 0.1.x の build.rs
+  前提である旨と、将来 dylib 化した場合の追随方針を追記
+- #2 markdown.rs `chunk_body`: excluded 分岐で `current_heading = Some(...)` と
+  していた無意味な代入を `None` に変更 (可読性向上、挙動は変わらず)
+- #4 kb-mcp.toml.example: 3 状態セマンティクス (省略/独自/空配列) を doc コメント
+  で明記、`exclude_headings = []` (除外なし) の例を追記
+- #3 (MCP rebuild_index の per-call override) は feature 14 スコープ外、見送り
+
+副次対応:
+- src/config.rs `test_toml_example_parses_with_all_keys_uncommented` を拡張:
+  同じキーが 2 回例示される場合に備え、「最初の 1 行だけ uncomment、以降は
+  コメントのまま」方針で重複エラーを回避
+
+verification:
+- cargo test: 56 passed / 4 ignored (increment なし)
+- cargo clippy --all-targets -- -D warnings: クリーン
