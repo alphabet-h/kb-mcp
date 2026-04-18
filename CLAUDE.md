@@ -156,11 +156,10 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub kb-mcp index --kb-path ... --model 
 
 - HTTP/SSE トランスポート (複数クライアント同時接続)
 - ライブ同期 (`notify` クレートによる file watcher 駆動の増分再インデックス)
-- コンテンツハッシュベースのファイル移動検出
 - Markdown 以外のファイル対応 (.txt / .rst / .adoc)
 - Frontmatter スキーマ検証
 
-実装済みの履歴 (feature 7-10, 13-16, 19, 21-24 + evaluator 指摘対応) は `claude-progress.txt` と `features.json` を参照。
+実装済みの履歴 (feature 7-11, 13-16, 19, 21-24 + evaluator 指摘対応) は `claude-progress.txt` と `features.json` を参照。
 
 ## 運用の細則
 

@@ -147,6 +147,9 @@ struct BestPracticeResponse {
 struct IndexStats {
     total_documents: u32,
     updated: u32,
+    /// [feature 11] File-rename を検出して path だけ UPDATE した件数。
+    #[serde(default)]
+    renamed: u32,
     deleted: u32,
     total_chunks: u32,
     duration_ms: u64,
@@ -418,6 +421,7 @@ impl KbServer {
                 let stats = IndexStats {
                     total_documents: result.total_documents,
                     updated: result.updated,
+                    renamed: result.renamed,
                     deleted: result.deleted,
                     total_chunks: result.total_chunks,
                     duration_ms: result.duration_ms,

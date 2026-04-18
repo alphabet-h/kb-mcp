@@ -76,8 +76,8 @@
       "id": 11,
       "category": "upgrade-indexing",
       "description": "content_hash ベースのファイル移動検出 (移動時に embedding 再利用)",
-      "status": "failing",
-      "verification": "ファイルをリネームした場合、embedding 再計算が走らず path だけ更新される"
+      "status": "passing",
+      "verification": "ファイルをリネームした場合、embedding 再計算が走らず path だけ更新される (indexer は rebuild 冒頭で disk/DB の path-hash を突き合わせ、hash 一致ペアを rename_document で path だけ UPDATE。IndexResult.renamed にカウント)"
     },
     {
       "id": 12,

@@ -1076,6 +1076,41 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+
+    /// `documents.path` と `content_hash` の全対応を取得する。
+    /// feature 11 (ファイル移動検出) で、disk 側 hash と突き合わせて
+    /// 「embedding 再利用 + path だけ UPDATE」判定に使う。
+    pub fn all_path_hashes(&self) -> Result<HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, content_hash FROM documents")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (p, h) = row?;
+            out.insert(p, h);
+        }
+        Ok(out)
+    }
+
+    /// [feature 11] 既存ドキュメントのパスを書き換える。
+    /// `chunks` / `vec_chunks` / `fts_chunks` は `document_id` 経由で紐付いて
+    /// いるため、`documents.path` のみを UPDATE すれば embedding の再計算は
+    /// 不要。移動先 path が既に使われている場合は UNIQUE 制約違反でエラー。
+    pub fn rename_document(&self, old_path: &str, new_path: &str) -> Result<()> {
+        let updated = self.conn.execute(
+            "UPDATE documents SET path = ?1 WHERE path = ?2",
+            params![new_path, old_path],
+        )?;
+        if updated == 0 {
+            anyhow::bail!(
+                "rename_document: no document with path '{old_path}' (rows updated: 0)"
+            );
+        }
+        Ok(())
+    }
 }
 
 // ===========================================================================
@@ -1307,6 +1342,63 @@ mod tests {
         assert!(updated1 >= 1, "stub chunk must be updated, got {updated1}");
         let updated2 = db.backfill_quality().unwrap();
         assert_eq!(updated2, 0, "second call must be a no-op");
+    }
+
+    #[test]
+    fn test_rename_document_preserves_chunks() {
+        // feature 11: rename_document は path だけ変え、chunks/vec/fts は維持する
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document(
+                "old/path.md",
+                Some("T"),
+                None,
+                None,
+                None,
+                &[],
+                None,
+                "hash_same",
+            )
+            .unwrap();
+        db.insert_chunk(doc_id, 0, Some("H"), "content", &dummy_embedding(0.1), 1.0)
+            .unwrap();
+        assert_eq!(db.chunk_count().unwrap(), 1);
+
+        // rename
+        db.rename_document("old/path.md", "new/path.md").unwrap();
+
+        // chunk 数は不変 (embedding 再計算されない)
+        assert_eq!(db.chunk_count().unwrap(), 1);
+        // hash は移動しても同じ
+        assert_eq!(
+            db.get_document_hash("new/path.md").unwrap().as_deref(),
+            Some("hash_same")
+        );
+        assert!(db.get_document_hash("old/path.md").unwrap().is_none());
+        // path -> hash map でも反映されている
+        let map = db.all_path_hashes().unwrap();
+        assert_eq!(map.get("new/path.md"), Some(&"hash_same".to_string()));
+        assert!(!map.contains_key("old/path.md"));
+    }
+
+    #[test]
+    fn test_rename_document_missing_source_errors() {
+        let db = db_with_384();
+        let err = db.rename_document("nope.md", "else.md").expect_err("must error");
+        assert!(err.to_string().contains("no document"));
+    }
+
+    #[test]
+    fn test_all_path_hashes_returns_all_rows() {
+        let db = db_with_384();
+        db.upsert_document("a.md", None, None, None, None, &[], None, "h_a")
+            .unwrap();
+        db.upsert_document("b.md", None, None, None, None, &[], None, "h_b")
+            .unwrap();
+        let map = db.all_path_hashes().unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("a.md"), Some(&"h_a".to_string()));
+        assert_eq!(map.get("b.md"), Some(&"h_b".to_string()));
     }
 
     #[test]

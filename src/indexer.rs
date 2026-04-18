@@ -17,6 +17,9 @@ use crate::{markdown, quality};
 pub struct IndexResult {
     pub total_documents: u32,
     pub updated: u32,
+    /// [feature 11] File-rename を検出した件数。embedding は再計算されず
+    /// `documents.path` だけが UPDATE された数。
+    pub renamed: u32,
     pub deleted: u32,
     pub total_chunks: u32,
     pub duration_ms: u64,
@@ -67,40 +70,91 @@ pub fn rebuild_index(
     let md_files = collect_md_files(&kb_path)?;
     eprintln!("Found {} markdown files", md_files.len());
 
+    // [feature 11] ファイル移動検出のため、先に
+    //  (a) disk 側の各ファイルの hash
+    //  (b) DB 側の全 (path, hash) ペア
+    // を取って「DB には古い path、disk には同 hash の新 path」ペアを探す。
+    //
+    // force=true (--force) 指定時は embedding を全件再計算する意図なので、
+    // rename 検出自体をスキップする (重複 path UPDATE を避ける)。
+    let disk_entries: Vec<(String /* rel */, String /* hash */, String /* content */, std::path::PathBuf)> = md_files
+        .iter()
+        .map(|p| -> Result<_> {
+            let content = std::fs::read_to_string(p)
+                .with_context(|| format!("failed to read {}", p.display()))?;
+            let rel = p
+                .strip_prefix(&kb_path)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let hash = sha256_hex(&content);
+            Ok((rel, hash, content, p.clone()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut renamed: u32 = 0;
+    let mut renamed_paths: HashSet<String> = HashSet::new(); // new path (rename 済)
+    if !force {
+        let db_path_hashes = db.all_path_hashes()?;
+        let disk_paths: HashSet<&str> =
+            disk_entries.iter().map(|(r, ..)| r.as_str()).collect();
+
+        // DB にあるが disk から消えた = 移動 or 削除の候補
+        // 複数同 hash があった場合は「先頭に見つけた disk new-path」を採用 (安定順)
+        let orphan_in_db: Vec<(String, String)> = db_path_hashes
+            .iter()
+            .filter(|(p, _)| !disk_paths.contains(p.as_str()))
+            .map(|(p, h)| (p.clone(), h.clone()))
+            .collect();
+
+        for (old_path, old_hash) in &orphan_in_db {
+            // disk 側で (hash 一致 & DB にまだ同 path が無い & 他の rename に
+            // 使っていない) 新 path を探す
+            let mut chosen: Option<String> = None;
+            for (new_rel, new_hash, _, _) in &disk_entries {
+                if new_hash != old_hash {
+                    continue;
+                }
+                if db_path_hashes.contains_key(new_rel) {
+                    continue; // その path は既に DB にある = 別文書
+                }
+                if renamed_paths.contains(new_rel) {
+                    continue;
+                }
+                chosen = Some(new_rel.clone());
+                break;
+            }
+            if let Some(new_path) = chosen {
+                db.rename_document(old_path, &new_path)?;
+                renamed_paths.insert(new_path.clone());
+                renamed += 1;
+                eprintln!("  renamed: {old_path} -> {new_path}");
+            }
+        }
+    }
+
     // Track paths we visit so we can detect deletions later.
     let mut visited_paths: HashSet<String> = HashSet::new();
     let mut updated: u32 = 0;
 
     // 2. Process each file
-    for file_path in &md_files {
-        let content = std::fs::read_to_string(file_path)
-            .with_context(|| format!("failed to read {}", file_path.display()))?;
-
-        // Relative path with forward slashes (portable storage key).
-        let rel_path = file_path
-            .strip_prefix(&kb_path)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
+    for (rel_path, hash, content, _file_path) in &disk_entries {
         visited_paths.insert(rel_path.clone());
 
-        // 2a. SHA-256 content hash
-        let hash = sha256_hex(&content);
-
-        // 2b. Skip unchanged files unless forced
+        // 2b. Skip unchanged files unless forced.
+        // rename で path UPDATE 済のものは「DB 側 hash == disk hash」なので
+        // この経路で自然に skip される (embedding 再計算なし)。
         if !force
-            && let Some(existing_hash) = db.get_document_hash(&rel_path)?
-                && existing_hash == hash {
-                    // Count existing chunks for the total
-                    // (we don't re-embed, but they still exist in the DB)
-                    continue;
-                }
+            && let Some(existing_hash) = db.get_document_hash(rel_path)?
+            && &existing_hash == hash
+        {
+            continue;
+        }
 
         // 2c. Parse markdown (with optional heading exclude override)
         let parsed = match exclude_headings {
-            Some(list) => markdown::parse_with_excludes(&content, list),
-            None => markdown::parse(&content),
+            Some(list) => markdown::parse_with_excludes(content, list),
+            None => markdown::parse(content),
         };
 
         // Skip files with no embeddable chunks
@@ -109,11 +163,11 @@ pub fn rebuild_index(
         }
 
         // 2d. Extract category and topic from relative path
-        let (category, topic) = extract_category_topic(&rel_path);
+        let (category, topic) = extract_category_topic(rel_path);
 
         // 2e. Upsert document (deletes old chunks internally)
         let doc_id = db.upsert_document(
-            &rel_path,
+            rel_path,
             parsed.frontmatter.title.as_deref(),
             // Prefer frontmatter topic, fall back to path-derived topic
             parsed
@@ -125,7 +179,7 @@ pub fn rebuild_index(
             parsed.frontmatter.depth.as_deref(),
             &parsed.frontmatter.tags,
             parsed.frontmatter.date.as_deref(),
-            &hash,
+            hash,
         )?;
 
         // 2f. Batch-embed all chunks
@@ -175,6 +229,7 @@ pub fn rebuild_index(
     Ok(IndexResult {
         total_documents,
         updated,
+        renamed,
         deleted,
         total_chunks: total_chunks_in_db,
         duration_ms,

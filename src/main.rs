@@ -264,10 +264,11 @@ fn main() -> anyhow::Result<()> {
                 cfg.exclude_headings.as_deref(),
             )?;
             eprintln!(
-                "Done in {}ms: {} docs ({} updated, {} deleted), {} chunks",
+                "Done in {}ms: {} docs ({} updated, {} renamed, {} deleted), {} chunks",
                 result.duration_ms,
                 result.total_documents,
                 result.updated,
+                result.renamed,
                 result.deleted,
                 result.total_chunks
             );
