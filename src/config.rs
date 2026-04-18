@@ -94,6 +94,20 @@ impl Config {
                 .fastembed_cache_dir
                 .map(|p| resolve_relative(base, p));
         }
+
+        // feature 16: `[best_practice] path_templates = []` は誤設定として
+        // 早期に reject する (どのテンプレにもマッチせず毎回 not-found に
+        // なる silent failure を防ぐ)。未定義 or キー省略は legacy default
+        // が入るので問題にならない。
+        if let Some(bp) = &cfg.best_practice
+            && bp.path_templates.is_empty()
+        {
+            anyhow::bail!(
+                "{}: [best_practice].path_templates must contain at least one template (got empty array). Remove the key entirely to use the default [\"best-practices/{{target}}/PERFECT.md\"].",
+                path.display()
+            );
+        }
+
         Ok(cfg)
     }
 
@@ -225,6 +239,25 @@ mod tests {
         assert_eq!(
             bp.path_templates,
             vec!["best-practices/{target}/PERFECT.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_best_practice_explicit_empty_is_rejected() {
+        // `path_templates = []` を明示する場合は誤設定として reject する
+        // (毎回 not-found になる silent failure を防ぐため。キー省略なら
+        // default が適用されて問題ない)。
+        let mut file = tempfile("kb-mcp-config-bp-empty");
+        writeln!(
+            file,
+            "[best_practice]\n\
+             path_templates = []\n"
+        )
+        .unwrap();
+        let err = Config::load_from(file.path()).expect_err("must reject empty array");
+        assert!(
+            err.to_string().contains("path_templates"),
+            "error should mention path_templates, got: {err}"
         );
     }
 

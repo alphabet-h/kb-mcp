@@ -323,36 +323,22 @@ impl KbServer {
         &self,
         Parameters(params): Parameters<GetBestPracticeParams>,
     ) -> String {
-        // feature 16: 設定されたテンプレート列を先頭から試す。
-        // `{target}` を params.target に置換、kb_path 相対で canonicalize し、
-        // 存在 + kb_path 配下の最初の候補を採用する。
-        let mut canonical: Option<PathBuf> = None;
-        let mut tried_paths: Vec<String> = Vec::new();
-        for tmpl in &self.best_practice_templates {
-            let rel = tmpl.replace("{target}", &params.target);
-            tried_paths.push(rel.clone());
-            let p = self.kb_path.join(&rel);
-            let c = match p.canonicalize() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if !c.starts_with(&self.kb_path) {
-                // path traversal 防止
-                continue;
+        let canonical = match resolve_best_practice_path(
+            &self.kb_path,
+            &self.best_practice_templates,
+            &params.target,
+        ) {
+            ResolveOutcome::Found(p) => p,
+            ResolveOutcome::NotFound(tried) => {
+                return serde_json::to_string_pretty(&ErrorResponse {
+                    error: format!(
+                        "Best-practices document for target '{}' not found. Tried: [{}]",
+                        params.target,
+                        tried.join(", ")
+                    ),
+                })
+                .unwrap_or_default();
             }
-            canonical = Some(c);
-            break;
-        }
-
-        let Some(canonical) = canonical else {
-            return serde_json::to_string_pretty(&ErrorResponse {
-                error: format!(
-                    "Best-practices document for target '{}' not found. Tried: [{}]",
-                    params.target,
-                    tried_paths.join(", ")
-                ),
-            })
-            .unwrap_or_default();
         };
 
         match std::fs::read_to_string(&canonical) {
@@ -509,6 +495,42 @@ impl KbServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// `get_best_practice` のパス解決結果。
+#[derive(Debug, PartialEq)]
+enum ResolveOutcome {
+    /// `canonicalize` 済みのファイル絶対パス。
+    Found(PathBuf),
+    /// どのテンプレートにもマッチしなかった。試行した相対パス列。
+    NotFound(Vec<String>),
+}
+
+/// feature 16: テンプレート列に `{target}` を置換してファイルを探す。
+/// 先頭から順に試し、`canonicalize` 成功 & `kb_path` 配下に収まる最初の
+/// 候補を返す。`kb_path` は呼び出し側で既に canonicalize されている前提
+/// (`run_server` / tests で事前処理)。
+fn resolve_best_practice_path(
+    kb_path: &std::path::Path,
+    templates: &[String],
+    target: &str,
+) -> ResolveOutcome {
+    let mut tried: Vec<String> = Vec::new();
+    for tmpl in templates {
+        let rel = tmpl.replace("{target}", target);
+        tried.push(rel.clone());
+        let candidate = kb_path.join(&rel);
+        let canon = match candidate.canonicalize() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !canon.starts_with(kb_path) {
+            // path traversal reject
+            continue;
+        }
+        return ResolveOutcome::Found(canon);
+    }
+    ResolveOutcome::NotFound(tried)
+}
+
 /// Extract the h2 section whose heading contains `category_lower` (case-insensitive).
 /// Returns all text from that heading until the next h2 heading.
 fn extract_section(content: &str, category: &str) -> Option<String> {
@@ -596,4 +618,130 @@ pub async fn run_server(
     service.waiting().await?;
 
     Ok(())
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 一意な tempdir を作って kb_path として返す。Drop で削除。
+    struct TempKb {
+        path: PathBuf,
+    }
+    impl TempKb {
+        fn new(prefix: &str) -> Self {
+            let pid = std::process::id();
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("kb-mcp-srvtest-{prefix}-{pid}-{nonce}"));
+            fs::create_dir_all(&path).unwrap();
+            let canon = path.canonicalize().unwrap();
+            Self { path: canon }
+        }
+        fn write(&self, rel: &str, content: &str) -> PathBuf {
+            let full = self.path.join(rel);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&full, content).unwrap();
+            full
+        }
+    }
+    impl Drop for TempKb {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn test_resolve_best_practice_first_template_hit() {
+        let kb = TempKb::new("bp1");
+        kb.write("best-practices/claude-code/PERFECT.md", "# CC\n");
+        let templates = vec!["best-practices/{target}/PERFECT.md".to_string()];
+        let r = resolve_best_practice_path(&kb.path, &templates, "claude-code");
+        match r {
+            ResolveOutcome::Found(p) => {
+                assert!(p.ends_with("best-practices/claude-code/PERFECT.md")
+                    || p.ends_with("best-practices\\claude-code\\PERFECT.md"));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_best_practice_falls_through_to_second_template() {
+        let kb = TempKb::new("bp2");
+        kb.write("docs/cursor.md", "# cursor\n");
+        let templates = vec![
+            "best-practices/{target}/PERFECT.md".to_string(), // 不存在
+            "docs/{target}.md".to_string(),                   // ヒット
+        ];
+        let r = resolve_best_practice_path(&kb.path, &templates, "cursor");
+        match r {
+            ResolveOutcome::Found(p) => assert!(p.ends_with("docs/cursor.md")
+                || p.ends_with("docs\\cursor.md")),
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_best_practice_traversal_rejected() {
+        let kb = TempKb::new("bp3");
+        // kb_path の外側にファイルを作る (親ディレクトリに)
+        let outside = kb.path.parent().unwrap().join(format!(
+            "kb-mcp-srvtest-outside-{}-{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&outside, "secret").unwrap();
+
+        // `{target}` に `../<ファイル名>` を入れて kb 外を指す
+        let target_rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let templates = vec!["{target}".to_string()];
+        let r = resolve_best_practice_path(&kb.path, &templates, &target_rel);
+        // 実ファイルは存在するが kb_path 配下ではないので拒否される
+        match r {
+            ResolveOutcome::NotFound(tried) => {
+                assert_eq!(tried.len(), 1);
+            }
+            ResolveOutcome::Found(p) => panic!("traversal was not rejected: {p:?}"),
+        }
+        let _ = fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn test_resolve_best_practice_all_missing_returns_tried_list() {
+        let kb = TempKb::new("bp4");
+        let templates = vec![
+            "a/{target}.md".to_string(),
+            "b/{target}.md".to_string(),
+        ];
+        let r = resolve_best_practice_path(&kb.path, &templates, "nope");
+        match r {
+            ResolveOutcome::NotFound(tried) => {
+                assert_eq!(tried, vec!["a/nope.md".to_string(), "b/nope.md".to_string()]);
+            }
+            ResolveOutcome::Found(p) => panic!("expected NotFound, got {p:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_best_practice_empty_templates_returns_empty_tried() {
+        let kb = TempKb::new("bp5");
+        let r = resolve_best_practice_path(&kb.path, &[], "any");
+        match r {
+            ResolveOutcome::NotFound(tried) => assert!(tried.is_empty()),
+            ResolveOutcome::Found(_) => panic!("expected NotFound"),
+        }
+    }
 }

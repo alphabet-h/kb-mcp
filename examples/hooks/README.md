@@ -9,8 +9,10 @@ re-run indexing manually.
 
 | File | Purpose |
 |---|---|
-| `settings.json` | Minimal drop-in snippet — copy the `hooks` block into your project's `.claude/settings.json`. Rebuilds the index unconditionally after any `Write` / `Edit` / `MultiEdit` / `Skill`. |
-| `rebuild-on-edit.sh` | Richer shell hook that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH`. Recommended when the Claude Code project touches files outside the knowledge base. |
+| `settings.snippet.json` | Minimal `hooks` block to copy into your project's `.claude/settings.json` — it is **not** a complete settings file. Rebuilds the index unconditionally after any `Write` / `Edit` / `MultiEdit` / `Skill`. |
+| `rebuild-on-edit.sh` | Richer shell hook that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH`. Recommended when the Claude Code project touches files outside the knowledge base. Requires a Unix-like shell (bash + jq); Windows users should run it from Git Bash or WSL. |
+
+**Notes on the `Skill` matcher**: Claude Code exposes skills via a `Skill` tool at the time of writing (v1.x). If your installed Claude Code version renames or splits this tool, adjust the matcher accordingly — no other part of kb-mcp depends on the tool name.
 
 ## Tier A — unconditional rebuild (simplest)
 
