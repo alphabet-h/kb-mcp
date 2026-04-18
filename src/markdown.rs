@@ -113,11 +113,23 @@ fn extract_frontmatter(raw: &str) -> (Frontmatter, String) {
     let after_first = after_first.strip_prefix('\n').unwrap_or(after_first);
 
     if let Some(end) = after_first.find("\n---") {
-        let yaml_str = &after_first[..end];
+        let yaml_raw = &after_first[..end];
         let body_start = end + 4; // skip the `\n---`
         let rest = &after_first[body_start..];
         // Trim the leading newline(s) after the closing ---
         let body = rest.trim_start_matches(['\r', '\n']).to_string();
+
+        // Windows 生成の `.md` で `\r\n` 改行のとき、yaml_raw 各行末に `\r` が
+        // 残ってしまい serde_yaml のパース結果の文字列 value にリークする
+        // ことがある (例: `title: "Foo"` が `"Foo\r"` になる)。パース前に
+        // CRLF → LF へ正規化しておく。
+        let yaml_normalized;
+        let yaml_str: &str = if yaml_raw.contains('\r') {
+            yaml_normalized = yaml_raw.replace("\r\n", "\n").replace('\r', "\n");
+            &yaml_normalized
+        } else {
+            yaml_raw
+        };
 
         let fm = match serde_yaml::from_str::<RawFrontmatter>(yaml_str) {
             Ok(raw_fm) => Frontmatter::from(raw_fm),
@@ -250,6 +262,29 @@ mod tests {
         assert_eq!(doc.frontmatter.title.as_deref(), Some("MCP プロトコル概要"));
         assert_eq!(doc.frontmatter.tags, vec!["mcp", "protocol", "overview"]);
         assert_eq!(doc.frontmatter.date.as_deref(), Some("2026-04-10"));
+    }
+
+    #[test]
+    fn test_crlf_frontmatter_values_have_no_trailing_cr() {
+        // Windows 生成の `.md` を想定した CRLF 改行付きの入力。
+        // 正規化を入れないと serde_yaml の string value に `\r` がリークする。
+        let crlf = "---\r\n\
+                    title: \"CRLF Title\"\r\n\
+                    topic: mcp\r\n\
+                    tags:\r\n\
+                      - a\r\n\
+                      - b\r\n\
+                    ---\r\n\
+                    \r\n\
+                    # Body\r\n\
+                    Some content.\r\n";
+        let doc = parse(crlf);
+        let title = doc.frontmatter.title.as_deref().unwrap_or("");
+        assert!(!title.contains('\r'), "title must not retain CR: {title:?}");
+        assert_eq!(title, "CRLF Title");
+        assert_eq!(doc.frontmatter.topic.as_deref(), Some("mcp"));
+        assert!(!doc.frontmatter.tags.iter().any(|t| t.contains('\r')));
+        assert_eq!(doc.frontmatter.tags, vec!["a", "b"]);
     }
 
     #[test]

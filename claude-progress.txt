@@ -235,3 +235,11 @@
     Config::toml::from_str でパース。deny_unknown_fields により、example に
     Config から削除されたキーが残ると検知される (削除時の回帰ガード)
   - テスト 52 件 (4 ignored) すべてパス。config テスト 9 件に拡充
+- feature 22 実装完了 (YAML frontmatter CRLF 正規化)
+  - src/markdown.rs::extract_frontmatter で yaml_str を serde_yaml に渡す
+    前に、\r があれば replace("\r\n","\n").replace('\r','\n') で LF 正規化
+  - 正規化は \r を含む場合のみ行うので、LF-only の入力にはコスト増なし
+  - 新規テスト 1 件: test_crlf_frontmatter_values_have_no_trailing_cr
+    (CRLF 入力で title / topic / tags の値に \r が含まれないことを検証)
+  - features.json の #22 を passing に
+  - テスト 53 件 (4 ignored) 全てパス
