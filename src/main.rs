@@ -97,6 +97,13 @@ enum Commands {
         /// Filter by topic
         #[arg(long)]
         topic: Option<String>,
+        /// Comma-separated paths to exclude from the graph (in addition to
+        /// the start path which is always excluded).
+        #[arg(long, value_delimiter = ',')]
+        exclude: Vec<String>,
+        /// Collapse same-path hits so each document appears at most once.
+        #[arg(long = "dedup-by-path", default_value_t = false)]
+        dedup_by_path: bool,
         /// Output format
         #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
         format: SearchFormat,
@@ -312,15 +319,23 @@ fn main() -> anyhow::Result<()> {
             seed_strategy,
             category,
             topic,
+            exclude,
+            dedup_by_path,
             format,
         } => {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
 
             let db_path = resolve_db_path(&kb_path);
+            // Status と同じく、DB がまだ作られていない状態を親切なエラーで弾く。
+            if !db_path.exists() {
+                anyhow::bail!(
+                    "No index found at {}. Run `kb-mcp index --kb-path {}` first.",
+                    db_path.display(),
+                    kb_path.display()
+                );
+            }
             let db = db::Database::open(&db_path.to_string_lossy())?;
-            // graph は embedder 不要 (起点 embedding は DB から取る)。
-            // ただし model 指定時は整合性を確認して早期にエラーにする。
             db.verify_embedding_meta(model.model_id(), model.dimension() as u32)?;
 
             let opts = graph::GraphOptions {
@@ -330,7 +345,8 @@ fn main() -> anyhow::Result<()> {
                 seed_strategy: seed_strategy.into(),
                 category,
                 topic,
-                exclude_paths: Vec::new(),
+                exclude_paths: exclude,
+                dedup_by_path,
             };
             let g = graph::build_connection_graph(&db, &start, &opts)?;
             print_graph(g, format);

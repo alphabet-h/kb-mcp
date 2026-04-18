@@ -383,3 +383,52 @@ planner で仕様化 (PASS レベルの詳細度) → 実装。
 
 破壊的変更: なし。DB schema 不変、既存 5 ツール維持、`search_vec_candidates`
 の可視性が private → pub(crate) になっただけ。
+
+## 2026-04-18 evaluator 指摘対応 (feature 15 レビュー後)
+
+evaluator PASS (25/30) の High 2 / Med 4 / Low 指摘のうち、費用対効果が高い
+5 件を修正。N+1 SELECT (Med #4) は in-memory DB で顕在化しないため見送り。
+
+### High
+
+1. **centroid 正規化 (High #1)**:
+   - `l2_normalize()` を追加し、centroid シード計算後に呼び出す
+   - 単位ベクトルの平均は norm<1 になるため、再正規化しないと
+     `distance_to_cos_sim(d) = 1 - d²/2` の前提が崩れて score 表示値が誤解を招く
+   - docstring を「L2 再正規化する」に更新
+2. **path dedup (High #2)**:
+   - `GraphOptions.dedup_by_path: bool` を追加
+   - `true` のとき同一 path は 1 チャンクのみ (visited_paths HashSet)
+   - `false` (default) は従来どおり別チャンクを別ノードとして並べる
+   - GraphStats.max_depth_reached の docstring も「到達最大深さ」と明示
+
+### Med
+
+3. **fan_out=0 ガード (Med #3)**:
+   - BFS 入口で `fan_out == 0` なら seeds のみ返して短絡
+   - sqlite-vec が `k=0` でエラーになるのを防ぐ
+5. **CLI --exclude / --dedup-by-path (Med #5)**:
+   - `kb-mcp graph --exclude path1,path2 --dedup-by-path` を受け付け
+   - `value_delimiter = ','` でカンマ区切り複数値
+6. **DB 不在メッセージ (Med #6)**:
+   - `Graph` サブコマンドで db_path.exists() を先にチェック
+   - Status と同じ「`kb-mcp index` を先に走らせて」の親切エラー
+
+### 副次的に HashSet 化
+
+- `exclude_paths: Vec<String>` を毎候補 linear scan していたのを、
+  内部で `visited_paths: HashSet<String>` に統合して O(1) に
+
+### 新規テスト 3 件 (70 → 73)
+
+- test_graph_fan_out_zero_returns_seeds_only
+- test_graph_dedup_by_path_collapses_same_doc_chunks
+- test_l2_normalize
+
+### verification
+
+- cargo test: 73 passed / 4 ignored
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功 (kb-mcp.exe が最新)
+
+次: ユーザーが MCP 切断したら ai_organization/kb-mcp.exe に反映。

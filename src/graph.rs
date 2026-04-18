@@ -17,8 +17,9 @@ use crate::db::{Database, SearchResult};
 
 /// BFS の探索ポリシー。`all_chunks` は起点ドキュメント内の全チャンクをシード
 /// として BFS を開始し、各々から KNN を広げる。`centroid` はチャンク埋め込みの
-/// 平均を 1 つの擬似ノードとして扱う (MVP では `all_chunks` のみ安定サポート、
-/// `centroid` は将来拡張用のスケルトン)。
+/// 平均ベクトルを L2 再正規化してから 1 つの擬似シードとして扱う (BGE 系の
+/// embedding が単位ベクトルであるため、平均後も再正規化しないと
+/// `distance_to_cos_sim` の前提が崩れる)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedStrategy {
@@ -32,7 +33,8 @@ pub enum SeedStrategy {
 pub struct GraphOptions {
     /// BFS の最大深さ。1 = 直接近傍のみ、2 = 近傍の近傍まで。
     pub depth: u32,
-    /// 各ノードから展開する近傍数。
+    /// 各ノードから展開する近傍数。`0` を渡した場合は BFS 展開をスキップし
+    /// seed ノードのみ返す (no-op 防御)。
     pub fan_out: u32,
     /// cos sim 換算値でのカットオフ (未満の候補は採用しない)。
     pub min_similarity: f32,
@@ -41,6 +43,9 @@ pub struct GraphOptions {
     pub topic: Option<String>,
     /// 起点 path は常に除外される。そこに加えて除外したいパスを指定する。
     pub exclude_paths: Vec<String>,
+    /// `true` のとき、同一 path からは 1 チャンクしか返さない (ドキュメント
+    /// 単位で dedup)。`false` なら別チャンクは別ノードとして並ぶ (default)。
+    pub dedup_by_path: bool,
 }
 
 /// 上限 (MCP スキーマでバリデーション) — サーバ側でも再度強制する。
@@ -61,6 +66,7 @@ impl Default for GraphOptions {
             category: None,
             topic: None,
             exclude_paths: Vec::new(),
+            dedup_by_path: false,
         }
     }
 }
@@ -85,6 +91,9 @@ pub struct GraphNode {
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphStats {
     pub total_nodes: usize,
+    /// BFS 中に「新ノードが追加された」最大深さ。指定 `depth` に必ず到達する
+    /// わけではなく、候補が全て `min_similarity` や `visited` で枝刈られた場合は
+    /// それより浅い値になる。
     pub max_depth_reached: u32,
     pub knn_queries: u32,
     pub duration_ms: u64,
@@ -151,6 +160,16 @@ fn make_node(
     }
 }
 
+/// embedding を L2 正規化する (in-place)。ゼロベクトルならそのまま。
+fn l2_normalize(v: &mut [f32]) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
 /// 起点 `start_path` から BFS で Connection Graph を構築する。
 pub fn build_connection_graph(
     db: &Database,
@@ -169,6 +188,13 @@ pub fn build_connection_graph(
     }
 
     let mut visited: HashSet<i64> = HashSet::new();
+    // 起点 path と exclude_paths、dedup_by_path=true の場合の「既出 path」を
+    // 1 つの HashSet で管理する (O(1) 検索)。
+    let mut visited_paths: HashSet<String> = HashSet::new();
+    visited_paths.insert(start_path.to_string());
+    for p in &opts.exclude_paths {
+        visited_paths.insert(p.clone());
+    }
     let mut nodes: Vec<GraphNode> = Vec::new();
     // BFS queue: 各エントリは (親 node_id, 展開用 embedding, current_depth)
     let mut queue: VecDeque<(usize, Vec<f32>, u32)> = VecDeque::new();
@@ -197,6 +223,10 @@ pub fn build_connection_graph(
             for v in &mut sum {
                 *v /= seeds.len() as f32;
             }
+            // 単位ベクトルの平均は一般に norm < 1 になる。L2 正規化してから
+            // KNN に使わないと `distance_to_cos_sim` の前提 (両辺 unit norm) が
+            // 崩れて score 値が誤解を招く。
+            l2_normalize(&mut sum);
             let (chunk_id, _, rep) = &seeds[0];
             let node_id = nodes.len();
             nodes.push(make_node(node_id, None, 0, *chunk_id, 1.0, rep));
@@ -210,6 +240,21 @@ pub fn build_connection_graph(
     // 3. BFS 本体。
     let mut knn_queries: u32 = 0;
     let mut max_depth_reached: u32 = 0;
+
+    // fan_out=0 は「seed のみ返す no-op」として扱う。sqlite-vec に k=0 を
+    // 渡すとエラーになるので、ここで短絡する。
+    if opts.fan_out == 0 {
+        return Ok(ConnectionGraph {
+            start_path: start_path.to_string(),
+            stats: GraphStats {
+                total_nodes: nodes.len(),
+                max_depth_reached,
+                knn_queries,
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+            nodes,
+        });
+    }
 
     while let Some((parent_id, embedding, current_depth)) = queue.pop_front() {
         if current_depth >= opts.depth {
@@ -236,11 +281,7 @@ pub fn build_connection_graph(
             if visited.contains(&chunk_id) {
                 continue;
             }
-            if opts.exclude_paths.iter().any(|p| p == &r.path) {
-                continue;
-            }
-            // 起点 path は常に除外 (同じドキュメント内の別チャンクに戻るのを防ぐ)。
-            if r.path == start_path {
+            if visited_paths.contains(&r.path) {
                 continue;
             }
             let sim = distance_to_cos_sim(r.score);
@@ -249,6 +290,9 @@ pub fn build_connection_graph(
             }
 
             visited.insert(chunk_id);
+            if opts.dedup_by_path {
+                visited_paths.insert(r.path.clone());
+            }
             let Some(next_embedding) = db.get_chunk_embedding(chunk_id)? else {
                 // vec_chunks に存在しない chunk_id は稀 (一貫性破壊) なのでスキップ
                 continue;
@@ -547,6 +591,77 @@ mod tests {
         assert!(json.contains("\"start_path\""));
         assert!(json.contains("\"nodes\""));
         assert!(json.contains("\"stats\""));
+    }
+
+    #[test]
+    fn test_graph_fan_out_zero_returns_seeds_only() {
+        let db = setup_db();
+        insert_doc_with_chunk(&db, "s.md", "s", "s body", 0.0);
+        insert_doc_with_chunk(&db, "a.md", "a", "a body", 0.01);
+        let opts = GraphOptions {
+            depth: 2,
+            fan_out: 0,
+            min_similarity: 0.0,
+            ..Default::default()
+        };
+        let g = build_connection_graph(&db, "s.md", &opts).unwrap();
+        assert_eq!(g.nodes.len(), 1, "only seed should be present when fan_out=0");
+        assert_eq!(g.stats.knn_queries, 0);
+        assert_eq!(g.stats.max_depth_reached, 0);
+    }
+
+    #[test]
+    fn test_graph_dedup_by_path_collapses_same_doc_chunks() {
+        let db = setup_db();
+        // start doc
+        insert_doc_with_chunk(&db, "s.md", "s", "s body", 0.0);
+        // same-path で 2 チャンクを持つ近傍ドキュメント
+        let doc_id = db
+            .upsert_document("a.md", Some("T"), None, None, None, &[], None, "ha")
+            .unwrap();
+        db.insert_chunk(doc_id, 0, Some("h1"), "c1", &dummy_embedding(0.001))
+            .unwrap();
+        db.insert_chunk(doc_id, 1, Some("h2"), "c2", &dummy_embedding(0.002))
+            .unwrap();
+
+        // dedup_by_path=true なら a.md は 1 つだけ
+        let opts_dedup = GraphOptions {
+            depth: 1,
+            fan_out: 5,
+            min_similarity: 0.0,
+            dedup_by_path: true,
+            ..Default::default()
+        };
+        let g = build_connection_graph(&db, "s.md", &opts_dedup).unwrap();
+        let a_count = g.nodes.iter().filter(|n| n.path == "a.md").count();
+        assert_eq!(a_count, 1, "dedup_by_path=true should collapse a.md");
+
+        // dedup_by_path=false なら a.md の複数チャンクが並ぶ
+        let opts_nodedup = GraphOptions {
+            depth: 1,
+            fan_out: 5,
+            min_similarity: 0.0,
+            dedup_by_path: false,
+            ..Default::default()
+        };
+        let g = build_connection_graph(&db, "s.md", &opts_nodedup).unwrap();
+        let a_count = g.nodes.iter().filter(|n| n.path == "a.md").count();
+        assert!(a_count >= 2, "dedup_by_path=false should allow multiple chunks from a.md, got {a_count}");
+    }
+
+    #[test]
+    fn test_l2_normalize() {
+        let mut v = vec![3.0f32, 4.0, 0.0];
+        l2_normalize(&mut v);
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+
+        // ゼロベクトルはそのまま
+        let mut z = vec![0.0f32, 0.0, 0.0];
+        l2_normalize(&mut z);
+        assert_eq!(z, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]

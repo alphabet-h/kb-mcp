@@ -90,6 +90,9 @@ struct GetConnectionGraphParams {
     topic: Option<String>,
     /// Paths to exclude from results. The start path itself is always excluded.
     exclude_paths: Option<Vec<String>>,
+    /// If true, collapse same-path hits so each document appears at most once.
+    /// Default: false (allow multiple chunks from the same doc).
+    dedup_by_path: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +462,7 @@ impl KbServer {
             category: params.category,
             topic: params.topic,
             exclude_paths: params.exclude_paths.unwrap_or_default(),
+            dedup_by_path: params.dedup_by_path.unwrap_or(false),
         };
 
         let db = self.db.lock().unwrap();
