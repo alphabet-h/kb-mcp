@@ -173,3 +173,12 @@
     cross-platform 化
   - テスト 50 件 (4 ignored) すべてパス
   - 実機移行は MCP disconnect 待ち (旧バイナリがロック中)
+- ai_organization 側デプロイ完了 (MCP 再接続後):
+  - 新バイナリ (相対パス fix 込み) を ai_organization/kb-mcp.exe にコピー
+  - ai_organization/kb-mcp.toml (kb_path は "./knowledge-base" の相対表記)
+  - .mcp.json を args: ["serve"] のみに簡素化
+  - 日本語クエリで search 動作確認 (BGE-M3 経由で top-2 が狙った document)
+- README.md にユースケース別トレードオフを追記 (commit 8340689):
+  - rerank: エージェント対話 / 精度重視 / 混在の推奨表、有効化シグナル
+  - model: 比較表 (DL / dim / RAM / build time / 精度)、切替コスト注意
+  - .mcp.json: rerank_by_default=false パターン + args: ["serve"] 最小構成
