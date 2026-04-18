@@ -4,6 +4,7 @@ pub mod embedder;
 pub mod graph;
 pub mod indexer;
 pub mod markdown;
+pub mod quality;
 pub mod server;
 
 use anyhow::{Context, Result};
