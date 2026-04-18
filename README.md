@@ -23,9 +23,13 @@ model = "bge-m3"
 reranker = "bge-v2-m3"
 rerank_by_default = true
 fastembed_cache_dir = "/home/you/.cache/huggingface/hub"
+
+# Heading substrings to exclude from chunking. Omit the key for the default
+# ["次の深堀り候補"]. An explicit empty array disables exclusion entirely.
+exclude_headings = ["次の深堀り候補", "参考リンク"]
 ```
 
-With the file in place `kb-mcp serve` / `index` / `status` work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
+With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
 
 ## Usage
 
@@ -121,6 +125,30 @@ kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # optional per-in
 `--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
 
 Typical skill-bin use: a Claude Code skill places `kb-mcp.exe` + `kb-mcp.toml` in its `bin/`, then a command like `kb-mcp search "{{user_query}}" --format text --limit 3` returns a focused reference excerpt for the LLM to cite.
+
+### Connection graph from a starting document
+
+When you want to find not just a single document but the semantic neighborhood around it (and neighbors of those neighbors), use the `graph` subcommand:
+
+```bash
+kb-mcp graph --start deep-dive/mcp/overview.md --depth 2 --fan-out 5
+kb-mcp graph --start notes/rag.md --dedup-by-path --format text
+kb-mcp graph --start a.md --exclude junk1.md,junk2.md --min-similarity 0.5
+```
+
+Flags:
+
+- `--start PATH` — required, relative path to an indexed document.
+- `--depth` (default 2, clamped to max 3) — BFS hops.
+- `--fan-out` (default 5, clamped to max 20) — neighbors per node per hop. `0` returns only the seed.
+- `--min-similarity` (default 0.3) — cosine similarity cut-off. `0.0..=1.0`.
+- `--seed-strategy` — `all-chunks` (default) expands from every chunk of the start doc; `centroid` averages them (L2-renormalized) into one virtual seed.
+- `--exclude` — comma-separated paths to drop from results. The start path itself is always excluded.
+- `--dedup-by-path` — collapse same-path hits so each document appears at most once.
+- `--category` / `--topic` — apply category / topic filters to every hop.
+- `--format json|text` — same as `search`.
+
+The output is a flat array of nodes with `parent_id` / `depth` / `score` so the consumer can reconstruct the tree if it wants. Good use cases: "give me 30 chunks of related context around this note for the LLM to read", or "walk two hops from this overview to see what topics it touches".
 
 ## Connecting to Claude Code / Cursor
 
@@ -226,6 +254,7 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 | `get_document` | Get the full content and metadata of a document by its relative path. | `path` (e.g. `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | Get a PERFECT.md best-practices document, optionally extracting a specific h2 section. | `target` (e.g. `"claude-code"`), `category` (optional) |
 | `rebuild_index` | Rebuild the search index by scanning all Markdown files. | `force` (optional, default false) |
+| `get_connection_graph` | BFS-expand semantically related chunks starting from a document path. Returns a flat list of nodes with `parent_id` / `depth` / `score` / `snippet` so the caller can chain context discovery. | `path` (required), `depth` (default 2, max 3), `fan_out` (default 5, max 20), `min_similarity` (default 0.3), `seed_strategy` (`all_chunks` / `centroid`), `dedup_by_path`, `category`, `topic`, `exclude_paths` |
 
 ## Notes
 
@@ -238,3 +267,5 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 - **Incremental indexing**: Files are tracked by SHA-256 content hash. Only changed files are re-embedded on subsequent `index` runs (unless `--force` is passed).
 - **Hybrid search (FTS5 + vector)**: The `search` tool combines SQLite FTS5 full-text search (trigram tokenizer, works for Japanese/CJK too; `heading` column is weighted 2× `content` in bm25) with the vector search via Reciprocal Rank Fusion (k=60). The returned `score` is the RRF score (higher = better), not a distance. Queries shorter than 3 characters fall back to vector-only (below the trigram minimum).
 - **Optional reranking**: With `--reranker <model>` the top candidates are re-scored by a cross-encoder before being returned. When rerank is applied, `score` is the cross-encoder raw score instead of the RRF value. Reranking is index-independent — you can toggle it at server start without re-indexing.
+- **Connection graph**: `get_connection_graph` / `kb-mcp graph` do BFS over the vector index starting from a document. No extra index is built; every hop runs a fresh sqlite-vec KNN. Bounded by `depth ≤ 3` / `fan_out ≤ 20` with client-side clamping, so worst-case is ~21 KNN queries per request. Scores are cosine similarity approximated from L2 distance (`1 - d²/2`, clamped to `[0,1]`) assuming unit-normalized embeddings (BGE-small / BGE-M3 are normalized internally).
+- **Heading exclusion**: Sections whose heading text contains any of `exclude_headings` (defaults to `["次の深堀り候補"]`) are dropped during chunking. Set `exclude_headings = []` in `kb-mcp.toml` to disable the default. Matching is substring-based (`heading.contains(pattern)`), so short patterns catch suffixed variants (`"## 次の深堀り候補 (案)"` etc.).
