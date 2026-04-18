@@ -73,7 +73,49 @@ Add the following to `.mcp.json` in your project root (or the equivalent MCP con
 }
 ```
 
+With a multilingual model and reranker enabled:
+
+```json
+{
+  "mcpServers": {
+    "ai-knowledge": {
+      "command": "/path/to/kb-mcp",
+      "args": [
+        "serve",
+        "--kb-path", "/path/to/knowledge-base",
+        "--model", "bge-m3",
+        "--reranker", "bge-v2-m3"
+      ],
+      "env": {
+        "FASTEMBED_CACHE_DIR": "/path/to/.cache/huggingface/hub"
+      },
+      "type": "stdio"
+    }
+  }
+}
+```
+
 The server will be started automatically when the client connects.
+
+### Working around HuggingFace TLS failures on first download
+
+Some environments (corporate proxies, firewalls with TLS inspection) reject fastembed's native TLS connection to `huggingface.co` with `os error 10054` / "Connection was reset". In that case, pre-download the model via the Python HuggingFace CLI and point `FASTEMBED_CACHE_DIR` at the HF Hub cache:
+
+```bash
+# Install once
+pip install --user huggingface_hub
+
+# Pre-download BGE-M3 (required ONNX files only)
+hf download BAAI/bge-m3 \
+    --include 'onnx/*' 'tokenizer*' 'config.json' 'special_tokens_map.json'
+
+# Pre-download BGE-reranker-v2-m3 (for `--reranker bge-v2-m3`)
+hf download BAAI/bge-reranker-v2-m3
+
+# Run kb-mcp pointing at the HF cache (HF Hub cache layout is compatible with fastembed)
+FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
+    kb-mcp index --kb-path ./knowledge-base --model bge-m3 --force
+```
 
 ## Tools
 

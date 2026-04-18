@@ -133,3 +133,15 @@
     (invariant: BGE-M3 の batch < BGE-small の batch)
   - 既存 DB の再インデックス不要 (embedding 値は batch に依存しない)
   - テスト 43 件 (4 ignored) すべてパス
+- ドキュメント全面更新
+  - CLAUDE.md: プロジェクト概要を hybrid/rerank 込みに書換、TLS 迂回手順
+    (hf download + FASTEMBED_CACHE_DIR) を追記、主要依存一覧を SQLite 3.50+
+    / FTS5 / fastembed reranker まで含めて更新、改善候補リストを未実装のみに整理
+  - TODO.md: 実装済み表 (feature 7-10 + evaluator #1-6, commit hash 付き) と
+    未実装候補を明確に分離、優先度マトリクスを更新
+  - docs/design.md: feature 7-10 反映の全面書換。スキーマ (index_meta 順序、
+    遅延 vec_chunks、fts_chunks)、検索パイプライン図、ツール定義、決定ログ
+    (14 項目) を現行実装に整合
+  - docs/plan.md: 冒頭に「全タスク完了・履歴」バナー追加、現行仕様は
+    docs/design.md を参照する旨を明記
+  - README.md: BGE-M3 + reranker 込みの .mcp.json 設定例、HF 事前 DL 手順を追記

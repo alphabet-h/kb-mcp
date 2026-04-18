@@ -1,3 +1,23 @@
+# kb-mcp Implementation Plan (Historical)
+
+> **ステータス: 全タスク完了** (2026-04-18 時点)
+>
+> このドキュメントは初期実装計画 (Task 1〜8) の履歴記録です。すべて完了済み。
+> 現行の設計仕様は [`docs/design.md`](./design.md)、実装履歴は
+> `claude-progress.txt` と `features.json`、今後の未実装候補は [`TODO.md`](../TODO.md) を参照してください。
+>
+> 本計画完了後の主な追加機能:
+> - feature 7 (BGE-M3 多言語モデル対応 + `--model` CLI)
+> - feature 8 (`index_meta` によるモデル/次元整合性チェック)
+> - feature 9 (FTS5 trigram + RRF ハイブリッド検索)
+> - feature 10 (cross-encoder reranker + bm25 heading 重み)
+>
+> 下記の Task 1〜8 は初期スキャフォールドから最初の MCP サーバ起動までの
+> ステップです。コードベースは実装後に大きく進化しているため、**下記の
+> コード断片は現行の実装とは一致しません**。履歴として参照のみ可能です。
+
+---
+
 # kb-mcp Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -8,7 +28,7 @@
 
 **Tech Stack:** Rust, rmcp ^1.3, fastembed ^5, sqlite-vec ^0.1, rusqlite (bundled), pulldown-cmark, clap ^4, tokio ^1
 
-**Design Spec:** `feature-idea/kb-mcp-design.md`
+**Design Spec:** `docs/design.md`
 
 ---
 
