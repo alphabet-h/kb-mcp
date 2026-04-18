@@ -29,6 +29,11 @@ pub struct KbServer {
     /// feature 13: 既定の品質フィルタしきい値。`search` / graph で適用。
     /// 0.0 ならフィルタ無効。
     quality_threshold: f32,
+    /// feature 16: `get_best_practice` のパス候補テンプレート。
+    /// 先頭から順に `{target}` を置換してファイルを探し、最初に存在した
+    /// ものを読む。kb-mcp.toml 未指定時は legacy 既定
+    /// `["best-practices/{target}/PERFECT.md"]`。
+    best_practice_templates: Vec<String>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -312,37 +317,43 @@ impl KbServer {
 
     #[tool(
         name = "get_best_practice",
-        description = "Get a best-practices PERFECT.md document. Optionally extract a specific h2 section by category name."
+        description = "Get a best-practices document for the given target, optionally extracting a specific h2 section by category name. The file path is resolved via `[best_practice].path_templates` in kb-mcp.toml (default: best-practices/{target}/PERFECT.md)."
     )]
     async fn get_best_practice(
         &self,
         Parameters(params): Parameters<GetBestPracticeParams>,
     ) -> String {
-        let perfect_path = self
-            .kb_path
-            .join("best-practices")
-            .join(&params.target)
-            .join("PERFECT.md");
-
-        // Path traversal prevention
-        let canonical = match perfect_path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                return serde_json::to_string_pretty(&ErrorResponse {
-                    error: format!(
-                        "PERFECT.md not found for target '{}'. Available path would be: best-practices/{}/PERFECT.md",
-                        params.target, params.target
-                    ),
-                })
-                .unwrap_or_default();
+        // feature 16: 設定されたテンプレート列を先頭から試す。
+        // `{target}` を params.target に置換、kb_path 相対で canonicalize し、
+        // 存在 + kb_path 配下の最初の候補を採用する。
+        let mut canonical: Option<PathBuf> = None;
+        let mut tried_paths: Vec<String> = Vec::new();
+        for tmpl in &self.best_practice_templates {
+            let rel = tmpl.replace("{target}", &params.target);
+            tried_paths.push(rel.clone());
+            let p = self.kb_path.join(&rel);
+            let c = match p.canonicalize() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !c.starts_with(&self.kb_path) {
+                // path traversal 防止
+                continue;
             }
-        };
-        if !canonical.starts_with(&self.kb_path) {
+            canonical = Some(c);
+            break;
+        }
+
+        let Some(canonical) = canonical else {
             return serde_json::to_string_pretty(&ErrorResponse {
-                error: "Access denied: path is outside the knowledge base.".to_string(),
+                error: format!(
+                    "Best-practices document for target '{}' not found. Tried: [{}]",
+                    params.target,
+                    tried_paths.join(", ")
+                ),
             })
             .unwrap_or_default();
-        }
+        };
 
         match std::fs::read_to_string(&canonical) {
             Ok(content) => {
@@ -390,7 +401,7 @@ impl KbServer {
                 }
             }
             Err(e) => serde_json::to_string_pretty(&ErrorResponse {
-                error: format!("Failed to read PERFECT.md: {e}"),
+                error: format!("Failed to read best-practices file: {e}"),
             })
             .unwrap_or_default(),
         }
@@ -552,6 +563,7 @@ pub async fn run_server(
     rerank_by_default: bool,
     exclude_headings: Option<Vec<String>>,
     quality_threshold: f32,
+    best_practice_templates: Vec<String>,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -571,6 +583,7 @@ pub async fn run_server(
         kb_path,
         exclude_headings,
         quality_threshold,
+        best_practice_templates,
         tool_router: KbServer::tool_router(),
     };
 

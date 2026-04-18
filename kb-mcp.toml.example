@@ -50,3 +50,14 @@
 [quality_filter]
 enabled = true
 threshold = 0.3
+
+# `get_best_practice` MCP ツールのファイル解決テンプレート (feature 16)。
+# 先頭から順に `{target}` を置換して kb_path 相対で探し、最初に見つかった
+# ファイルを返す。`target` 引数は安全のため canonicalize + kb_path 配下の
+# チェックが入る。省略時は ["best-practices/{target}/PERFECT.md"] (legacy)。
+[best_practice]
+path_templates = [
+  "best-practices/{target}/PERFECT.md",  # ai_organization 既定構造
+  "docs/{target}.md",                    # docs/ 配置
+  "guides/{target}/README.md",           # guide 風
+]

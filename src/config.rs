@@ -35,6 +35,33 @@ pub struct Config {
     /// [feature 13] 検索時に適用するチャンク品質フィルタの設定。
     /// 省略時は [`QualityFilterConfig::default()`] (enabled=true, threshold=0.3)。
     pub quality_filter: Option<QualityFilterConfig>,
+    /// [feature 16] `get_best_practice` MCP ツールで使うパス候補テンプレート。
+    /// 省略時は `["best-practices/{target}/PERFECT.md"]` (後方互換)。
+    pub best_practice: Option<BestPracticeConfig>,
+}
+
+/// `get_best_practice` の汎用化設定 (feature 16)。
+///
+/// `path_templates` に列挙した順に `{target}` を置換してファイルを探し、
+/// 最初に存在したものを返す。テンプレート変数:
+///   - `{target}` : ツールに渡された target パラメータ
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BestPracticeConfig {
+    #[serde(default = "default_best_practice_templates")]
+    pub path_templates: Vec<String>,
+}
+
+fn default_best_practice_templates() -> Vec<String> {
+    vec!["best-practices/{target}/PERFECT.md".to_string()]
+}
+
+impl Default for BestPracticeConfig {
+    fn default() -> Self {
+        Self {
+            path_templates: default_best_practice_templates(),
+        }
+    }
 }
 
 impl Config {
@@ -80,6 +107,7 @@ impl Config {
             && self.fastembed_cache_dir.is_none()
             && self.exclude_headings.is_none()
             && self.quality_filter.is_none()
+            && self.best_practice.is_none()
     }
 
     /// `fastembed_cache_dir` が設定されていて、かつ環境変数
@@ -158,6 +186,45 @@ mod tests {
         assert_eq!(
             cfg.exclude_headings.as_deref(),
             Some(&["次の深堀り候補".to_string(), "参考リンク".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_best_practice_default_templates() {
+        // 省略時はレガシーの PERFECT.md パス 1 件
+        let cfg = BestPracticeConfig::default();
+        assert_eq!(
+            cfg.path_templates,
+            vec!["best-practices/{target}/PERFECT.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_best_practice_config_parses_from_toml() {
+        let mut file = tempfile("kb-mcp-config-bp");
+        writeln!(
+            file,
+            "[best_practice]\n\
+             path_templates = [\"docs/{{target}}.md\", \"guides/{{target}}/README.md\"]\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let bp = cfg.best_practice.expect("best_practice must be Some");
+        assert_eq!(bp.path_templates.len(), 2);
+        assert_eq!(bp.path_templates[0], "docs/{target}.md");
+        assert_eq!(bp.path_templates[1], "guides/{target}/README.md");
+    }
+
+    #[test]
+    fn test_best_practice_empty_path_templates_uses_default() {
+        // path_templates 省略時は default_best_practice_templates() が入る
+        let mut file = tempfile("kb-mcp-config-bp2");
+        writeln!(file, "[best_practice]").unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let bp = cfg.best_practice.expect("best_practice must be Some");
+        assert_eq!(
+            bp.path_templates,
+            vec!["best-practices/{target}/PERFECT.md".to_string()]
         );
     }
 

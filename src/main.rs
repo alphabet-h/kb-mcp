@@ -216,6 +216,11 @@ fn main() -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_default()
                 .effective_threshold();
+            let best_practice_templates = cfg
+                .best_practice
+                .clone()
+                .unwrap_or_default()
+                .path_templates;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 server::run_server(
@@ -225,6 +230,7 @@ fn main() -> anyhow::Result<()> {
                     rerank_by_default,
                     exclude_headings,
                     quality_threshold,
+                    best_practice_templates,
                 )
                 .await
             })?;

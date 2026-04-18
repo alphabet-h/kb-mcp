@@ -111,8 +111,8 @@
       "id": 16,
       "category": "upgrade-tools",
       "description": "get_best_practice の汎用化 (任意パス構造に対応、設定ファイルでマッピング定義)",
-      "status": "failing",
-      "verification": ".kb-mcp.toml の [best_practice] セクションで指定したマッピングに従って動作する"
+      "status": "passing",
+      "verification": "kb-mcp.toml の [best_practice].path_templates で指定したテンプレート列を順に `{target}` 置換して探索し、最初に存在するファイルを返す。省略時は legacy の best-practices/{target}/PERFECT.md"
     },
     {
       "id": 17,
