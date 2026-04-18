@@ -162,6 +162,13 @@
       "description": "バイナリ同居 kb-mcp.toml で CLI オプションの既定値を与える",
       "status": "passing",
       "verification": "kb-mcp.toml に model/reranker/kb_path 等を書けば CLI で省略でき、CLI 指定時はそちらが優先される"
+    },
+    {
+      "id": 24,
+      "category": "upgrade-tools",
+      "description": "CLI `search` サブコマンドで MCP 不要の一発検索 (skill bin / シェルスクリプト用途)",
+      "status": "passing",
+      "verification": "kb-mcp search \"query\" --limit N --format json|text で結果が取れ、--category / --topic / --reranker も効く"
     }
   ]
 }

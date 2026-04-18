@@ -62,6 +62,42 @@ enum Commands {
         #[arg(long)]
         kb_path: Option<PathBuf>,
     },
+    /// One-shot search from the command line (no MCP transport).
+    /// Useful for shell scripts / skill bins where invoking the binary
+    /// directly is simpler than talking MCP stdio.
+    Search {
+        /// Search query text (positional)
+        query: String,
+        /// Path to the knowledge-base directory
+        #[arg(long)]
+        kb_path: Option<PathBuf>,
+        /// Embedding model (must match the index; defaults to config or built-in)
+        #[arg(long, value_enum)]
+        model: Option<ModelChoice>,
+        /// Optional cross-encoder reranker. Adds 300-700ms but improves precision.
+        #[arg(long, value_enum)]
+        reranker: Option<RerankerChoice>,
+        /// Max results to return
+        #[arg(long, default_value_t = 5)]
+        limit: u32,
+        /// Filter by category (e.g. "deep-dive", "ai-news")
+        #[arg(long)]
+        category: Option<String>,
+        /// Filter by topic (e.g. "mcp", "chromadb")
+        #[arg(long)]
+        topic: Option<String>,
+        /// Output format: json (machine-readable) or text (LLM-friendly)
+        #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
+        format: SearchFormat,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum SearchFormat {
+    /// JSON array of hit records (default, machine-readable)
+    Json,
+    /// Concatenated text blocks (title / path#heading / content, separated by ---)
+    Text,
 }
 
 /// Resolve the database path from a knowledge-base directory.
@@ -155,7 +191,102 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Documents: {}", db.document_count()?);
             eprintln!("Chunks: {}", db.chunk_count()?);
         }
+        Commands::Search {
+            query,
+            kb_path,
+            model,
+            reranker,
+            limit,
+            category,
+            topic,
+            format,
+        } => {
+            let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
+            let model = model.or(cfg.model).unwrap_or_default();
+            let reranker_choice = reranker.or(cfg.reranker).unwrap_or_default();
+
+            let db_path = resolve_db_path(&kb_path);
+            let db = db::Database::open(&db_path.to_string_lossy())?;
+            let dim = model.dimension() as u32;
+            db.verify_embedding_meta(model.model_id(), dim)?;
+
+            let mut embedder = embedder::Embedder::with_model(model)?;
+            let query_embedding = embedder.embed_single(&query)?;
+
+            let results = if reranker_choice.is_enabled() {
+                let candidates = db.search_hybrid_candidates(
+                    &query,
+                    &query_embedding,
+                    limit.saturating_mul(5).max(50),
+                    category.as_deref(),
+                    topic.as_deref(),
+                )?;
+                if let Some(mut r) = embedder::Reranker::try_new(reranker_choice)? {
+                    r.rerank_candidates(&query, candidates, limit)?
+                } else {
+                    // Reranker::try_new returned None even though is_enabled was true;
+                    // fall back to hybrid.
+                    db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref())?
+                }
+            } else {
+                db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref())?
+            };
+
+            print_search_results(&results, format);
+        }
     }
 
     Ok(())
+}
+
+fn print_search_results(results: &[db::SearchResult], format: SearchFormat) {
+    match format {
+        SearchFormat::Json => {
+            // Use a transparent wrapper so serde_json can emit the public shape.
+            #[derive(serde::Serialize)]
+            struct Hit<'a> {
+                score: f32,
+                path: &'a str,
+                title: Option<&'a str>,
+                heading: Option<&'a str>,
+                topic: Option<&'a str>,
+                date: Option<&'a str>,
+                content: &'a str,
+            }
+            let hits: Vec<Hit<'_>> = results
+                .iter()
+                .map(|r| Hit {
+                    score: r.score,
+                    path: &r.path,
+                    title: r.title.as_deref(),
+                    heading: r.heading.as_deref(),
+                    topic: r.topic.as_deref(),
+                    date: r.date.as_deref(),
+                    content: &r.content,
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&hits).unwrap_or_else(|_| "[]".into())
+            );
+        }
+        SearchFormat::Text => {
+            for (i, r) in results.iter().enumerate() {
+                if i > 0 {
+                    println!("\n---\n");
+                }
+                let title = r.title.as_deref().unwrap_or("(no title)");
+                let heading = r.heading.as_deref().unwrap_or("");
+                println!("# {title}");
+                if heading.is_empty() {
+                    println!("{}", r.path);
+                } else {
+                    println!("{}#{heading}", r.path);
+                }
+                println!("score: {:.4}", r.score);
+                println!();
+                println!("{}", r.content);
+            }
+        }
+    }
 }

@@ -30,6 +30,7 @@ kb-mcp status --kb-path /path/to/knowledge-base          # docs/chunks 数の確
 kb-mcp serve --kb-path /path/to/knowledge-base           # MCP サーバ起動（stdio、デフォルトモデル）
 kb-mcp serve --kb-path ... --model bge-m3                # BGE-M3 でサーバ起動（index 済が前提）
 kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder reranking
+kb-mcp search "クエリ" --kb-path ... --model bge-m3 --limit 3 --format text  # one-shot CLI 検索 (skill bin 用途)
 ```
 
 `--model` は `bge-small-en-v1.5` (既定、384 次元、英語特化、~130 MB) / `bge-m3` (1024 次元、多言語、~2.3 GB) の 2 択。`index_meta` テーブルに記録された model/dim と runtime が不一致なら起動時に拒否するため、モデル切替時は `--force` で再構築が必要。
@@ -77,7 +78,7 @@ fastembed_cache_dir = "/home/you/.cache/huggingface/hub"
 
 | ファイル | 役割 |
 |---|---|
-| `src/main.rs` | clap CLI エントリ。`index` / `status` / `serve` サブコマンドの分岐、`kb-mcp.toml` の読み込みと CLI 引数へのマージ |
+| `src/main.rs` | clap CLI エントリ。`index` / `status` / `serve` / `search` サブコマンドの分岐、`kb-mcp.toml` の読み込みと CLI 引数へのマージ、JSON/text 出力フォーマッタ |
 | `src/config.rs` | バイナリ同居 `kb-mcp.toml` のロード。CLI / config / 既定値の優先順位解決、`FASTEMBED_CACHE_DIR` の注入 |
 | `src/server.rs` | rmcp `ServerHandler` 実装。5 つの MCP ツールをディスパッチ。`search` は `db.search_hybrid` (vec + FTS5 + RRF) 経由 |
 | `src/indexer.rs` | walkdir で `.md` を走査 → markdown.rs でパース → embedder.rs で embedding → db.rs で格納。SHA-256 で差分検出。冒頭で `backfill_fts()` を呼び pre-feature-9 DB を自動移行 |

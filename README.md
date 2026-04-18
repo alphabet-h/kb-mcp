@@ -108,6 +108,20 @@ kb-mcp status --kb-path /path/to/knowledge-base
 
 Prints document and chunk counts from the existing index.
 
+### One-shot search from the command line
+
+For shell scripts or skill bins that just need "search this string in the KB" without standing up an MCP connection:
+
+```bash
+kb-mcp search "RAG server comparison" --limit 3 --format text
+kb-mcp search "E0382" --category deep-dive --format json | jq '.[] | .path'
+kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # optional per-invocation rerank
+```
+
+`--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
+
+Typical skill-bin use: a Claude Code skill places `kb-mcp.exe` + `kb-mcp.toml` in its `bin/`, then a command like `kb-mcp search "{{user_query}}" --format text --limit 3` returns a focused reference excerpt for the LLM to cite.
+
 ## Connecting to Claude Code / Cursor
 
 Add the following to `.mcp.json` in your project root (or the equivalent MCP config for your client):

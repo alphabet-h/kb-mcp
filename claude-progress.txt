@@ -182,3 +182,15 @@
   - rerank: エージェント対話 / 精度重視 / 混在の推奨表、有効化シグナル
   - model: 比較表 (DL / dim / RAM / build time / 精度)、切替コスト注意
   - .mcp.json: rerank_by_default=false パターン + args: ["serve"] 最小構成
+- feature 24 実装完了 (status: passing)
+  - src/main.rs に Commands::Search サブコマンド追加 (clap)
+  - 引数: <query> (positional) + --kb-path / --model / --reranker / --limit /
+    --category / --topic / --format (json|text)
+  - SearchFormat enum (Json 既定 / Text LLM-friendly) + print_search_results
+  - Database::search_hybrid / Reranker::rerank_candidates を再利用 (新規 DB
+    層ロジックなし)
+  - kb-mcp.toml の既定値 (model / kb_path 等) は既存経路で自動適用
+  - 実機動作確認: 日本語クエリ、text/JSON 両 format、category filter で正常動作
+  - テスト 50 件 (4 ignored) パス維持 (main.rs 内のロジックは db/embedder の
+    既存テストでカバー)
+  - README.md に skill-bin ユースケース例追記、CLAUDE.md に CLI 一覧更新
