@@ -232,60 +232,39 @@ fn main() -> anyhow::Result<()> {
                 db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref())?
             };
 
-            print_search_results(&results, format);
+            print_search_results(results, format);
         }
     }
 
     Ok(())
 }
 
-fn print_search_results(results: &[db::SearchResult], format: SearchFormat) {
+fn print_search_results(results: Vec<db::SearchResult>, format: SearchFormat) {
+    // db::SearchHit への移し替えで MCP `search` ツール出力と shape が一致する。
+    let hits: Vec<db::SearchHit> = results.into_iter().map(Into::into).collect();
     match format {
         SearchFormat::Json => {
-            // Use a transparent wrapper so serde_json can emit the public shape.
-            #[derive(serde::Serialize)]
-            struct Hit<'a> {
-                score: f32,
-                path: &'a str,
-                title: Option<&'a str>,
-                heading: Option<&'a str>,
-                topic: Option<&'a str>,
-                date: Option<&'a str>,
-                content: &'a str,
-            }
-            let hits: Vec<Hit<'_>> = results
-                .iter()
-                .map(|r| Hit {
-                    score: r.score,
-                    path: &r.path,
-                    title: r.title.as_deref(),
-                    heading: r.heading.as_deref(),
-                    topic: r.topic.as_deref(),
-                    date: r.date.as_deref(),
-                    content: &r.content,
-                })
-                .collect();
             println!(
                 "{}",
                 serde_json::to_string_pretty(&hits).unwrap_or_else(|_| "[]".into())
             );
         }
         SearchFormat::Text => {
-            for (i, r) in results.iter().enumerate() {
+            for (i, h) in hits.iter().enumerate() {
                 if i > 0 {
                     println!("\n---\n");
                 }
-                let title = r.title.as_deref().unwrap_or("(no title)");
-                let heading = r.heading.as_deref().unwrap_or("");
+                let title = h.title.as_deref().unwrap_or("(no title)");
+                let heading = h.heading.as_deref().unwrap_or("");
                 println!("# {title}");
                 if heading.is_empty() {
-                    println!("{}", r.path);
+                    println!("{}", h.path);
                 } else {
-                    println!("{}#{heading}", r.path);
+                    println!("{}#{heading}", h.path);
                 }
-                println!("score: {:.4}", r.score);
+                println!("score: {:.4}", h.score);
                 println!();
-                println!("{}", r.content);
+                println!("{}", h.content);
             }
         }
     }

@@ -8,7 +8,7 @@ use rmcp::schemars;
 use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::Database;
+use crate::db::{Database, SearchHit};
 use crate::embedder::{Embedder, ModelChoice, Reranker, RerankerChoice};
 use crate::{indexer, markdown};
 
@@ -68,17 +68,9 @@ struct RebuildIndexParams {
 // ---------------------------------------------------------------------------
 // Response types (serialized as JSON text)
 // ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct SearchHit {
-    score: f32,
-    content: String,
-    heading: Option<String>,
-    path: String,
-    title: Option<String>,
-    topic: Option<String>,
-    date: Option<String>,
-}
+//
+// `search` ツールの出力形状は `db::SearchHit` に統一しているので、ここでは
+// 個別に定義しない (CLI の `search` サブコマンドと schema 一致)。
 
 #[derive(Serialize)]
 struct TopicEntry {
@@ -184,18 +176,7 @@ impl KbServer {
 
         match search_outcome {
             Ok(results) => {
-                let hits: Vec<SearchHit> = results
-                    .into_iter()
-                    .map(|r| SearchHit {
-                        score: r.score,
-                        content: r.content,
-                        heading: r.heading,
-                        path: r.path,
-                        title: r.title,
-                        topic: r.topic,
-                        date: r.date,
-                    })
-                    .collect();
+                let hits: Vec<SearchHit> = results.into_iter().map(Into::into).collect();
                 serde_json::to_string_pretty(&hits).unwrap_or_default()
             }
             Err(e) => serde_json::to_string_pretty(&ErrorResponse {

@@ -167,31 +167,40 @@ mod tests {
 
     #[test]
     fn test_relative_paths_resolve_against_config_dir() {
-        let mut file = tempfile("kb-mcp-config-relpath");
-        writeln!(
-            file,
-            r#"
-kb_path = "./knowledge-base"
-fastembed_cache_dir = "cache/hf"
-"#
+        // load_from 内部の「parent → resolve_relative」経路を実際に通す e2e。
+        // tempfile helper は Drop でファイルを消してしまうので、ここではテスト
+        // 終了時に削除する `DirGuard` でファイル書込から load_from まで 1 本化する。
+        let pid = std::process::id();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("kb-mcp-test-relpath-{pid}-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("kb-mcp.toml");
+        std::fs::write(
+            &cfg_path,
+            "kb_path = \"./knowledge-base\"\n\
+             fastembed_cache_dir = \"cache/hf\"\n",
         )
         .unwrap();
-        let cfg_path = file.path().to_path_buf();
-        drop(file);
-        // Re-open via load_from (file already written and path known)
-        // tempfile の Drop で消してしまうので、ここでは別経路で検証:
-        let cfg = Config {
-            kb_path: Some(PathBuf::from("./knowledge-base")),
-            fastembed_cache_dir: Some(PathBuf::from("cache/hf")),
-            ..Default::default()
-        };
-        // load_from を経由しないので手動で同じ変換を適用
-        let base = cfg_path.parent().unwrap();
-        let kb = resolve_relative(base, cfg.kb_path.clone().unwrap());
-        let cache = resolve_relative(base, cfg.fastembed_cache_dir.clone().unwrap());
-        assert!(kb.starts_with(base));
-        assert!(cache.starts_with(base));
+
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = DirGuard(dir.clone());
+
+        let cfg = Config::load_from(&cfg_path).unwrap();
+
+        let kb = cfg.kb_path.expect("kb_path must be Some");
+        let cache = cfg.fastembed_cache_dir.expect("fastembed_cache_dir must be Some");
+        assert!(kb.is_absolute() || kb.starts_with(&dir), "kb_path not rebased: {kb:?}");
         assert!(kb.ends_with("knowledge-base"));
+        assert!(cache.starts_with(&dir));
+        assert!(cache.ends_with(Path::new("cache/hf")) || cache.ends_with(Path::new("cache\\hf")));
     }
 
     #[test]

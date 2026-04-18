@@ -32,6 +32,35 @@ pub struct SearchResult {
     pub date: Option<String>,
 }
 
+/// JSON-serializable view of [`SearchResult`]. DB 層 (rusqlite) は `serde` 非依存
+/// のままにしておき、API / CLI への露出はこの型を経由する。
+///
+/// フィールドは `SearchResult` と同形。`From<SearchResult>` で移し替えるだけ。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchHit {
+    pub score: f32,
+    pub path: String,
+    pub title: Option<String>,
+    pub heading: Option<String>,
+    pub topic: Option<String>,
+    pub date: Option<String>,
+    pub content: String,
+}
+
+impl From<SearchResult> for SearchHit {
+    fn from(r: SearchResult) -> Self {
+        Self {
+            score: r.score,
+            path: r.path,
+            title: r.title,
+            heading: r.heading,
+            topic: r.topic,
+            date: r.date,
+            content: r.content,
+        }
+    }
+}
+
 /// Topic/category grouping returned by [`Database::list_topics`].
 #[derive(Debug, Clone)]
 pub struct TopicInfo {

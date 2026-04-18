@@ -209,3 +209,18 @@
        clap long_help で明示
     4. resolve_relative の Windows UNC / \\?\ プレフィックステスト未カバー
     5. kb-mcp.toml.example と Config のフィールド同期を回帰テスト化
+- evaluator 指摘 #1, #2 対応完了
+  - #1: test_relative_paths_resolve_against_config_dir を実 e2e に書き換え。
+    std::env::temp_dir() 配下に専用サブディレクトリを作り、toml 書込 →
+    Config::load_from(&cfg_path) を実行して結果を検証。テスト終了時に
+    DirGuard (自前 Drop) でディレクトリごと削除。これで「load_from 内部の
+    parent → resolve_relative 経路」を実際にカバー
+  - #2: db.rs に pub struct SearchHit + From<SearchResult> を追加し、
+    server.rs / main.rs の local 定義 (SearchHit / Hit) を削除して統一。
+    MCP `search` ツール出力と CLI `search` サブコマンド出力の shape が
+    単一の db::SearchHit で保証される。将来 SearchResult にフィールドを
+    追加するときの更新箇所が 1 つに収束
+  - テスト 50 件 (4 ignored) 全てパス、実機で CLI search / JSON 出力が
+    従来と bit-exact (shape 互換) であることを確認
+  - 残 #3-#5 (CLI help の default 明示、UNC テスト、example 同期) は
+    小粒で後回し
