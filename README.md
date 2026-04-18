@@ -45,6 +45,24 @@ Scans all `.md` files under the given directory, skipping `.obsidian/`. Files wh
 
 Switching models on an existing index requires `--force` (the DB records the model/dim in `index_meta` and rejects mismatched runtimes).
 
+#### Model selection trade-offs
+
+| Aspect | BGE-small-en-v1.5 | BGE-M3 |
+|---|---|---|
+| First-time download | ~130 MB | ~2.3 GB |
+| Embedding dim | 384 | 1024 (index file ~2.6× larger) |
+| RAM when loaded | ~500 MB | ~2 GB |
+| Index build time | baseline | ~3–10× slower (CPU inference) |
+| Japanese precision | poor (English-centric vocab) | strong (multilingual tokenizer + training) |
+| English precision | strong | comparable |
+
+Switching cost (existing index → new model):
+
+1. `kb-mcp index --kb-path ... --model <new> --force` runs a full re-embedding (no incremental update possible; `DELETE FROM documents/chunks/vec_chunks` and start over).
+2. Every `serve` / `index` call afterwards must pass the same `--model` (or have it set in `kb-mcp.toml`). A mismatch is rejected at startup by the `index_meta` check.
+
+Practical recommendation: pick the model that matches your knowledge base's **primary language** up front. Don't oscillate between models unless you have a concrete precision problem — the full re-embedding is the expensive step.
+
 ### Start the MCP server
 
 ```bash
@@ -63,6 +81,24 @@ Starts the MCP server on stdio transport. The server exposes 5 tools (see below)
 - `bge-base` — BAAI/bge-reranker-base (English/Chinese only, ~280 MB). Not recommended for Japanese.
 
 Latency cost of rerank is roughly 300–700 ms per query on CPU with `bge-v2-m3` over 50 candidates. `--rerank-by-default` (on by default when `--reranker` is set) controls whether every `search` call uses rerank; the MCP tool takes `rerank: Option<bool>` to override per-query. Switching the reranker does **not** require re-indexing (it is index-independent).
+
+#### When to enable reranking
+
+Rerank trades latency for precision. The right choice depends on usage pattern:
+
+| Scenario | Recommendation |
+|---|---|
+| Interactive agent flows (the LLM calls `search` 2–5 times per turn) | **Leave off.** +500 ms × N search calls adds up fast; retrieval quality from BGE-M3 + heading-weighted bm25 is usually sufficient. |
+| One-shot, precision-critical queries (research, definitive answers) | **Enable.** The latency tax is paid once per turn, and the cross-encoder meaningfully promotes semantically relevant candidates. |
+| Mixed usage | Start with `rerank_by_default = false` and let the caller opt in per query via the MCP tool's `rerank: true` parameter. |
+
+Symptoms that suggest you should turn rerank on:
+
+- Top-5 results often miss the obviously right chunk even after query rewording.
+- Queries that use synonyms / paraphrases of the indexed wording are failing (e.g. Japanese 「バグ」 vs English "error").
+- The agent re-queries multiple times per turn, wasting context by reading wrong hits.
+
+Because rerank is index-independent, you can enable it for a week, measure the quality delta, and disable it if the benefit is not visible — no re-indexing needed.
 
 ### Show index status
 
@@ -104,6 +140,41 @@ With a multilingual model and reranker enabled:
       "env": {
         "FASTEMBED_CACHE_DIR": "/path/to/.cache/huggingface/hub"
       },
+      "type": "stdio"
+    }
+  }
+}
+```
+
+For agent workflows, a more conservative alternative: load the reranker but leave it off by default, letting the caller opt in with `rerank: true` on individual `search` calls.
+
+```json
+{
+  "mcpServers": {
+    "ai-knowledge": {
+      "command": "/path/to/kb-mcp",
+      "args": [
+        "serve",
+        "--kb-path", "/path/to/knowledge-base",
+        "--model", "bge-m3",
+        "--reranker", "bge-v2-m3",
+        "--rerank-by-default=false"
+      ],
+      "env": { "FASTEMBED_CACHE_DIR": "/path/to/.cache/huggingface/hub" },
+      "type": "stdio"
+    }
+  }
+}
+```
+
+Or, if you placed a `kb-mcp.toml` next to the binary with those options set, the `.mcp.json` can shrink to:
+
+```json
+{
+  "mcpServers": {
+    "ai-knowledge": {
+      "command": "/path/to/kb-mcp",
+      "args": ["serve"],
       "type": "stdio"
     }
   }
