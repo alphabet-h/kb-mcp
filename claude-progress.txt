@@ -194,3 +194,18 @@
   - テスト 50 件 (4 ignored) パス維持 (main.rs 内のロジックは db/embedder の
     既存テストでカバー)
   - README.md に skill-bin ユースケース例追記、CLAUDE.md に CLI 一覧更新
+- evaluator による feature 23/24 + fix 51c31e3 品質評価完了: PASS (25/30)
+  - Product Depth 9, Functionality 9, Code Quality 7
+  - ブロッキングなし
+  - 良かった点: apply_cache_dir_env の unsafe が実際に safe (main.rs で
+    Cli::parse 前/Tokio 前の single-threaded 保証)、fix 51c31e3 の設計判断、
+    deny_unknown_fields のエラー UX
+  - 非ブロッキング改善候補 5 件:
+    1. test_relative_paths_resolve_against_config_dir が弱い (tempfile を
+       使いながら load_from 経路を通っていない) → tempdir で実 e2e に
+    2. Hit (main.rs) と SearchHit (server.rs) の重複定義 →
+       From<&SearchResult> transition impl で統合検討
+    3. --rerank-by-default の CLI help に default=true 表示なし →
+       clap long_help で明示
+    4. resolve_relative の Windows UNC / \\?\ プレフィックステスト未カバー
+    5. kb-mcp.toml.example と Config のフィールド同期を回帰テスト化
