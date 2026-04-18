@@ -1100,15 +1100,49 @@ impl Database {
     /// いるため、`documents.path` のみを UPDATE すれば embedding の再計算は
     /// 不要。移動先 path が既に使われている場合は UNIQUE 制約違反でエラー。
     pub fn rename_document(&self, old_path: &str, new_path: &str) -> Result<()> {
-        let updated = self.conn.execute(
-            "UPDATE documents SET path = ?1 WHERE path = ?2",
-            params![new_path, old_path],
-        )?;
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE documents SET path = ?1 WHERE path = ?2",
+                params![new_path, old_path],
+            )
+            .with_context(|| {
+                format!(
+                    "rename_document: UPDATE documents SET path='{new_path}' WHERE path='{old_path}' (maybe new path already exists in documents)"
+                )
+            })?;
         if updated == 0 {
             anyhow::bail!(
                 "rename_document: no document with path '{old_path}' (rows updated: 0)"
             );
         }
+        Ok(())
+    }
+
+    /// [feature 11] 複数の rename を **単一 transaction** で適用する (evaluator
+    /// 指摘 High #2)。途中失敗したらすべて rollback されるので「部分 rename
+    /// 残留」が発生しない。`pairs` が空なら no-op。
+    pub fn rename_documents_atomic(&self, pairs: &[(String, String)]) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute_batch("BEGIN")?;
+        let mut first_err: Option<anyhow::Error> = None;
+        for (old, new) in pairs {
+            if let Err(e) = self.rename_document(old, new) {
+                first_err = Some(e);
+                break;
+            }
+        }
+        if let Some(e) = first_err {
+            // 失敗が起きても ROLLBACK 自体は成功するはず。ROLLBACK 失敗時は
+            // 元のエラーの方が有用なのでそちらを優先して返す。
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+        self.conn
+            .execute_batch("COMMIT")
+            .context("rename_documents_atomic: COMMIT failed")?;
         Ok(())
     }
 }
@@ -1386,6 +1420,56 @@ mod tests {
         let db = db_with_384();
         let err = db.rename_document("nope.md", "else.md").expect_err("must error");
         assert!(err.to_string().contains("no document"));
+    }
+
+    #[test]
+    fn test_rename_documents_atomic_rolls_back_on_failure() {
+        // feature 11: 途中で失敗したら rollback し、先行の rename も戻ること
+        let db = db_with_384();
+        db.upsert_document("a.md", None, None, None, None, &[], None, "h_a")
+            .unwrap();
+        db.upsert_document("b.md", None, None, None, None, &[], None, "h_b")
+            .unwrap();
+
+        // 1 件目: a.md -> a2.md (成功するはず)
+        // 2 件目: nope.md -> x.md (source が無いので bail)
+        let pairs = vec![
+            ("a.md".to_string(), "a2.md".to_string()),
+            ("nope.md".to_string(), "x.md".to_string()),
+        ];
+        let err = db
+            .rename_documents_atomic(&pairs)
+            .expect_err("second pair must fail");
+        assert!(err.to_string().contains("no document"));
+
+        // a.md は元の path に戻っていること (rollback)
+        let map = db.all_path_hashes().unwrap();
+        assert_eq!(map.get("a.md"), Some(&"h_a".to_string()));
+        assert!(!map.contains_key("a2.md"));
+    }
+
+    #[test]
+    fn test_rename_documents_atomic_commits_on_success() {
+        let db = db_with_384();
+        db.upsert_document("a.md", None, None, None, None, &[], None, "h_a")
+            .unwrap();
+        db.upsert_document("b.md", None, None, None, None, &[], None, "h_b")
+            .unwrap();
+        let pairs = vec![
+            ("a.md".to_string(), "a2.md".to_string()),
+            ("b.md".to_string(), "b2.md".to_string()),
+        ];
+        db.rename_documents_atomic(&pairs).unwrap();
+        let map = db.all_path_hashes().unwrap();
+        assert_eq!(map.get("a2.md"), Some(&"h_a".to_string()));
+        assert_eq!(map.get("b2.md"), Some(&"h_b".to_string()));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn test_rename_documents_atomic_empty_pairs_is_noop() {
+        let db = db_with_384();
+        db.rename_documents_atomic(&[]).unwrap();
     }
 
     #[test]

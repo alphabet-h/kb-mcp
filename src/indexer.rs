@@ -13,6 +13,69 @@ use crate::{markdown, quality};
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Per-file metadata collected before the main embed loop. `content` を持たず
+/// 追加 I/O を増やす代わりに、大規模 KB でもピークメモリを一定に抑える。
+#[derive(Debug, Clone)]
+struct DiskEntry {
+    /// kb_path 相対 (forward-slash) の保存キー。
+    rel: String,
+    /// SHA-256 hex。DB 側 `content_hash` と比較する。
+    hash: String,
+    /// 実ファイルの絶対パス。embed/upsert 段階で再 read_to_string する。
+    full: std::path::PathBuf,
+}
+
+/// [feature 11] disk と DB の (path, hash) から「移動ペア」を決定する純粋関数。
+///
+/// - 「DB にあるが disk にない」path は「消えた」候補
+/// - 「disk にあるが DB にない」path は「新規出現」候補
+/// - 両者で hash が一致すればペア確定
+///
+/// 重複 hash がある場合も結果が deterministic になるよう、双方を path で
+/// ソートしてから first-match マッチングを行う (evaluator 指摘 Med #4)。
+fn detect_renames(
+    disk_entries: &[DiskEntry],
+    db_path_hashes: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let disk_paths: HashSet<&str> =
+        disk_entries.iter().map(|e| e.rel.as_str()).collect();
+
+    // DB ∖ disk, path で sort
+    let mut orphan_in_db: Vec<(&String, &String)> = db_path_hashes
+        .iter()
+        .filter(|(p, _)| !disk_paths.contains(p.as_str()))
+        .collect();
+    orphan_in_db.sort_by_key(|(p, _)| *p);
+
+    // disk ∖ DB, path で sort (DiskEntry は元々 walkdir の sort 順だが
+    // 念のため明示的に安定化)
+    let mut new_on_disk: Vec<&DiskEntry> = disk_entries
+        .iter()
+        .filter(|e| !db_path_hashes.contains_key(&e.rel))
+        .collect();
+    new_on_disk.sort_by(|a, b| a.rel.cmp(&b.rel));
+
+    let mut consumed: HashSet<&str> = HashSet::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (old_path, old_hash) in &orphan_in_db {
+        let mut chosen: Option<&str> = None;
+        for e in &new_on_disk {
+            if consumed.contains(e.rel.as_str()) {
+                continue;
+            }
+            if &e.hash == *old_hash {
+                chosen = Some(e.rel.as_str());
+                break;
+            }
+        }
+        if let Some(new_rel) = chosen {
+            consumed.insert(new_rel);
+            pairs.push(((*old_path).clone(), new_rel.to_string()));
+        }
+    }
+    pairs
+}
+
 /// Summary returned by [`rebuild_index`].
 pub struct IndexResult {
     pub total_documents: u32,
@@ -70,16 +133,15 @@ pub fn rebuild_index(
     let md_files = collect_md_files(&kb_path)?;
     eprintln!("Found {} markdown files", md_files.len());
 
-    // [feature 11] ファイル移動検出のため、先に
-    //  (a) disk 側の各ファイルの hash
-    //  (b) DB 側の全 (path, hash) ペア
-    // を取って「DB には古い path、disk には同 hash の新 path」ペアを探す。
-    //
-    // force=true (--force) 指定時は embedding を全件再計算する意図なので、
-    // rename 検出自体をスキップする (重複 path UPDATE を避ける)。
-    let disk_entries: Vec<(String /* rel */, String /* hash */, String /* content */, std::path::PathBuf)> = md_files
+    // [feature 11] ファイル移動検出の前段階として、disk 側の全ファイルの
+    // **hash だけ** を先に計算する。content は持ち回らない (evaluator 指摘
+    // High #1: 大規模 KB の memory regression 回避)。embed/upsert 段階で
+    // もう一度 read_to_string する — ファイル OS キャッシュで 2 度目の
+    // read は十分安く、代わりにピークメモリを `filecount * avg_size` から
+    // `filecount * avg_path_len + 1 file worth of content` に圧縮できる。
+    let disk_entries: Vec<DiskEntry> = md_files
         .iter()
-        .map(|p| -> Result<_> {
+        .map(|p| -> Result<DiskEntry> {
             let content = std::fs::read_to_string(p)
                 .with_context(|| format!("failed to read {}", p.display()))?;
             let rel = p
@@ -88,73 +150,54 @@ pub fn rebuild_index(
                 .to_string_lossy()
                 .replace('\\', "/");
             let hash = sha256_hex(&content);
-            Ok((rel, hash, content, p.clone()))
+            Ok(DiskEntry {
+                rel,
+                hash,
+                full: p.clone(),
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let mut renamed: u32 = 0;
-    let mut renamed_paths: HashSet<String> = HashSet::new(); // new path (rename 済)
-    if !force {
+    // [feature 11] rename 検出 + atomically な rename 適用。
+    // force=true のときは skip (embedding 全件再計算の意図)。
+    let renamed: u32 = if force {
+        0
+    } else {
         let db_path_hashes = db.all_path_hashes()?;
-        let disk_paths: HashSet<&str> =
-            disk_entries.iter().map(|(r, ..)| r.as_str()).collect();
-
-        // DB にあるが disk から消えた = 移動 or 削除の候補
-        // 複数同 hash があった場合は「先頭に見つけた disk new-path」を採用 (安定順)
-        let orphan_in_db: Vec<(String, String)> = db_path_hashes
-            .iter()
-            .filter(|(p, _)| !disk_paths.contains(p.as_str()))
-            .map(|(p, h)| (p.clone(), h.clone()))
-            .collect();
-
-        for (old_path, old_hash) in &orphan_in_db {
-            // disk 側で (hash 一致 & DB にまだ同 path が無い & 他の rename に
-            // 使っていない) 新 path を探す
-            let mut chosen: Option<String> = None;
-            for (new_rel, new_hash, _, _) in &disk_entries {
-                if new_hash != old_hash {
-                    continue;
-                }
-                if db_path_hashes.contains_key(new_rel) {
-                    continue; // その path は既に DB にある = 別文書
-                }
-                if renamed_paths.contains(new_rel) {
-                    continue;
-                }
-                chosen = Some(new_rel.clone());
-                break;
-            }
-            if let Some(new_path) = chosen {
-                db.rename_document(old_path, &new_path)?;
-                renamed_paths.insert(new_path.clone());
-                renamed += 1;
-                eprintln!("  renamed: {old_path} -> {new_path}");
-            }
+        let pairs = detect_renames(&disk_entries, &db_path_hashes);
+        // evaluator 指摘 High #2: rename フェーズ全体を単一 transaction に
+        // 包んで部分 rename 残留を防ぐ。pairs が空なら no-op。
+        db.rename_documents_atomic(&pairs)?;
+        for (old_path, new_path) in &pairs {
+            eprintln!("  renamed: {old_path} -> {new_path}");
         }
-    }
+        pairs.len() as u32
+    };
 
     // Track paths we visit so we can detect deletions later.
     let mut visited_paths: HashSet<String> = HashSet::new();
     let mut updated: u32 = 0;
 
     // 2. Process each file
-    for (rel_path, hash, content, _file_path) in &disk_entries {
-        visited_paths.insert(rel_path.clone());
+    for entry in &disk_entries {
+        visited_paths.insert(entry.rel.clone());
 
-        // 2b. Skip unchanged files unless forced.
+        // 2a. Skip unchanged files unless forced.
         // rename で path UPDATE 済のものは「DB 側 hash == disk hash」なので
         // この経路で自然に skip される (embedding 再計算なし)。
         if !force
-            && let Some(existing_hash) = db.get_document_hash(rel_path)?
-            && &existing_hash == hash
+            && let Some(existing_hash) = db.get_document_hash(&entry.rel)?
+            && existing_hash == entry.hash
         {
             continue;
         }
 
-        // 2c. Parse markdown (with optional heading exclude override)
+        // 2b. Read + parse markdown only for files we actually need to embed.
+        let content = std::fs::read_to_string(&entry.full)
+            .with_context(|| format!("failed to read {}", entry.full.display()))?;
         let parsed = match exclude_headings {
-            Some(list) => markdown::parse_with_excludes(content, list),
-            None => markdown::parse(content),
+            Some(list) => markdown::parse_with_excludes(&content, list),
+            None => markdown::parse(&content),
         };
 
         // Skip files with no embeddable chunks
@@ -162,12 +205,12 @@ pub fn rebuild_index(
             continue;
         }
 
-        // 2d. Extract category and topic from relative path
-        let (category, topic) = extract_category_topic(rel_path);
+        // 2c. Extract category and topic from relative path
+        let (category, topic) = extract_category_topic(&entry.rel);
 
-        // 2e. Upsert document (deletes old chunks internally)
+        // 2d. Upsert document (deletes old chunks internally)
         let doc_id = db.upsert_document(
-            rel_path,
+            &entry.rel,
             parsed.frontmatter.title.as_deref(),
             // Prefer frontmatter topic, fall back to path-derived topic
             parsed
@@ -179,16 +222,16 @@ pub fn rebuild_index(
             parsed.frontmatter.depth.as_deref(),
             &parsed.frontmatter.tags,
             parsed.frontmatter.date.as_deref(),
-            hash,
+            &entry.hash,
         )?;
 
-        // 2f. Batch-embed all chunks
+        // 2e. Batch-embed all chunks
         let texts: Vec<&str> = parsed.chunks.iter().map(|c| c.content.as_str()).collect();
         let embeddings = embedder
             .embed_texts(&texts)
-            .with_context(|| format!("failed to embed chunks for {rel_path}"))?;
+            .with_context(|| format!("failed to embed chunks for {}", entry.rel))?;
 
-        // 2g. Insert each chunk with its embedding + quality score
+        // 2f. Insert each chunk with its embedding + quality score
         for (chunk, embedding) in parsed.chunks.iter().zip(embeddings.iter()) {
             let score = quality::chunk_quality_score(
                 chunk.heading.as_deref(),
@@ -205,7 +248,7 @@ pub fn rebuild_index(
         }
 
         updated += 1;
-        eprintln!("  indexed: {} ({} chunks)", rel_path, parsed.chunks.len());
+        eprintln!("  indexed: {} ({} chunks)", entry.rel, parsed.chunks.len());
     }
 
     // 3. Delete documents in DB that no longer exist on disk
@@ -299,6 +342,80 @@ fn sha256_hex(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::HashMap;
+
+    fn mk_entry(rel: &str, hash: &str) -> DiskEntry {
+        DiskEntry {
+            rel: rel.to_string(),
+            hash: hash.to_string(),
+            full: std::path::PathBuf::from(rel),
+        }
+    }
+
+    #[test]
+    fn test_detect_renames_single_move() {
+        let disk = vec![mk_entry("new/x.md", "h1"), mk_entry("keep.md", "h2")];
+        let mut db = HashMap::new();
+        db.insert("old/x.md".to_string(), "h1".to_string());
+        db.insert("keep.md".to_string(), "h2".to_string());
+        let pairs = detect_renames(&disk, &db);
+        assert_eq!(pairs, vec![("old/x.md".to_string(), "new/x.md".to_string())]);
+    }
+
+    #[test]
+    fn test_detect_renames_no_rename_when_new_path_exists() {
+        // new path が既に DB にある = 別文書なので rename ペアにしない
+        let disk = vec![mk_entry("b.md", "h1")];
+        let mut db = HashMap::new();
+        db.insert("a.md".to_string(), "h1".to_string());
+        db.insert("b.md".to_string(), "h1".to_string());
+        let pairs = detect_renames(&disk, &db);
+        // disk には a.md が無いので a.md は DB orphan、b.md は既に DB にある
+        // → 新規 disk path が無いのでペア無し
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_renames_no_change_same_path_same_hash() {
+        let disk = vec![mk_entry("a.md", "h1")];
+        let mut db = HashMap::new();
+        db.insert("a.md".to_string(), "h1".to_string());
+        let pairs = detect_renames(&disk, &db);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_renames_deterministic_with_duplicate_hashes() {
+        // A, B とも空ファイル (同 hash) で DB、disk 側も C, D の新 path
+        // どちらに振っても意味論的には同じだが結果は deterministic であるべき
+        let disk = vec![mk_entry("C.md", "hempty"), mk_entry("D.md", "hempty")];
+        let mut db = HashMap::new();
+        db.insert("A.md".to_string(), "hempty".to_string());
+        db.insert("B.md".to_string(), "hempty".to_string());
+        let pairs1 = detect_renames(&disk, &db);
+        // 2 回目も同じ結果になること (HashMap iteration 順に依存しない)
+        let pairs2 = detect_renames(&disk, &db);
+        assert_eq!(pairs1, pairs2);
+        // path 順の sort により A→C, B→D になるはず
+        assert_eq!(
+            pairs1,
+            vec![
+                ("A.md".to_string(), "C.md".to_string()),
+                ("B.md".to_string(), "D.md".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_detect_renames_unmatched_hashes_are_dropped() {
+        let disk = vec![mk_entry("new.md", "h_new")];
+        let mut db = HashMap::new();
+        db.insert("old.md".to_string(), "h_old".to_string()); // 別 hash
+        let pairs = detect_renames(&disk, &db);
+        // hash 不一致なのでペアにしない (old.md は削除対象、new.md は新規追加)
+        assert!(pairs.is_empty());
+    }
 
     #[test]
     fn test_extract_category_topic_deep_path() {
