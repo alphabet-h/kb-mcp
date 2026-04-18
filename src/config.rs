@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::embedder::{ModelChoice, RerankerChoice};
 use crate::parser::ParsersConfig;
 use crate::quality::QualityFilterConfig;
+use crate::transport::TransportConfig;
 use crate::watcher::WatchConfig;
 
 /// バイナリと同じディレクトリに置く `kb-mcp.toml` の表現。
@@ -49,6 +50,10 @@ pub struct Config {
     /// 省略時 (`None`) は `WatchConfig::default()` (enabled=true, debounce=500ms)。
     /// CLI `--no-watch` で即座に無効化できる。
     pub watch: Option<WatchConfig>,
+    /// [feature 18] serve が listen するトランスポート。
+    /// 省略時 (`None`) は stdio (1 クライアント限定、pre-feature-18 後方互換)。
+    /// CLI `--transport http` で HTTP 起動に切り替え。
+    pub transport: Option<TransportConfig>,
 }
 
 /// `get_best_practice` の汎用化設定 (feature 16)。
@@ -143,6 +148,7 @@ impl Config {
             && self.best_practice.is_none()
             && self.parsers.is_none()
             && self.watch.is_none()
+            && self.transport.is_none()
     }
 
     /// [feature 20] 設定から `parser::Registry` を構築する。キー省略時は
@@ -335,6 +341,59 @@ mod tests {
         assert!(cfg.parsers.is_none());
         let reg = cfg.build_parser_registry().unwrap();
         assert_eq!(reg.extensions(), vec!["md"]);
+    }
+
+    #[test]
+    fn test_transport_http_parses() {
+        let mut file = tempfile("kb-mcp-config-transport-http");
+        writeln!(
+            file,
+            "[transport]\n\
+             kind = \"http\"\n\
+             \n\
+             [transport.http]\n\
+             bind = \"0.0.0.0:4000\"\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let t = cfg.transport.expect("transport must be Some");
+        assert_eq!(
+            t.kind,
+            Some(crate::transport::TransportKindConfig::Http)
+        );
+        let http = t.http.expect("http section must be Some");
+        assert_eq!(http.bind.as_deref(), Some("0.0.0.0:4000"));
+    }
+
+    #[test]
+    fn test_transport_section_only_http_implies_http_kind() {
+        // [transport.http] だけ書けば kind 省略でも HTTP として解釈される (糖衣)。
+        let mut file = tempfile("kb-mcp-config-transport-http-only");
+        writeln!(
+            file,
+            "[transport.http]\n\
+             bind = \"127.0.0.1:4567\"\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let t = cfg.transport.expect("transport must be Some");
+        assert!(t.kind.is_none(), "kind is omitted");
+        let http = t.http.expect("http section must be Some");
+        assert_eq!(http.bind.as_deref(), Some("127.0.0.1:4567"));
+    }
+
+    #[test]
+    fn test_transport_unknown_field_is_rejected() {
+        let mut file = tempfile("kb-mcp-config-transport-bad");
+        writeln!(
+            file,
+            "[transport]\n\
+             bogus = 1\n"
+        )
+        .unwrap();
+        let err =
+            Config::load_from(file.path()).expect_err("unknown [transport] field must reject");
+        assert!(err.to_string().contains("failed to parse config"));
     }
 
     #[test]

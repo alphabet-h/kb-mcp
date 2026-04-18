@@ -71,6 +71,15 @@ enabled = ["md", "txt"]
 [watch]
 enabled = true
 debounce_ms = 500
+
+# feature 18: MCP トランスポート。省略時 stdio (後方互換)。
+# "http" で Streamable HTTP、複数クライアント同時接続可。
+# CLI --transport http --port 3100 / --bind 0.0.0.0:3100 で override。
+[transport]
+kind = "http"
+
+[transport.http]
+bind = "127.0.0.1:3100"
 ```
 
 - 全フィールド optional。テンプレートは `kb-mcp.toml.example` (リポジトリ同梱、`.gitignore` で `kb-mcp.toml` 本体は除外)
@@ -106,6 +115,7 @@ debounce_ms = 500
 | `src/parser/` | [feature 20] Parser trait + Registry。`mod.rs` に Frontmatter/Chunk/ParsedDocument、`markdown.rs` に `.md` 実装、`txt.rs` に `.txt` 実装、`registry.rs` に拡張子ルックアップ |
 | `src/markdown.rs` | Parser trait への移行後は `crate::parser::markdown::MarkdownParser` への薄い shim (legacy `parse()` / `parse_with_excludes()` 公開 API を維持) |
 | `src/watcher.rs` | [feature 12] `notify-debouncer-full` を tokio channel 越しに受信し、拡張子フィルタ + path filter (`.obsidian/`) を経由して `indexer::{reindex,deindex,rename}_single_file` にディスパッチ。server 並走は `tokio::spawn` |
+| `src/transport/` | [feature 18] MCP transport 抽象。`mod.rs` に `Transport` enum + CLI/config 解決、`stdio.rs` は既存 stdio 経路、`http.rs` は rmcp `StreamableHttpService` + axum 0.8 で `/mcp` マウント + `/healthz`。`KbServerShared` を Arc 共有し session factory で軽量生成 |
 | `src/embedder.rs` | fastembed-rs の薄いラッパ。`ModelChoice` で埋め込みモデル (BGE-small-en-v1.5 / BGE-M3) を、`RerankerChoice` + `Reranker` で optional な cross-encoder 再ランクを提供 |
 | `src/db.rs` | rusqlite + sqlite-vec + FTS5 (trigram)。`chunks` / `vec_chunks` / `fts_chunks` の schema と CRUD、`search_hybrid` (RRF k=60) を提供 |
 

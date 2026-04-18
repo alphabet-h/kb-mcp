@@ -124,9 +124,9 @@
     {
       "id": 18,
       "category": "upgrade-transport",
-      "description": "HTTP/SSE トランスポート (複数クライアント同時接続)",
-      "status": "failing",
-      "verification": "kb-mcp serve --transport http --port 3100 で 2 クライアント同時検索が通る"
+      "description": "Streamable HTTP トランスポート (複数クライアント同時接続)。rmcp 1.x + axum 0.8 で /mcp マウント + /healthz",
+      "status": "passing",
+      "verification": "kb-mcp serve --transport http --port 3100 で起動、/healthz が 200 ok、/mcp で MCP JSON-RPC を受け付ける。既定は stdio (後方互換)。Transport::resolve の CLI/config 優先順位、[transport.http] 糖衣解釈、無効 bind の reject をユニットテストで網羅"
     },
     {
       "id": 19,

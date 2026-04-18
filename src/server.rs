@@ -22,7 +22,9 @@ pub struct KbServer {
     /// [feature 12] watcher と共有するため `Arc<Mutex<_>>` で保持。
     db: Arc<Mutex<Database>>,
     embedder: Arc<Mutex<Embedder>>,
-    reranker: Mutex<Option<Reranker>>,
+    /// [feature 18] HTTP トランスポートの service factory でセッションごとに
+    /// `KbServer` を clone するため Arc 化。Option なのは reranker 無効のケース。
+    reranker: Arc<Mutex<Option<Reranker>>>,
     rerank_by_default: bool,
     kb_path: PathBuf,
     /// `rebuild_index` ツールで markdown パース時に使う除外見出し。
@@ -613,7 +615,42 @@ fn list_h2_sections(content: &str) -> Vec<String> {
 // Server bootstrap
 // ---------------------------------------------------------------------------
 
-/// Run the MCP server on stdio transport.
+/// [feature 18] `KbServer` を構成する共有リソース。HTTP トランスポートの
+/// service factory が session ごとに `KbServer` を生成するため、重いリソース
+/// (DB / embedder / reranker / registry) を 1 回だけロードして Arc で共有する。
+#[derive(Clone)]
+pub struct KbServerShared {
+    pub db: Arc<Mutex<Database>>,
+    pub embedder: Arc<Mutex<Embedder>>,
+    pub reranker: Arc<Mutex<Option<Reranker>>>,
+    pub rerank_by_default: bool,
+    pub kb_path: PathBuf,
+    pub exclude_headings: Option<Vec<String>>,
+    pub quality_threshold: f32,
+    pub best_practice_templates: Vec<String>,
+    pub parser_registry: Arc<Registry>,
+}
+
+impl KbServer {
+    /// [feature 18] Shared state から新しい `KbServer` を組み立てる。
+    /// Arc::clone で軽量、embedder / reranker モデルの重複ロードは起きない。
+    pub fn from_shared(shared: &KbServerShared) -> Self {
+        Self {
+            db: Arc::clone(&shared.db),
+            embedder: Arc::clone(&shared.embedder),
+            reranker: Arc::clone(&shared.reranker),
+            rerank_by_default: shared.rerank_by_default,
+            kb_path: shared.kb_path.clone(),
+            exclude_headings: shared.exclude_headings.clone(),
+            quality_threshold: shared.quality_threshold,
+            best_practice_templates: shared.best_practice_templates.clone(),
+            parser_registry: Arc::clone(&shared.parser_registry),
+            tool_router: KbServer::tool_router(),
+        }
+    }
+}
+
+/// Run the MCP server on the selected transport.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     kb_path: &std::path::Path,
@@ -625,6 +662,7 @@ pub async fn run_server(
     best_practice_templates: Vec<String>,
     parser_registry: Registry,
     watch_config: crate::watcher::WatchConfig,
+    transport: crate::transport::Transport,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -637,37 +675,26 @@ pub async fn run_server(
     let kb_path = kb_path.canonicalize().unwrap_or_else(|_| kb_path.to_path_buf());
 
     // [feature 12] watcher と共有するため Arc 化。
-    let db_shared = Arc::new(Mutex::new(db));
-    let embedder_shared = Arc::new(Mutex::new(embedder));
-    let registry_shared = Arc::new(parser_registry);
-    let exclude_for_watcher = exclude_headings.clone();
-
-    let server = KbServer {
-        db: Arc::clone(&db_shared),
-        embedder: Arc::clone(&embedder_shared),
-        reranker: Mutex::new(reranker),
+    // [feature 18] HTTP service factory でも共有するため KbServerShared にまとめる。
+    let shared = KbServerShared {
+        db: Arc::new(Mutex::new(db)),
+        embedder: Arc::new(Mutex::new(embedder)),
+        reranker: Arc::new(Mutex::new(reranker)),
         rerank_by_default,
         kb_path: kb_path.clone(),
         exclude_headings,
         quality_threshold,
         best_practice_templates,
-        parser_registry: Arc::clone(&registry_shared),
-        tool_router: KbServer::tool_router(),
+        parser_registry: Arc::new(parser_registry),
     };
 
-    eprintln!("kb-mcp server ready (stdio transport)");
-
-    // [feature 12] watcher をバックグラウンドで並走。tokio::spawn で起動し、
-    // watcher 側のエラーは stderr に流すだけで MCP サーバ (service.waiting)
-    // は継続させる。service.waiting は self を moves するため select! は使わず
-    // 単純に spawn する方が素直。クライアント切断で run_server 全体が終われば
-    // watcher task の JoinHandle は drop され、bridge スレッドも自然終了する。
+    // [feature 12] watcher をバックグラウンドで並走。
     let watcher_state = crate::watcher::WatcherState {
         kb_path: kb_path.clone(),
-        db: db_shared,
-        embedder: embedder_shared,
-        registry: registry_shared,
-        exclude_headings: exclude_for_watcher,
+        db: Arc::clone(&shared.db),
+        embedder: Arc::clone(&shared.embedder),
+        registry: Arc::clone(&shared.parser_registry),
+        exclude_headings: shared.exclude_headings.clone(),
         config: watch_config,
     };
     let watcher_handle = tokio::spawn(async move {
@@ -676,13 +703,18 @@ pub async fn run_server(
         }
     });
 
-    let transport = rmcp::transport::io::stdio();
-    let service = rmcp::serve_server(server, transport).await?;
-
-    service.waiting().await?;
+    let result = match transport {
+        crate::transport::Transport::Stdio => {
+            crate::transport::stdio::run_stdio(&shared).await
+        }
+        crate::transport::Transport::Http { addr } => {
+            // move shared to http runner (no clone needed — stdio branch
+            // consumes it only by reference and is mutually exclusive).
+            crate::transport::http::run_http(addr, shared).await
+        }
+    };
     watcher_handle.abort();
-
-    Ok(())
+    result
 }
 
 // ===========================================================================

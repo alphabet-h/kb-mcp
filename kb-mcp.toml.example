@@ -82,3 +82,17 @@ enabled = ["md", "txt"]
 [watch]
 enabled = true
 debounce_ms = 500
+
+# トランスポート設定 (feature 18)。`kb-mcp serve` が listen する方式を選ぶ。
+# kind は "stdio" (1 クライアント限定、pre-feature-18 既定) か "http"
+# (Streamable HTTP、複数クライアント同時接続可)。省略 (セクション自体なし)
+# なら stdio。[transport.http] だけ書けば kind 省略でも http 扱い (糖衣)。
+# HTTP 時の mount path は /mcp 固定、/healthz が 200 を返す。CLI
+# `--transport http --port 3100` / `--bind 0.0.0.0:3100` で per-run override。
+# 既定 bind は 127.0.0.1:3100 (loopback)。0.0.0.0 は opt-in、本番公開する場合は
+# 将来追加予定の Bearer token 認証 (F18-11) が安定してから検討すること。
+[transport]
+kind = "http"
+
+[transport.http]
+bind = "127.0.0.1:3100"

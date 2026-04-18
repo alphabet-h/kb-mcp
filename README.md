@@ -49,6 +49,16 @@ enabled = ["md", "txt"]
 [watch]
 enabled = true
 debounce_ms = 500
+
+# Transport for `kb-mcp serve` (feature 18). `kind = "stdio"` (default)
+# supports one client at a time; `kind = "http"` (Streamable HTTP) allows
+# many simultaneous clients at `/mcp`. `/healthz` returns 200 for health
+# checks. CLI `--transport http --port 3100` overrides.
+[transport]
+kind = "http"
+
+[transport.http]
+bind = "127.0.0.1:3100"
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
@@ -267,6 +277,33 @@ If you edit the knowledge base from inside a Claude Code session (or run a skill
 ```
 
 SHA-256 diffing in `kb-mcp index` makes the second-and-later invocations fast (usually sub-second on small KBs). A richer shell script that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH` ships with the repo: see [`examples/hooks/`](./examples/hooks/README.md). SQLite runs in WAL mode so the hook can safely run while the MCP server is still up.
+
+### HTTP transport for multiple simultaneous clients (feature 18)
+
+By default `kb-mcp serve` speaks MCP over stdio — one client per server process. To serve multiple clients simultaneously (e.g. several Claude Code sessions or an external script hitting the same index), switch to Streamable HTTP:
+
+```bash
+kb-mcp serve --kb-path /path/to/knowledge-base --transport http --port 3100
+# or: --bind 0.0.0.0:3100
+```
+
+The server mounts the MCP endpoint at `/mcp` and exposes `/healthz` for probes. `.mcp.json` for an HTTP-capable client:
+
+```json
+{
+  "mcpServers": {
+    "ai-knowledge": {
+      "type": "http",
+      "url": "http://127.0.0.1:3100/mcp"
+    }
+  }
+}
+```
+
+Security notes:
+- Default bind is `127.0.0.1:3100` (loopback). Use `--bind 0.0.0.0:3100` only on trusted networks — **kb-mcp has no built-in authentication yet**.
+- rmcp's Streamable HTTP layer enforces Host header validation (loopback only by default) to prevent DNS rebinding attacks.
+- Mutex-based serialization inside the server means HTTP concurrent requests are still processed sequentially at the embedder / DB level (~10 qps expected for `search`). Heavy parallelism is a future enhancement.
 
 ### Live-sync via file watcher (feature 12)
 

@@ -7,6 +7,7 @@ pub mod markdown;
 pub mod parser;
 pub mod quality;
 pub mod server;
+pub mod transport;
 pub mod watcher;
 
 use anyhow::{Context, Result};
@@ -32,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the MCP server (stdio transport)
+    /// Start the MCP server (stdio or http transport)
     Serve {
         /// Path to the knowledge-base directory
         #[arg(long)]
@@ -60,6 +61,18 @@ enum Commands {
         /// Override the watcher debounce in milliseconds. Default: 500ms.
         #[arg(long = "debounce-ms")]
         debounce_ms: Option<u64>,
+        /// [feature 18] Transport: stdio (default, 1 client) or http
+        /// (Streamable HTTP, many clients). HTTP bind defaults to 127.0.0.1:3100.
+        #[arg(long, value_enum)]
+        transport: Option<transport::TransportKind>,
+        /// [feature 18] Full HTTP bind address when `--transport http`.
+        /// Example: `--bind 0.0.0.0:3100`. Wins over `--port`.
+        #[arg(long)]
+        bind: Option<std::net::SocketAddr>,
+        /// [feature 18] HTTP port when `--transport http`, combined with
+        /// `127.0.0.1`. Default: 3100. Ignored if `--bind` is given.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Build or rebuild the search index
     Index {
@@ -214,6 +227,9 @@ fn main() -> anyhow::Result<()> {
             rerank_by_default,
             no_watch,
             debounce_ms,
+            transport: cli_transport,
+            bind,
+            port,
         } => {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
@@ -246,6 +262,25 @@ fn main() -> anyhow::Result<()> {
                 watch_config.debounce_ms = d;
             }
 
+            // [feature 18] transport の解決: CLI > config > default (stdio)
+            let resolved_transport = transport::Transport::resolve(
+                cli_transport,
+                bind,
+                port,
+                cfg.transport.as_ref(),
+            )?;
+
+            // evaluator 指摘 High #2: `--bind` / `--port` が指定されているのに
+            // 実効 transport が Stdio なら silent ignore は footgun なので reject。
+            if matches!(resolved_transport, transport::Transport::Stdio)
+                && (bind.is_some() || port.is_some())
+            {
+                anyhow::bail!(
+                    "--bind / --port require `--transport http` (or `[transport].kind = \"http\"` in kb-mcp.toml); \
+                     currently resolved to stdio which does not listen on any port."
+                );
+            }
+
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 server::run_server(
@@ -258,6 +293,7 @@ fn main() -> anyhow::Result<()> {
                     best_practice_templates,
                     parser_registry,
                     watch_config,
+                    resolved_transport,
                 )
                 .await
             })?;
