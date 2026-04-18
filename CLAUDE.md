@@ -160,9 +160,8 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub kb-mcp index --kb-path ... --model 
 - コンテンツハッシュベースのファイル移動検出
 - Markdown 以外のファイル対応 (.txt / .rst / .adoc)
 - Frontmatter スキーマ検証
-- PostToolUse hook 連携
 
-実装済みの履歴 (feature 7-10, 13, 14, 15, 21-24 + evaluator 指摘対応) は `claude-progress.txt` と `features.json` を参照。
+実装済みの履歴 (feature 7-10, 13, 14, 15, 19, 21-24 + evaluator 指摘対応) は `claude-progress.txt` と `features.json` を参照。
 
 ## 運用の細則
 

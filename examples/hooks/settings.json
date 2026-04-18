@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy the hooks block below into `.claude/settings.json` of the project that hosts your knowledge base. The hook triggers `kb-mcp index` after every Claude Code `Skill`, `Write`, or `Edit` tool use so the search index stays fresh. Change `kb-mcp` to an absolute path if the binary is not on PATH.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kb-mcp index"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kb-mcp index"
+          }
+        ]
+      }
+    ]
+  }
+}

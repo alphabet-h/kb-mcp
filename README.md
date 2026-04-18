@@ -231,6 +231,27 @@ Or, if you placed a `kb-mcp.toml` next to the binary with those options set, the
 
 The server will be started automatically when the client connects.
 
+### Keeping the index fresh via PostToolUse hook (feature 19)
+
+If you edit the knowledge base from inside a Claude Code session (or run a skill that writes Markdown files), the running MCP server will keep returning stale results until the index is rebuilt. A `PostToolUse` hook in `.claude/settings.json` can re-index automatically after every write. Minimal form:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|Skill",
+        "hooks": [
+          { "type": "command", "command": "kb-mcp index" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+SHA-256 diffing in `kb-mcp index` makes the second-and-later invocations fast (usually sub-second on small KBs). A richer shell script that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH` ships with the repo: see [`examples/hooks/`](./examples/hooks/README.md). SQLite runs in WAL mode so the hook can safely run while the MCP server is still up.
+
 ### Working around HuggingFace TLS failures on first download
 
 Some environments (corporate proxies, firewalls with TLS inspection) reject fastembed's native TLS connection to `huggingface.co` with `os error 10054` / "Connection was reset". In that case, pre-download the model via the Python HuggingFace CLI and point `FASTEMBED_CACHE_DIR` at the HF Hub cache:

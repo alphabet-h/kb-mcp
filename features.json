@@ -132,8 +132,8 @@
       "id": 19,
       "category": "upgrade-transport",
       "description": "PostToolUse hook 連携 (スキル実行後に自動 rebuild_index)",
-      "status": "failing",
-      "verification": "サンプル hook 設定を提供し、スキル実行後にインデックスが更新される"
+      "status": "passing",
+      "verification": "examples/hooks/ に .claude/settings.json スニペット + path-filter 付きシェルスクリプトを同梱、README の「Keeping the index fresh via PostToolUse hook」で案内"
     },
     {
       "id": 20,
