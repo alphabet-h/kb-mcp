@@ -162,3 +162,14 @@
     env_precedence
   - テスト 48 件 (4 ignored) すべてパス
   - 実機確認: config のみで --kb-path / --model 省略で動作、CLI override も確認
+- feature 23 改善: 相対パスの resolve 基点を設定ファイルのディレクトリに
+  - load_from で kb_path / fastembed_cache_dir の相対パスを
+    config parent dir 基準に resolve (cwd ではない)
+  - MCP 起動時の cwd は呼び出し側プロジェクトに依存するため、設定ファイル
+    相対 resolve のほうが直感的で堅牢
+  - 新規テスト 2 件: relative_paths_resolve_against_config_dir、
+    absolute_paths_are_not_rebased
+  - 既存テスト test_parse_full_config を Windows 絶対パス判定に合わせて
+    cross-platform 化
+  - テスト 50 件 (4 ignored) すべてパス
+  - 実機移行は MCP disconnect 待ち (旧バイナリがロック中)

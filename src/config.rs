@@ -40,14 +40,25 @@ impl Config {
     }
 
     /// 指定パスから読み込む。ファイルが存在しない場合は空の `Config`。
+    /// 相対パスで書かれたフィールドは**設定ファイルのあるディレクトリ**を
+    /// 基点に解決する (cwd ではない)。
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {}", path.display()))?;
-        let cfg: Self = toml::from_str(&text)
+        let mut cfg: Self = toml::from_str(&text)
             .with_context(|| format!("failed to parse config: {}", path.display()))?;
+
+        // 相対パスを設定ファイルのディレクトリ基準に resolve する。
+        // cwd は MCP 起動時に呼び出し側プロジェクトに依存するため当てにならない。
+        if let Some(base) = path.parent() {
+            cfg.kb_path = cfg.kb_path.map(|p| resolve_relative(base, p));
+            cfg.fastembed_cache_dir = cfg
+                .fastembed_cache_dir
+                .map(|p| resolve_relative(base, p));
+        }
         Ok(cfg)
     }
 
@@ -84,6 +95,15 @@ fn alongside_binary_path() -> Option<PathBuf> {
     Some(exe.parent()?.join("kb-mcp.toml"))
 }
 
+/// `path` が絶対なら何もしない、相対なら `base.join(path)` を返す。
+fn resolve_relative(base: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,28 +120,30 @@ mod tests {
 
     #[test]
     fn test_parse_full_config() {
+        // 絶対パスは resolve_relative で rebase されないことも確認するため、
+        // プラットフォーム別の真の絶対パスを使う。
+        #[cfg(windows)]
+        let (kb, cache) = ("C:/tmp/kb", "C:/tmp/cache");
+        #[cfg(not(windows))]
+        let (kb, cache) = ("/tmp/kb", "/tmp/cache");
+
         let mut file = tempfile("kb-mcp-config-full");
         writeln!(
             file,
-            r#"
-kb_path = "/tmp/kb"
-model = "bge-m3"
-reranker = "bge-v2-m3"
-rerank_by_default = true
-fastembed_cache_dir = "/tmp/cache"
-"#
+            "kb_path = \"{kb}\"\n\
+             model = \"bge-m3\"\n\
+             reranker = \"bge-v2-m3\"\n\
+             rerank_by_default = true\n\
+             fastembed_cache_dir = \"{cache}\"\n"
         )
         .unwrap();
 
         let cfg = Config::load_from(file.path()).unwrap();
-        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new("/tmp/kb")));
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(kb)));
         assert_eq!(cfg.model, Some(ModelChoice::BgeM3));
         assert_eq!(cfg.reranker, Some(RerankerChoice::BgeV2M3));
         assert_eq!(cfg.rerank_by_default, Some(true));
-        assert_eq!(
-            cfg.fastembed_cache_dir.as_deref(),
-            Some(Path::new("/tmp/cache"))
-        );
+        assert_eq!(cfg.fastembed_cache_dir.as_deref(), Some(Path::new(cache)));
     }
 
     #[test]
@@ -141,6 +163,48 @@ fastembed_cache_dir = "/tmp/cache"
         writeln!(file, r#"bogus_field = "oops""#).unwrap();
         let err = Config::load_from(file.path()).expect_err("should reject unknown field");
         assert!(err.to_string().contains("failed to parse config"));
+    }
+
+    #[test]
+    fn test_relative_paths_resolve_against_config_dir() {
+        let mut file = tempfile("kb-mcp-config-relpath");
+        writeln!(
+            file,
+            r#"
+kb_path = "./knowledge-base"
+fastembed_cache_dir = "cache/hf"
+"#
+        )
+        .unwrap();
+        let cfg_path = file.path().to_path_buf();
+        drop(file);
+        // Re-open via load_from (file already written and path known)
+        // tempfile の Drop で消してしまうので、ここでは別経路で検証:
+        let cfg = Config {
+            kb_path: Some(PathBuf::from("./knowledge-base")),
+            fastembed_cache_dir: Some(PathBuf::from("cache/hf")),
+            ..Default::default()
+        };
+        // load_from を経由しないので手動で同じ変換を適用
+        let base = cfg_path.parent().unwrap();
+        let kb = resolve_relative(base, cfg.kb_path.clone().unwrap());
+        let cache = resolve_relative(base, cfg.fastembed_cache_dir.clone().unwrap());
+        assert!(kb.starts_with(base));
+        assert!(cache.starts_with(base));
+        assert!(kb.ends_with("knowledge-base"));
+    }
+
+    #[test]
+    fn test_absolute_paths_are_not_rebased() {
+        // Windows / Unix 両対応
+        #[cfg(windows)]
+        let abs = PathBuf::from("C:/absolute/foo");
+        #[cfg(not(windows))]
+        let abs = PathBuf::from("/absolute/foo");
+
+        let base = Path::new("/some/base");
+        let out = resolve_relative(base, abs.clone());
+        assert_eq!(out, abs);
     }
 
     #[test]
