@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod embedder;
+pub mod graph;
 pub mod indexer;
 pub mod markdown;
 pub mod server;
@@ -66,6 +67,40 @@ enum Commands {
         #[arg(long)]
         kb_path: Option<PathBuf>,
     },
+    /// Expand a connection graph starting from a document path.
+    /// Useful for chained context discovery from the CLI.
+    Graph {
+        /// Start document path (relative to kb-path)
+        #[arg(long)]
+        start: String,
+        /// Path to the knowledge-base directory
+        #[arg(long)]
+        kb_path: Option<PathBuf>,
+        /// Embedding model (must match the index; defaults to config or built-in)
+        #[arg(long, value_enum)]
+        model: Option<ModelChoice>,
+        /// BFS depth (default 2, clamped to max 3)
+        #[arg(long, default_value_t = graph::DEFAULT_DEPTH)]
+        depth: u32,
+        /// Max fan-out per node (default 5, clamped to max 20)
+        #[arg(long = "fan-out", default_value_t = graph::DEFAULT_FAN_OUT)]
+        fan_out: u32,
+        /// Minimum cosine similarity 0.0-1.0 (default 0.3)
+        #[arg(long = "min-similarity", default_value_t = graph::DEFAULT_MIN_SIMILARITY)]
+        min_similarity: f32,
+        /// Seed strategy (all_chunks | centroid)
+        #[arg(long = "seed-strategy", value_enum, default_value_t = CliSeedStrategy::AllChunks)]
+        seed_strategy: CliSeedStrategy,
+        /// Filter by category
+        #[arg(long)]
+        category: Option<String>,
+        /// Filter by topic
+        #[arg(long)]
+        topic: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
+        format: SearchFormat,
+    },
     /// One-shot search from the command line (no MCP transport).
     /// Useful for shell scripts / skill bins where invoking the binary
     /// directly is simpler than talking MCP stdio.
@@ -102,6 +137,21 @@ enum SearchFormat {
     Json,
     /// Concatenated text blocks (title / path#heading / content, separated by ---)
     Text,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum CliSeedStrategy {
+    AllChunks,
+    Centroid,
+}
+
+impl From<CliSeedStrategy> for graph::SeedStrategy {
+    fn from(c: CliSeedStrategy) -> Self {
+        match c {
+            CliSeedStrategy::AllChunks => graph::SeedStrategy::AllChunks,
+            CliSeedStrategy::Centroid => graph::SeedStrategy::Centroid,
+        }
+    }
 }
 
 /// Resolve the database path from a knowledge-base directory.
@@ -252,9 +302,79 @@ fn main() -> anyhow::Result<()> {
 
             print_search_results(results, format);
         }
+        Commands::Graph {
+            start,
+            kb_path,
+            model,
+            depth,
+            fan_out,
+            min_similarity,
+            seed_strategy,
+            category,
+            topic,
+            format,
+        } => {
+            let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
+            let model = model.or(cfg.model).unwrap_or_default();
+
+            let db_path = resolve_db_path(&kb_path);
+            let db = db::Database::open(&db_path.to_string_lossy())?;
+            // graph は embedder 不要 (起点 embedding は DB から取る)。
+            // ただし model 指定時は整合性を確認して早期にエラーにする。
+            db.verify_embedding_meta(model.model_id(), model.dimension() as u32)?;
+
+            let opts = graph::GraphOptions {
+                depth: depth.min(graph::MAX_DEPTH),
+                fan_out: fan_out.min(graph::MAX_FAN_OUT),
+                min_similarity: min_similarity.clamp(0.0, 1.0),
+                seed_strategy: seed_strategy.into(),
+                category,
+                topic,
+                exclude_paths: Vec::new(),
+            };
+            let g = graph::build_connection_graph(&db, &start, &opts)?;
+            print_graph(g, format);
+        }
     }
 
     Ok(())
+}
+
+fn print_graph(g: graph::ConnectionGraph, format: SearchFormat) {
+    match format {
+        SearchFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&g).unwrap_or_else(|_| "{}".into())
+            );
+        }
+        SearchFormat::Text => {
+            println!("# Connection graph from: {}", g.start_path);
+            println!(
+                "nodes={} max_depth={} knn_queries={} duration_ms={}",
+                g.stats.total_nodes,
+                g.stats.max_depth_reached,
+                g.stats.knn_queries,
+                g.stats.duration_ms
+            );
+            for n in &g.nodes {
+                println!();
+                let parent = n
+                    .parent_id
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into());
+                let heading = n.heading.as_deref().unwrap_or("");
+                println!(
+                    "[{:>3}] depth={} parent={} score={:.3}  {}#{}",
+                    n.node_id, n.depth, parent, n.score, n.path, heading
+                );
+                if let Some(t) = &n.title {
+                    println!("     title: {t}");
+                }
+                println!("     {}", n.snippet);
+            }
+        }
+    }
 }
 
 fn print_search_results(results: Vec<db::SearchResult>, format: SearchFormat) {

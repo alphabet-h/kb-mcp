@@ -320,3 +320,66 @@ evaluator PASS (34/40) の Low 指摘 3 件を軽微修正:
 verification:
 - cargo test: 56 passed / 4 ignored (increment なし)
 - cargo clippy --all-targets -- -D warnings: クリーン
+
+## 2026-04-18 Feature 15 — Connection Graph ツール
+
+planner で仕様化 (PASS レベルの詳細度) → 実装。
+
+### 設計
+- BFS 単位: チャンク (既存 vec_chunks 流用、見出し粒度で意味が立つ)
+- KNN: on-the-fly (search_vec_candidates を pub(crate) 昇格して再利用)
+- 返却形式: フラット配列 + parent_id (LLM token 節約 + 親子再構築可)
+- スコア: L2 distance を `1 - d²/2` で cos sim 近似、0-1 にクランプ
+- snippet: content 先頭 200 文字 (31 ノード × 2KB を回避)
+- FTS5 hybrid は使わない (類似性と字面一致を混ぜない)
+- 上限: depth≤3, fan_out≤20 (ワーストケース保証)
+
+### 実装
+- src/db.rs: 3 関数追加/昇格
+  - `chunks_for_path(path) -> Vec<(chunk_id, embedding, SearchResult)>`
+  - `get_chunk_embedding(chunk_id) -> Option<Vec<f32>>`
+  - `search_vec_candidates` を private → `pub(crate)` 昇格
+  - embedding は sqlite-vec の `vec_to_json()` で取り出し serde_json::from_str で復元
+- src/graph.rs: 新規 (~460 行)
+  - `GraphNode`, `GraphStats`, `ConnectionGraph` (serde::Serialize)
+  - `GraphOptions` + `SeedStrategy` (AllChunks / Centroid)
+  - `build_connection_graph(db, start_path, opts) -> ConnectionGraph`
+  - BFS 実装: VecDeque + HashSet<chunk_id>、fan_out / min_similarity / exclude_paths で枝刈り
+  - centroid モード: シードチャンクの embedding を平均し仮想 node 1 個で BFS 開始
+  - 起点 path のチャンクは常に visited 登録して重複回避
+  - `distance_to_cos_sim()` で L2 → cos 変換 (BGE 系 = 正規化済み前提、近似)
+  - 定数: DEFAULT_DEPTH=2, DEFAULT_FAN_OUT=5, DEFAULT_MIN_SIMILARITY=0.3,
+    MAX_DEPTH=3, MAX_FAN_OUT=20, SNIPPET_MAX_CHARS=200
+- src/server.rs:
+  - `GetConnectionGraphParams` を追加 (path / depth / fan_out / min_similarity /
+    seed_strategy / category / topic / exclude_paths)
+  - `#[tool(name = "get_connection_graph")]` ハンドラ追加
+  - 上限クランプは server 側でも再実行
+  - seed_strategy 文字列を enum 化、未知値はエラーレスポンス
+- src/main.rs:
+  - `Commands::Graph` variant を追加 (`--start PATH` 必須、既定値は graph 定数)
+  - `CliSeedStrategy` enum + `From<CliSeedStrategy> for graph::SeedStrategy`
+  - `print_graph(g, format)` で json / text 出力
+  - `pub mod graph` を追加
+
+### テスト
+- db 層 (3 件追加, 計 34 件):
+  - test_chunks_for_path_returns_chunks_in_order
+  - test_chunks_for_path_missing_returns_empty
+  - test_get_chunk_embedding_roundtrip
+- graph 層 (11 件追加):
+  - start_path_not_found / two_hop_bfs / respects_depth_limit
+  - dedupes_visited / respects_min_similarity / fan_out_limit
+  - excludes_paths / snippet_is_truncated / centroid_seed_single_node
+  - serializable_to_json / distance_to_cos_sim_clamps
+- dummy embedding (384-dim) で距離関係を設計して検証
+- cargo test 全体: 70 passed / 4 ignored (56 → 70 で 14 増、14 件 = db 3 + graph 11)
+
+### verification
+- cargo clippy --all-targets -- -D warnings: クリーン
+- `kb-mcp --help` に `graph` サブコマンドが表示される
+- MCP ツール `get_connection_graph` を rmcp schema 経由で公開
+- ストリームで JSON 出力可能 (stats / nodes / start_path)
+
+破壊的変更: なし。DB schema 不変、既存 5 ツール維持、`search_vec_candidates`
+の可視性が private → pub(crate) になっただけ。

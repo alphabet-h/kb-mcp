@@ -104,7 +104,7 @@
       "id": 15,
       "category": "upgrade-tools",
       "description": "Connection Graph ツール (起点ノートから深さ・閾値で類似連鎖を BFS 展開)",
-      "status": "failing",
+      "status": "passing",
       "verification": "get_connection_graph MCP ツールを追加し、起点から深さ 2 で N 件を返す"
     },
     {

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{Database, SearchHit};
 use crate::embedder::{Embedder, ModelChoice, Reranker, RerankerChoice};
+use crate::graph::{self, GraphOptions, SeedStrategy};
 use crate::{indexer, markdown};
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,29 @@ struct GetBestPracticeParams {
 struct RebuildIndexParams {
     /// Force full re-index ignoring existing hashes
     force: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct GetConnectionGraphParams {
+    /// Relative path of the starting document within knowledge-base/
+    /// (e.g. "deep-dive/mcp/overview.md"). Must be already indexed.
+    path: String,
+    /// BFS depth. 1 = direct neighbors only, 2 = neighbors of neighbors (default: 2, max: 3)
+    depth: Option<u32>,
+    /// Max neighbors fanned out per node at each hop (default: 5, max: 20)
+    fan_out: Option<u32>,
+    /// Minimum cosine similarity (0.0-1.0) for a neighbor to be included
+    /// (default: 0.3). Lower = looser chain.
+    min_similarity: Option<f32>,
+    /// Seed strategy: "all_chunks" (default, expand from every chunk of
+    /// the start doc) or "centroid" (average the start doc's embeddings).
+    seed_strategy: Option<String>,
+    /// Filter by category (applied to all discovered nodes)
+    category: Option<String>,
+    /// Filter by topic
+    topic: Option<String>,
+    /// Paths to exclude from results. The start path itself is always excluded.
+    exclude_paths: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +409,63 @@ impl KbServer {
             }
             Err(e) => serde_json::to_string_pretty(&ErrorResponse {
                 error: format!("Rebuild failed: {e}"),
+            })
+            .unwrap_or_default(),
+        }
+    }
+
+    #[tool(
+        name = "get_connection_graph",
+        description = "BFS-expand semantically related chunks starting from a \
+                       document path. Returns a flat list of nodes with \
+                       parent_id / depth / score, useful for chained context \
+                       discovery by an LLM agent."
+    )]
+    async fn get_connection_graph(
+        &self,
+        Parameters(params): Parameters<GetConnectionGraphParams>,
+    ) -> String {
+        // パラメータ検証 + 上限クランプ
+        let depth = params
+            .depth
+            .unwrap_or(graph::DEFAULT_DEPTH)
+            .min(graph::MAX_DEPTH);
+        let fan_out = params
+            .fan_out
+            .unwrap_or(graph::DEFAULT_FAN_OUT)
+            .min(graph::MAX_FAN_OUT);
+        let min_similarity = params
+            .min_similarity
+            .unwrap_or(graph::DEFAULT_MIN_SIMILARITY)
+            .clamp(0.0, 1.0);
+        let seed_strategy = match params.seed_strategy.as_deref() {
+            Some("centroid") => SeedStrategy::Centroid,
+            Some("all_chunks") | None => SeedStrategy::AllChunks,
+            Some(other) => {
+                return serde_json::to_string_pretty(&ErrorResponse {
+                    error: format!(
+                        "unknown seed_strategy '{other}' (expected 'all_chunks' or 'centroid')"
+                    ),
+                })
+                .unwrap_or_default();
+            }
+        };
+
+        let opts = GraphOptions {
+            depth,
+            fan_out,
+            min_similarity,
+            seed_strategy,
+            category: params.category,
+            topic: params.topic,
+            exclude_paths: params.exclude_paths.unwrap_or_default(),
+        };
+
+        let db = self.db.lock().unwrap();
+        match graph::build_connection_graph(&db, &params.path, &opts) {
+            Ok(g) => serde_json::to_string_pretty(&g).unwrap_or_default(),
+            Err(e) => serde_json::to_string_pretty(&ErrorResponse {
+                error: format!("get_connection_graph failed: {e}"),
             })
             .unwrap_or_default(),
         }

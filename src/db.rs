@@ -385,6 +385,82 @@ impl Database {
         Ok(result)
     }
 
+    /// 指定 `path` に属するチャンクを (chunk_id, embedding, SearchResult) で返す。
+    /// Connection Graph の起点シード取得用。存在しなければ empty Vec。
+    ///
+    /// `embedding` は `vec_to_json` で JSON 文字列として取り出し、serde_json で
+    /// `Vec<f32>` に復元する。`SearchResult.score` はシード node 用に 1.0 を入れる
+    /// (BFS 結果のスコアと同じ意味 = cos sim 換算値の上限)。
+    pub fn chunks_for_path(
+        &self,
+        path: &str,
+    ) -> Result<Vec<(i64, Vec<f32>, SearchResult)>> {
+        let sql = "
+            SELECT c.id, vec_to_json(v.embedding),
+                   c.content, c.heading,
+                   d.path, d.title, d.topic, d.date
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            JOIN vec_chunks v ON v.chunk_id = c.id
+            WHERE d.path = ?1
+            ORDER BY c.chunk_index
+        ";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![path], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, embedding_json, content, heading, path, title, topic, date) = r?;
+            let embedding: Vec<f32> = serde_json::from_str(&embedding_json)
+                .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
+            out.push((
+                id,
+                embedding,
+                SearchResult {
+                    score: 1.0,
+                    content,
+                    heading,
+                    path,
+                    title,
+                    topic,
+                    date,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    /// 指定 `chunk_id` の embedding を取り出す。存在しなければ `None`。
+    /// BFS の 2-hop 目以降で「親チャンクの embedding を起点に KNN を実行」する
+    /// ために使う。
+    pub fn get_chunk_embedding(&self, chunk_id: i64) -> Result<Option<Vec<f32>>> {
+        use rusqlite::OptionalExtension;
+        let sql = "SELECT vec_to_json(embedding) FROM vec_chunks WHERE chunk_id = ?1";
+        let row: Option<String> = self
+            .conn
+            .query_row(sql, params![chunk_id], |row| row.get(0))
+            .optional()?;
+        match row {
+            Some(json) => {
+                let v: Vec<f32> = serde_json::from_str(&json).with_context(|| {
+                    format!("failed to parse embedding json for chunk {chunk_id}")
+                })?;
+                Ok(Some(v))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Delete a document and all associated chunks / vectors / FTS rows.
     pub fn delete_document(&self, path: &str) -> Result<()> {
         // Delete vector entries first (no FK from virtual table)
@@ -595,7 +671,9 @@ impl Database {
     /// category / topic フィルタが指定されている場合は、Rust 側でフィルタが
     /// 適用されて候補が減る分を補うため `FILTER_OVERFETCH_FACTOR` 倍の
     /// KNN を SQLite へ投げる ([`FILTER_OVERFETCH_CAP`] 上限)。
-    fn search_vec_candidates(
+    /// KNN 候補を `limit` 件返す。filter が効く場合は over-fetch してから
+    /// Rust 側で刈り込む。Connection Graph (`crate::graph`) でも利用する。
+    pub(crate) fn search_vec_candidates(
         &self,
         query_embedding: &[f32],
         limit: u32,
@@ -1041,6 +1119,82 @@ mod tests {
             .search_similar(&dummy_embedding(0.1), 5, None, Some("no-such-topic"))
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn test_chunks_for_path_returns_chunks_in_order() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document(
+                "deep-dive/mcp/overview.md",
+                Some("MCP Overview"),
+                Some("mcp"),
+                Some("deep-dive"),
+                Some("1"),
+                &[],
+                Some("2026-04-16"),
+                "h1",
+            )
+            .unwrap();
+        db.insert_chunk(doc_id, 0, Some("Intro"), "hello", &dummy_embedding(0.1))
+            .unwrap();
+        db.insert_chunk(doc_id, 1, Some("Body"), "world", &dummy_embedding(0.2))
+            .unwrap();
+
+        let out = db.chunks_for_path("deep-dive/mcp/overview.md").unwrap();
+        assert_eq!(out.len(), 2);
+        // chunk_index 順に返る
+        assert_eq!(out[0].2.heading.as_deref(), Some("Intro"));
+        assert_eq!(out[1].2.heading.as_deref(), Some("Body"));
+        assert_eq!(out[0].1.len(), 384, "embedding dim must match");
+        // 0.1 と 0.2 のはずだが、vec0 の f32 丸めがあるので許容誤差で比較。
+        assert!((out[0].1[0] - 0.1).abs() < 1e-5);
+        assert!((out[1].1[0] - 0.2).abs() < 1e-5);
+        // seed node なので score は 1.0
+        assert_eq!(out[0].2.score, 1.0);
+        assert_eq!(out[0].2.path, "deep-dive/mcp/overview.md");
+    }
+
+    #[test]
+    fn test_chunks_for_path_missing_returns_empty() {
+        let db = db_with_384();
+        let out = db.chunks_for_path("does/not/exist.md").unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_get_chunk_embedding_roundtrip() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document(
+                "a.md",
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                "h1",
+            )
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "x", &dummy_embedding(0.3))
+            .unwrap();
+
+        let chunk_id: i64 = db
+            .conn
+            .query_row(
+                "SELECT id FROM chunks WHERE document_id = ?1",
+                params![doc_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let emb = db.get_chunk_embedding(chunk_id).unwrap().expect("must exist");
+        assert_eq!(emb.len(), 384);
+        assert!((emb[0] - 0.3).abs() < 1e-5);
+
+        // 存在しない chunk_id は None
+        assert!(db.get_chunk_embedding(99_999).unwrap().is_none());
     }
 
     #[test]
