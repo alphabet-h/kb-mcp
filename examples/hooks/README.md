@@ -1,21 +1,24 @@
-# kb-mcp: Claude Code PostToolUse hook サンプル
+# kb-mcp: Claude Code PostToolUse hook samples
 
-Claude Code の [PostToolUse hook](https://docs.claude.com/en/docs/claude-code/hooks) を使うと、エージェントが write / edit / skill を実行した後に自動で `kb-mcp index` を走らせられる。これによりユーザがインデックスを手動で再実行しなくても、検索インデックスがナレッジベースと同期し続ける。
+Claude Code's [PostToolUse hook](https://docs.claude.com/en/docs/claude-code/hooks) can
+invoke `kb-mcp index` after the agent writes, edits, or runs a skill, so the
+search index stays in sync with the knowledge base without the user having to
+re-run indexing manually.
 
-> **English version**: [README.en.md](./README.en.md)
+> **日本語版**: [README.ja.md](./README.ja.md)
 
-## ファイル
+## Files
 
-| ファイル | 用途 |
+| File | Purpose |
 |---|---|
-| `settings.snippet.json` | プロジェクトの `.claude/settings.json` にコピーする最小 `hooks` ブロック — **完全な settings ファイルではない**。`Write` / `Edit` / `MultiEdit` / `Skill` 実行後に無条件で index 再構築する |
-| `rebuild-on-edit.sh` | tool payload を精査して、編集ファイルが `$KB_PATH` 配下のときだけ再構築する、より高機能なシェル hook。Claude Code プロジェクトがナレッジベース外のファイルも触る場合に推奨。Unix ライクなシェル (bash + jq) が必要。Windows ユーザは Git Bash または WSL から実行すること |
+| `settings.snippet.json` | Minimal `hooks` block to copy into your project's `.claude/settings.json` — it is **not** a complete settings file. Rebuilds the index unconditionally after any `Write` / `Edit` / `MultiEdit` / `Skill`. |
+| `rebuild-on-edit.sh` | Richer shell hook that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH`. Recommended when the Claude Code project touches files outside the knowledge base. Requires a Unix-like shell (bash + jq); Windows users should run it from Git Bash or WSL. |
 
-**`Skill` matcher に関する注意**: 執筆時点 (Claude Code v1.x) では skill は `Skill` ツール経由で公開されている。インストール済みの Claude Code バージョンでこのツールが rename / split された場合は、matcher を合わせて調整する — kb-mcp 本体はツール名に依存していない。
+**Notes on the `Skill` matcher**: Claude Code exposes skills via a `Skill` tool at the time of writing (v1.x). If your installed Claude Code version renames or splits this tool, adjust the matcher accordingly — no other part of kb-mcp depends on the tool name.
 
-## Tier A — 無条件再構築 (最もシンプル)
+## Tier A — unconditional rebuild (simplest)
 
-以下を他の設定と並べて `.claude/settings.json` に配置:
+Place this in `.claude/settings.json` alongside your other settings:
 
 ```json
 {
@@ -32,17 +35,24 @@ Claude Code の [PostToolUse hook](https://docs.claude.com/en/docs/claude-code/h
 }
 ```
 
-`kb-mcp index` は SHA-256 の content hash 差分検出を使うため、変更されていないファイルはスキップされる。実際、小さな KB では 2 回目以降は 1 秒未満で終わる。バイナリが `PATH` 上に無いなら `kb-mcp` を絶対パスに置き換える。
+`kb-mcp index` uses SHA-256 content-hash diffing, so unchanged files are
+skipped. In practice the second and subsequent invocations finish in well
+under a second on small KBs. If the binary is not on `PATH`, replace
+`kb-mcp` with an absolute path.
 
-`kb_path` は (バイナリ隣接の) `kb-mcp.toml` から読まれる。`kb-mcp index --kb-path /abs/path/to/knowledge-base` のようにハードコードもできる。
+The `kb_path` is read from `kb-mcp.toml` (placed next to the binary). You
+can also hard-code it with `kb-mcp index --kb-path /abs/path/to/knowledge-base`.
 
-## Tier B — パスフィルタ付き再構築 (スクリプト)
+## Tier B — path-filtered rebuild (script)
 
-プロジェクトがナレッジベース外のファイルも編集する場合、`rebuild-on-edit.sh` を使うと関係ない編集で hook が黙ったままになる。
+Use `rebuild-on-edit.sh` when the project edits files outside the knowledge
+base, so the hook stays silent for unrelated edits.
 
-1. `rebuild-on-edit.sh` を適当な場所にコピー (例: `~/.local/bin/`) して実行権を付与: `chmod +x rebuild-on-edit.sh`
-2. `KB_PATH` に `knowledge-base/` ディレクトリの絶対パスを設定 (空のままだとスクリプトは早期終了)
-3. `.claude/settings.json` で配線:
+1. Copy `rebuild-on-edit.sh` somewhere on disk (e.g. `~/.local/bin/`) and make
+   it executable: `chmod +x rebuild-on-edit.sh`.
+2. Set `KB_PATH` to the absolute path of your `knowledge-base/` directory
+   (the script aborts early if this is empty).
+3. Wire it up via `.claude/settings.json`:
 
 ```json
 {
@@ -62,10 +72,19 @@ Claude Code の [PostToolUse hook](https://docs.claude.com/en/docs/claude-code/h
 }
 ```
 
-スクリプトは stdin から hook payload を読み、(`jq` が利用可能なら) 編集されたファイルパスを抽出し、編集対象が `$KB_PATH` 配下の `.md` ファイルのときのみ `kb-mcp index` を呼ぶ。`Skill` 呼び出しは payload にファイルパスが無いため、無条件再構築にフォールスルーする (差分検出があるので安価)。
+The script reads the hook payload from stdin, extracts the edited file path
+(via `jq` if available), and only invokes `kb-mcp index` when the edit
+targets a `.md` file under `$KB_PATH`. `Skill` invocations have no file
+path in the payload, so they fall through to an unconditional rebuild (cheap
+thanks to diffing).
 
-## 補足
+## Notes
 
-- **並行実行**: SQLite は WAL モードで構成されているため、起動中の MCP サーバと hook トリガーの `kb-mcp index` が共存できる。hook は rebuild 完了までツール実行をブロックするが、小さな KB では気にならないほど速い
-- **品質フィルタ (feature 13)**: rebuild は `kb-mcp.toml` の `[quality_filter]` を尊重する。backfill は `kb-mcp index` の冒頭で毎回走るが冪等
-- **一時的にスキップ**: hook を削除せず無効化したいときは、Tier B なら `KB_PATH=` (空) に、Tier A ならエントリをコメントアウトする
+- **Concurrency**: SQLite is configured in WAL mode, so a running MCP server
+  and a hook-triggered `kb-mcp index` can coexist. The hook blocks the tool
+  use until the rebuild finishes; for small KBs this is imperceptible.
+- **Quality filter (feature 13)**: rebuild respects `[quality_filter]` in
+  `kb-mcp.toml`. Backfill runs at the start of every `kb-mcp index` but is
+  idempotent.
+- **Skipping rebuilds**: to disable temporarily without removing the hook,
+  set `KB_PATH=` (empty) in Tier B, or comment out the entry in Tier A.

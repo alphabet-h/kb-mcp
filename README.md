@@ -1,64 +1,63 @@
 # kb-mcp
 
-Markdown / プレーンテキストのナレッジベースに対するセマンティック検索を提供する MCP サーバ。
+MCP server for semantic search over a Markdown / plain-text knowledge base.
 
-YAML frontmatter 付きの Markdown (および任意で `.txt`) をパースし、見出し単位でチャンク化、選択可能な埋め込みモデル (既定は BGE-small-en-v1.5、多言語 / 日本語向けには BGE-M3) でベクトルを生成して、sqlite-vec 搭載の SQLite に格納する。stdio (既定、1 クライアント) または Streamable HTTP (複数クライアント) トランスポート経由で Claude Code / Cursor など MCP 互換クライアントに接続する。
+Parses Markdown (and optionally `.txt`) files with YAML frontmatter, splits them into heading-based chunks, generates embeddings with a selectable model (BGE-small-en-v1.5 by default, BGE-M3 for multilingual/Japanese knowledge bases), and stores everything in SQLite with sqlite-vec for vector similarity search. Connects to Claude Code, Cursor, or any MCP-compatible client via stdio (default, 1 client) or Streamable HTTP (many clients) transport.
 
-ライブ同期ファイルウォッチャにより、手動編集・`git pull`・外部スクリプトによる変更でもインデックスが最新に保たれる。`kb-mcp validate` で任意の TOML スキーマに基づく frontmatter 検証も可能。
+A live-sync file watcher keeps the index fresh on manual edits, `git pull`, and external scripts; an optional TOML schema can validate frontmatter conventions via `kb-mcp validate`.
 
-> **English version**: [README.en.md](./README.en.md)
+> **日本語版**: [README.ja.md](./README.ja.md)
 
-## ビルド
+## Build
 
 ```bash
 cargo build --release
 ```
 
-バイナリは `target/release/kb-mcp` (Windows では `kb-mcp.exe`) に生成される。
+The binary is produced at `target/release/kb-mcp` (or `kb-mcp.exe` on Windows).
 
-## 設定ファイル (任意)
+## Optional config file
 
-以下の CLI オプションはすべて、バイナリと**同じディレクトリ**に置いた `kb-mcp.toml` で既定値を与えられる。CLI 引数は常に優先され、設定ファイルは単に同じデプロイでの記述の繰り返しを減らすためのもの。`kb-mcp.toml.example` を `kb-mcp.toml` にコピーして編集する:
+Any CLI option below can be given a default via `kb-mcp.toml` placed **next to the binary**. CLI arguments always win; the file just removes repetition for a given deployment. Copy `kb-mcp.toml.example` to `kb-mcp.toml` and edit:
 
 ```toml
-# kb-mcp.toml (kb-mcp / kb-mcp.exe と同じディレクトリに置く)
+# kb-mcp.toml (sits next to kb-mcp / kb-mcp.exe)
 kb_path = "/path/to/knowledge-base"
 model = "bge-m3"
 reranker = "bge-v2-m3"
 rerank_by_default = true
 fastembed_cache_dir = "/home/you/.cache/huggingface/hub"
 
-# チャンキング時に除外する見出し部分文字列。キー省略時の既定は
-# ["次の深堀り候補"]。明示的に空配列 [] を与えると除外を完全に無効化。
+# Heading substrings to exclude from chunking. Omit the key for the default
+# ["次の深堀り候補"]. An explicit empty array disables exclusion entirely.
 exclude_headings = ["次の深堀り候補", "参考リンク"]
 
-# チャンク単位の品質フィルタ (feature 13)。既定で有効、閾値 0.3。
-# `enabled = false` で feature 13 以前の挙動 (全チャンク返却) に戻せる。
+# Per-chunk quality filter (feature 13). Enabled by default, threshold 0.3.
+# Set `enabled = false` to restore pre-feature-13 behavior (return every chunk).
 [quality_filter]
 enabled = true
 threshold = 0.3
 
-# index 対象拡張子 (feature 20)。セクション省略で feature 20 以前の挙動
-# (.md のみ)。明示リストで .txt にオプトイン。空配列 [] は「何もインデッ
-# クスされない」事故を防ぐため拒否される。現在サポート id: "md" / "txt"。
+# Indexing extensions (feature 20). Omit the section to keep the pre-feature-20
+# behavior (.md only). Opt-in to .txt via an explicit list. An empty array is
+# rejected to prevent silent "nothing is indexed" failures.
+# Currently supported ids: "md", "txt".
 [parsers]
 enabled = ["md", "txt"]
 
-# ライブ同期ファイルウォッチャ (feature 12)。`kb-mcp serve` 実行中、
-# kb_path 配下の変更が `debounce_ms` 窓内に検出され、該当ファイルのみ
-# 増分再インデックスされる。PostToolUse hook を補完する位置付け:
-# 手動編集 / `git pull` / 外部スクリプトをカバーする。CLI の
-# `--no-watch` / `--debounce-ms` で上書き可能。セクション省略時は
-# 既定 (enabled, 500ms debounce)。
+# Live-sync file watcher (feature 12). When `kb-mcp serve` is running, changes
+# under kb_path are detected and the affected files are re-indexed incrementally
+# within `debounce_ms`. Complementary to the PostToolUse hook: covers manual
+# edits, `git pull`, external scripts, etc. CLI `--no-watch` / `--debounce-ms`
+# overrides. Omitting the section keeps watcher on with a 500 ms debounce.
 [watch]
 enabled = true
 debounce_ms = 500
 
-# `kb-mcp serve` のトランスポート (feature 18)。`kind = "stdio"` (既定)
-# は 1 クライアント / サーバプロセス。`kind = "http"` (Streamable HTTP)
-# なら `/mcp` で複数クライアント同時接続が可能。`/healthz` は 200 OK を
-# 返しヘルスチェックに使える。CLI `--transport http --port 3100` で
-# 上書き可能。
+# Transport for `kb-mcp serve` (feature 18). `kind = "stdio"` (default)
+# supports one client at a time; `kind = "http"` (Streamable HTTP) allows
+# many simultaneous clients at `/mcp`. `/healthz` returns 200 for health
+# checks. CLI `--transport http --port 3100` overrides.
 [transport]
 kind = "http"
 
@@ -66,110 +65,110 @@ kind = "http"
 bind = "127.0.0.1:3100"
 ```
 
-この設定ファイルを置けば `kb-mcp serve` / `index` / `status` / `graph` / `search` のどれも対応フラグを省略して動かせる。未知のキーはタイポ対策のため拒否される。`FASTEMBED_CACHE_DIR` の実環境変数は設定ファイルの同項目より優先される。
+With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
 
-## 使い方
+## Usage
 
-### 検索インデックスの構築 / 再構築
+### Build / rebuild the search index
 
 ```bash
 kb-mcp index --kb-path /path/to/knowledge-base
-kb-mcp index --kb-path /path/to/knowledge-base --force   # 完全再インデックス
-kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # BGE-M3 (1024 dim、多言語) に切替
+kb-mcp index --kb-path /path/to/knowledge-base --force   # full re-index
+kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # switch to BGE-M3 (1024 dim, multilingual)
 ```
 
-指定ディレクトリ配下のソースファイルを走査し、`.obsidian/` はスキップする。既定では `.md` のみ取り込み (feature 20 以前の挙動)。`kb-mcp.toml` に `[parsers].enabled = ["md", "txt"]` を追加すると `.txt` もインデックス対象になる (タイトルはファイル名から派生: `deep-dive-2026.txt` → `"deep dive 2026"`、本文全体が 1 チャンク)。前回実行時と content hash が変わっていないファイルは `--force` を渡さない限りスキップされる。
+Scans source files under the given directory, skipping `.obsidian/`. By default only `.md` is picked up (pre-feature-20 behavior). Add `[parsers].enabled = ["md", "txt"]` to `kb-mcp.toml` to also index `.txt` files — their title is derived from the filename (`deep-dive-2026.txt` → `"deep dive 2026"`) and the whole body becomes a single chunk. Files whose content hash has not changed since the last run are skipped unless `--force` is passed.
 
-`--model` が受け付ける値:
-- `bge-small-en-v1.5` (既定) — 384 次元、英語特化、初回 DL 約 130 MB
-- `bge-m3` — 1024 次元、多言語 (100+ 言語、日本語含む)、初回 DL 約 2.3 GB。日本語主体の KB ではこちら推奨
+`--model` accepts:
+- `bge-small-en-v1.5` (default) — 384 dim, English-focused, ~130 MB first download.
+- `bge-m3` — 1024 dim, multilingual (100+ languages incl. Japanese), ~2.3 GB first download. Recommended for Japanese-heavy knowledge bases.
 
-既存インデックスでのモデル切替には `--force` が必須 (DB の `index_meta` テーブルにモデル / 次元が記録されており、不一致時は起動が拒否される)。
+Switching models on an existing index requires `--force` (the DB records the model/dim in `index_meta` and rejects mismatched runtimes).
 
-#### モデル選択のトレードオフ
+#### Model selection trade-offs
 
-| 観点 | BGE-small-en-v1.5 | BGE-M3 |
+| Aspect | BGE-small-en-v1.5 | BGE-M3 |
 |---|---|---|
-| 初回 DL | 約 130 MB | 約 2.3 GB |
-| 埋め込み次元 | 384 | 1024 (index ファイルが約 2.6 倍) |
-| 実行時 RAM | 約 500 MB | 約 2 GB |
-| index ビルド時間 | baseline | CPU 推論で約 3–10 倍遅い |
-| 日本語精度 | 低い (英語中心語彙) | 強い (多言語 tokenizer + 訓練) |
-| 英語精度 | 強い | 同等 |
+| First-time download | ~130 MB | ~2.3 GB |
+| Embedding dim | 384 | 1024 (index file ~2.6× larger) |
+| RAM when loaded | ~500 MB | ~2 GB |
+| Index build time | baseline | ~3–10× slower (CPU inference) |
+| Japanese precision | poor (English-centric vocab) | strong (multilingual tokenizer + training) |
+| English precision | strong | comparable |
 
-モデル切替コスト (既存 index → 新モデル):
+Switching cost (existing index → new model):
 
-1. `kb-mcp index --kb-path ... --model <new> --force` で完全再 embedding (増分更新不可: `documents`/`chunks`/`vec_chunks` を全削除してやり直す)
-2. 以降の `serve` / `index` はすべて同じ `--model` を渡す (または `kb-mcp.toml` に書く)。不一致は `index_meta` チェックで起動拒否
+1. `kb-mcp index --kb-path ... --model <new> --force` runs a full re-embedding (no incremental update possible; `DELETE FROM documents/chunks/vec_chunks` and start over).
+2. Every `serve` / `index` call afterwards must pass the same `--model` (or have it set in `kb-mcp.toml`). A mismatch is rejected at startup by the `index_meta` check.
 
-実務的な推奨: 最初に KB の**主要言語**に合うモデルを選び、具体的な精度問題が無い限りモデル間でブレない — 完全再 embedding が最も重いステップだから。
+Practical recommendation: pick the model that matches your knowledge base's **primary language** up front. Don't oscillate between models unless you have a concrete precision problem — the full re-embedding is the expensive step.
 
-### MCP サーバの起動
+### Start the MCP server
 
 ```bash
 kb-mcp serve --kb-path /path/to/knowledge-base
-kb-mcp serve --kb-path /path/to/knowledge-base --model bge-m3   # index 時と一致必須
-kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder 再ランク
-kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP、複数クライアント (feature 18)
-kb-mcp serve --kb-path ... --no-watch                           # ライブ同期無効 (feature 12)
+kb-mcp serve --kb-path /path/to/knowledge-base --model bge-m3   # must match the indexed model
+kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder reranking
+kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP, multi-client (feature 18)
+kb-mcp serve --kb-path ... --no-watch                           # disable live-sync (feature 12)
 ```
 
-既定では stdio トランスポート (1 クライアント / サーバ) で MCP サーバを起動する。複数クライアントを同時接続するには `--transport http --port <PORT>` (または `--bind <SOCKETADDR>`) を渡し Streamable HTTP に切り替える — 詳細は [HTTP トランスポート (複数クライアント同時接続)](#http-トランスポート-複数クライアント同時接続-feature-18) 参照。
+Starts the MCP server on stdio transport by default (one client at a time). Pass `--transport http --port <PORT>` (or `--bind <SOCKETADDR>`) to serve multiple clients simultaneously via Streamable HTTP — details in the [HTTP transport](#http-transport-for-multiple-simultaneous-clients-feature-18) section.
 
-サーバは 6 つの MCP ツール (後述) を公開し、インデックスをプロセス内に保持して低レイテンシでクエリに答える。`--model` が現在の index を作ったモデルと一致しない場合、実行可能なエラーメッセージで起動を拒否する。ファイルウォッチャ (既定有効) が `--kb-path` 配下の変更を検知して再インデックスする — [ライブ同期 (file watcher)](#ライブ同期-file-watcher-feature-12) 参照。
+The server exposes 6 tools (see below) and keeps the index in-process for low-latency queries. `--model` must match the model that built the current index, otherwise the server refuses to start with an actionable error message. A file watcher (enabled by default) re-indexes affected files when `--kb-path` changes — see [Live-sync via file watcher](#live-sync-via-file-watcher-feature-12).
 
-`--reranker` (任意、既定 `none`) はハイブリッド検索の上位候補に cross-encoder 再ランクをかける:
+`--reranker` (optional, default `none`) enables a cross-encoder re-ranking pass over the top candidates of the hybrid search:
 
-- `none` — 無効 (既定)
-- `bge-v2-m3` — BAAI/bge-reranker-v2-m3 (多言語 100+、初回 DL 約 2.3 GB)。日本語 KB では推奨
-- `jina-v2-ml` — jinaai/jina-reranker-v2-base-multilingual (多言語、約 1.2 GB)。軽量版
-- `bge-base` — BAAI/bge-reranker-base (英語 / 中国語のみ、約 280 MB)。日本語では非推奨
+- `none` — disabled (default).
+- `bge-v2-m3` — BAAI/bge-reranker-v2-m3 (multilingual 100+, ~2.3 GB first download). Recommended for Japanese knowledge bases.
+- `jina-v2-ml` — jinaai/jina-reranker-v2-base-multilingual (multilingual, ~1.2 GB). Lighter alternative.
+- `bge-base` — BAAI/bge-reranker-base (English/Chinese only, ~280 MB). Not recommended for Japanese.
 
-再ランクのレイテンシコストは、CPU で `bge-v2-m3` を 50 候補に適用した場合 1 クエリあたり約 300–700 ms。`--rerank-by-default` (`--reranker` 指定時は既定 on) はすべての `search` 呼び出しで再ランクするかを制御し、MCP ツール側は `rerank: Option<bool>` で per-query 上書き可能。reranker の切替に**再インデックスは不要** (index 非依存)。
+Latency cost of rerank is roughly 300–700 ms per query on CPU with `bge-v2-m3` over 50 candidates. `--rerank-by-default` (on by default when `--reranker` is set) controls whether every `search` call uses rerank; the MCP tool takes `rerank: Option<bool>` to override per-query. Switching the reranker does **not** require re-indexing (it is index-independent).
 
-#### 再ランクを有効にすべきケース
+#### When to enable reranking
 
-再ランクは精度とレイテンシのトレードオフ。使用パターン次第:
+Rerank trades latency for precision. The right choice depends on usage pattern:
 
-| シナリオ | 推奨 |
+| Scenario | Recommendation |
 |---|---|
-| 対話的エージェントフロー (LLM が 1 ターンで 2–5 回 `search` を呼ぶ) | **切っておく**。+500 ms × N が積もって重くなる。BGE-M3 + 見出し加重 bm25 の検索品質で大抵十分 |
-| 精度重視の単発クエリ (調査・定義的回答) | **有効化**。レイテンシ税は 1 ターンに 1 回、cross-encoder が意味的に関連する候補を明確に前に出す |
-| 混在 | `rerank_by_default = false` で始め、呼び出し側が MCP ツールの `rerank: true` パラメータで個別に選べるようにする |
+| Interactive agent flows (the LLM calls `search` 2–5 times per turn) | **Leave off.** +500 ms × N search calls adds up fast; retrieval quality from BGE-M3 + heading-weighted bm25 is usually sufficient. |
+| One-shot, precision-critical queries (research, definitive answers) | **Enable.** The latency tax is paid once per turn, and the cross-encoder meaningfully promotes semantically relevant candidates. |
+| Mixed usage | Start with `rerank_by_default = false` and let the caller opt in per query via the MCP tool's `rerank: true` parameter. |
 
-再ランクを入れるべきサイン:
+Symptoms that suggest you should turn rerank on:
 
-- トップ 5 が明白な正解チャンクを外すことが多い (クエリ言い換えをしても)
-- インデックス側の表現と同義語 / 言い換え関係にあるクエリが失敗する (例: 日本語「バグ」 vs 英語 "error")
-- エージェントが 1 ターンで何度も再クエリし、間違ったヒットを読むためにコンテキストを浪費している
+- Top-5 results often miss the obviously right chunk even after query rewording.
+- Queries that use synonyms / paraphrases of the indexed wording are failing (e.g. Japanese 「バグ」 vs English "error").
+- The agent re-queries multiple times per turn, wasting context by reading wrong hits.
 
-再ランクは index 非依存なので、1 週間試して品質差を測り、見えなければ無効化してよい — 再インデックス不要。
+Because rerank is index-independent, you can enable it for a week, measure the quality delta, and disable it if the benefit is not visible — no re-indexing needed.
 
-### インデックスの状態確認
+### Show index status
 
 ```bash
 kb-mcp status --kb-path /path/to/knowledge-base
 ```
 
-既存 index から document / chunk 数を表示する。
+Prints document and chunk counts from the existing index.
 
-### コマンドラインからの一発検索
+### One-shot search from the command line
 
-シェルスクリプトや skill bin が「KB をこの文字列で検索したい」だけの目的で使う用途 — MCP 接続を立ち上げずに:
+For shell scripts or skill bins that just need "search this string in the KB" without standing up an MCP connection:
 
 ```bash
 kb-mcp search "RAG server comparison" --limit 3 --format text
 kb-mcp search "E0382" --category deep-dive --format json | jq '.[] | .path'
-kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # 呼び出し単位の再ランクも可
+kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # optional per-invocation rerank
 ```
 
-`--format` は `json` (既定、`{score, path, title, heading, topic, date, content}` の配列) か `text` (`---` 区切りの LLM フレンドリなブロック)。他のフラグは `serve` と同じ: `--kb-path` / `--model` / `--reranker` / `--category` / `--topic` / `--limit`。品質フィルタは既定有効 — 単発クエリで feature 13 以前の挙動に戻すには `--include-low-quality` または `--min-quality 0` を渡す。`kb-mcp.toml` の既定値は `serve` / `index` と同じく適用される。
+`--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The quality filter is on by default — pass `--include-low-quality` or `--min-quality 0` to restore pre-feature-13 behavior for a single query. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
 
-典型的な skill-bin 用途: Claude Code の skill が `bin/` に `kb-mcp.exe` + `kb-mcp.toml` を同梱し、`kb-mcp search "{{user_query}}" --format text --limit 3` のようなコマンドで LLM が引用するための参照抜粋を返す。
+Typical skill-bin use: a Claude Code skill places `kb-mcp.exe` + `kb-mcp.toml` in its `bin/`, then a command like `kb-mcp search "{{user_query}}" --format text --limit 3` returns a focused reference excerpt for the LLM to cite.
 
-### 起点ドキュメントからの Connection Graph
+### Connection graph from a starting document
 
-単一ドキュメントではなく「その近傍 (さらにその近傍)」を意味的に探索したいときは `graph` サブコマンド:
+When you want to find not just a single document but the semantic neighborhood around it (and neighbors of those neighbors), use the `graph` subcommand:
 
 ```bash
 kb-mcp graph --start deep-dive/mcp/overview.md --depth 2 --fan-out 5
@@ -177,35 +176,35 @@ kb-mcp graph --start notes/rag.md --dedup-by-path --format text
 kb-mcp graph --start a.md --exclude junk1.md,junk2.md --min-similarity 0.5
 ```
 
-フラグ:
+Flags:
 
-- `--start PATH` — 必須、index 済みドキュメントの相対パス
-- `--depth` (既定 2、最大 3 にクランプ) — BFS のホップ数
-- `--fan-out` (既定 5、最大 20 にクランプ) — ホップあたりのノード隣接数。`0` なら seed のみ返却
-- `--min-similarity` (既定 0.3) — コサイン類似度カットオフ。`0.0..=1.0`
-- `--seed-strategy` — `all-chunks` (既定) は起点文書の全チャンクから展開、`centroid` は平均 (L2 再正規化) した 1 個の仮想 seed を使う
-- `--exclude` — 結果から除外するカンマ区切りパス。起点パス自身は常に除外される
-- `--dedup-by-path` — 同一パスのヒットをまとめて各ドキュメント最大 1 回に
-- `--category` / `--topic` — 各ホップにカテゴリ / トピックフィルタを適用
-- `--format json|text` — `search` と同じ
+- `--start PATH` — required, relative path to an indexed document.
+- `--depth` (default 2, clamped to max 3) — BFS hops.
+- `--fan-out` (default 5, clamped to max 20) — neighbors per node per hop. `0` returns only the seed.
+- `--min-similarity` (default 0.3) — cosine similarity cut-off. `0.0..=1.0`.
+- `--seed-strategy` — `all-chunks` (default) expands from every chunk of the start doc; `centroid` averages them (L2-renormalized) into one virtual seed.
+- `--exclude` — comma-separated paths to drop from results. The start path itself is always excluded.
+- `--dedup-by-path` — collapse same-path hits so each document appears at most once.
+- `--category` / `--topic` — apply category / topic filters to every hop.
+- `--format json|text` — same as `search`.
 
-出力は `parent_id` / `depth` / `score` 付きのノードのフラット配列で、消費側で木を再構築できる。典型ユース: 「この note の周りの関連コンテキストを 30 チャンク LLM に読ませたい」「この overview から 2 ホップ辿ってどのトピックに触れているか見たい」。
+The output is a flat array of nodes with `parent_id` / `depth` / `score` so the consumer can reconstruct the tree if it wants. Good use cases: "give me 30 chunks of related context around this note for the LLM to read", or "walk two hops from this overview to see what topics it touches".
 
-### TOML スキーマによる frontmatter 検証
+### Validate frontmatter against a TOML schema
 
-ナレッジベースで frontmatter の規約を運用しているなら、`kb-mcp validate` がすべての `.md` を TOML スキーマに対して検証し違反を報告する。スキーマ書式は [Frontmatter スキーマ検証](#frontmatter-スキーマ検証-feature-17) 節参照。コマンド自体は:
+If your knowledge base follows a frontmatter convention, `kb-mcp validate` checks every `.md` file against a TOML schema and reports violations. See the [Frontmatter schema validation](#frontmatter-schema-validation-feature-17) section below for the schema format; the command itself is:
 
 ```bash
 kb-mcp validate --kb-path /path/to/knowledge-base
 kb-mcp validate --kb-path ... --format json | jq '.files[]'
-kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotation
+kb-mcp validate --kb-path ... --format github         # ::error annotations for CI
 ```
 
-終了コード: `0` (違反なし) / `1` (違反あり) / `2` (スキーマロードエラー)。`--kb-path` 直下に `kb-mcp-schema.toml` が無いときは短い "no schema found" メッセージと共に exit 0 となるため、既存ワークフローへの `kb-mcp validate` 追加は実際にスキーマを書くまで非破壊。
+Exit codes: `0` (no violations), `1` (violations), `2` (schema load error). When `kb-mcp-schema.toml` is absent under `--kb-path`, the command exits 0 with a short "no schema found" note, so adding `kb-mcp validate` to an existing workflow is non-disruptive until you actually write a schema.
 
-## Claude Code / Cursor への接続
+## Connecting to Claude Code / Cursor
 
-プロジェクトルート (またはクライアント対応の MCP 設定場所) の `.mcp.json` に以下を追加:
+Add the following to `.mcp.json` in your project root (or the equivalent MCP config for your client):
 
 ```json
 {
@@ -219,7 +218,7 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 }
 ```
 
-多言語モデル + 再ランクを有効化する場合:
+With a multilingual model and reranker enabled:
 
 ```json
 {
@@ -241,7 +240,7 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 }
 ```
 
-エージェントワークフロー向けの保守的な案: reranker はロードするが既定はオフにしておき、呼び出し側が個別 `search` で `rerank: true` を指定してオプトインする:
+For agent workflows, a more conservative alternative: load the reranker but leave it off by default, letting the caller opt in with `rerank: true` on individual `search` calls.
 
 ```json
 {
@@ -262,7 +261,7 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 }
 ```
 
-あるいは、バイナリと同じディレクトリに `kb-mcp.toml` を置いて同じ項目を設定しているなら、`.mcp.json` はここまで縮められる:
+Or, if you placed a `kb-mcp.toml` next to the binary with those options set, the `.mcp.json` can shrink to:
 
 ```json
 {
@@ -276,11 +275,11 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 }
 ```
 
-クライアント接続時にサーバが自動起動する。
+The server will be started automatically when the client connects.
 
-### PostToolUse hook による index 鮮度保守 (feature 19)
+### Keeping the index fresh via PostToolUse hook (feature 19)
 
-Claude Code セッション内部からナレッジベースを編集する (または Markdown を書く skill を実行する) 場合、MCP サーバは再構築されるまで古い結果を返し続ける。`.claude/settings.json` の `PostToolUse` hook で書込み後に自動再 index できる。最小形:
+If you edit the knowledge base from inside a Claude Code session (or run a skill that writes Markdown files), the running MCP server will keep returning stale results until the index is rebuilt. A `PostToolUse` hook in `.claude/settings.json` can re-index automatically after every write. Minimal form:
 
 ```json
 {
@@ -297,17 +296,17 @@ Claude Code セッション内部からナレッジベースを編集する (ま
 }
 ```
 
-`kb-mcp index` の SHA-256 差分検出により 2 回目以降は高速 (小さな KB なら大抵 1 秒未満)。ツールペイロードを精査して編集ファイルが `$KB_PATH` 配下のときだけ再構築する、より精密なシェルスクリプトがリポジトリ同梱 — [`examples/hooks/`](./examples/hooks/README.md) 参照。SQLite は WAL モードで動作するため、MCP サーバ起動中に hook が走っても安全。
+SHA-256 diffing in `kb-mcp index` makes the second-and-later invocations fast (usually sub-second on small KBs). A richer shell script that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH` ships with the repo: see [`examples/hooks/`](./examples/hooks/README.md). SQLite runs in WAL mode so the hook can safely run while the MCP server is still up.
 
-### Frontmatter スキーマ検証 (feature 17)
+### Frontmatter schema validation (feature 17)
 
-ナレッジベースで frontmatter 規約を運用しているなら (例: `title` 必須、`date` は YYYY-MM-DD、`topic` は enum)、以下でファイル毎の違反をチェックできる:
+If your knowledge base follows a frontmatter convention (e.g. `title` required, `date` is YYYY-MM-DD, `topic` limited to an enum), you can check every `.md` file for violations with:
 
 ```bash
 kb-mcp validate --kb-path /path/to/knowledge-base
 ```
 
-`--kb-path` 直下に `kb-mcp-schema.toml` を置く (テンプレート: `kb-mcp-schema.toml.example`):
+Put a `kb-mcp-schema.toml` at the root of `--kb-path` (template: `kb-mcp-schema.toml.example`):
 
 ```toml
 [fields.title]
@@ -331,22 +330,22 @@ type = "array"
 min_length = 1
 ```
 
-- **スキーマファイル無し → exit 0** と短い "no schema found" メッセージ。feature 17 以前の挙動を保持
-- `--format text` (既定、TTY では色付き) / `json` / `github` (CI annotation 用)
-- 終了コード: `0` (違反なし) / `1` (違反あり) / `2` (スキーマロードエラー)
-- `.txt` は frontmatter の概念が無いのでスキップ
-- `index` / `serve` コマンドには影響しない — 検証は opt-in のみ
+- **No schema file → exit 0** with a short "no schema found" note. Pre-feature-17 behavior is preserved.
+- `--format text` (default, color when TTY) / `json` / `github` for CI annotations.
+- Exit codes: `0` (no violations), `1` (violations), `2` (schema load error).
+- `.txt` files are skipped (no frontmatter concept).
+- The `index` and `serve` commands are not affected — validation is opt-in only.
 
-### HTTP トランスポート (複数クライアント同時接続) (feature 18)
+### HTTP transport for multiple simultaneous clients (feature 18)
 
-既定の `kb-mcp serve` は stdio で MCP を話す — 1 クライアント / サーバプロセス。複数クライアント同時接続 (例: 複数の Claude Code セッション、または外部スクリプトが同じ index を叩く) には Streamable HTTP に切替:
+By default `kb-mcp serve` speaks MCP over stdio — one client per server process. To serve multiple clients simultaneously (e.g. several Claude Code sessions or an external script hitting the same index), switch to Streamable HTTP:
 
 ```bash
 kb-mcp serve --kb-path /path/to/knowledge-base --transport http --port 3100
-# または: --bind 0.0.0.0:3100
+# or: --bind 0.0.0.0:3100
 ```
 
-サーバは `/mcp` に MCP エンドポイントをマウントし、`/healthz` をヘルスプローブ用に公開する。HTTP 対応クライアントの `.mcp.json`:
+The server mounts the MCP endpoint at `/mcp` and exposes `/healthz` for probes. `.mcp.json` for an HTTP-capable client:
 
 ```json
 {
@@ -359,67 +358,67 @@ kb-mcp serve --kb-path /path/to/knowledge-base --transport http --port 3100
 }
 ```
 
-セキュリティ注意:
-- 既定 bind は `127.0.0.1:3100` (loopback)。`--bind 0.0.0.0:3100` は信頼できるネットワークでのみ使用 — **kb-mcp はまだ認証機構を内蔵していない**
-- rmcp の Streamable HTTP 層は Host ヘッダ検証を強制 (既定で loopback のみ) し、DNS rebinding 攻撃を防ぐ
-- サーバ内部の Mutex ベース直列化により、HTTP の並列リクエストでも embedder / DB 層では逐次処理される (`search` で目安 10 qps 程度)。本格的な並列化は将来の拡張
+Security notes:
+- Default bind is `127.0.0.1:3100` (loopback). Use `--bind 0.0.0.0:3100` only on trusted networks — **kb-mcp has no built-in authentication yet**.
+- rmcp's Streamable HTTP layer enforces Host header validation (loopback only by default) to prevent DNS rebinding attacks.
+- Mutex-based serialization inside the server means HTTP concurrent requests are still processed sequentially at the embedder / DB level (~10 qps expected for `search`). Heavy parallelism is a future enhancement.
 
-### ライブ同期 (file watcher) (feature 12)
+### Live-sync via file watcher (feature 12)
 
-`kb-mcp serve` は既定で `notify` ベースのファイルウォッチャを走らせる。`--kb-path` 配下の任意の変更 (create / modify / delete / rename) が検知され、debounce ののち該当ファイルのみが再インデックスされる。手動の editor save・`git pull`・外部スクリプトといった、PostToolUse hook では捕まえられないケースをカバーする。
+`kb-mcp serve` runs a `notify`-based file watcher by default. Any change under `--kb-path` (create / modify / delete / rename) is detected, debounced, and only the affected file is re-indexed. This covers manual editor saves, `git pull`, and external scripts — cases the PostToolUse hook cannot intercept.
 
-- **既定 on**。`kb-mcp.toml` の `[watch].enabled = false` または CLI `--no-watch` で無効化
-- **Debounce** は既定 500 ms。`[watch].debounce_ms` または `--debounce-ms` で調整
-- **PostToolUse hook と共存**。両経路は同じ `Mutex<Database>` / `Mutex<Embedder>` をロックするため、同時トリガは Rust 層で直列化され冪等
-- **拡張子対応**。watcher は `rebuild_index` と同じ Parser registry を共有し、`[parsers].enabled` で有効化された拡張子のファイルのみを再インデックスする。他イベントは破棄
-- **耐障害性**。watcher タスク内部のエラーは stderr にログされ (黙殺しない)、MCP サーバは動作し続ける。ローカルディスクを想定 — WSL / SMB / ネットワーク共有上の inotify は保証外
+- **Default on**. `[watch].enabled = false` in `kb-mcp.toml` or `--no-watch` on the command line disables it.
+- **Debounce** is 500 ms by default. Tune with `[watch].debounce_ms` or `--debounce-ms`.
+- **Coexists with the PostToolUse hook**. Both paths lock the same `Mutex<Database>` / `Mutex<Embedder>`, so concurrent triggers are serialized at the Rust layer and are idempotent.
+- **Extension-aware**. The watcher shares the Parser registry with `rebuild_index`, so only files whose extension is enabled in `[parsers].enabled` are re-indexed; other events are dropped.
+- **Resilience**. Errors inside the watcher task are logged to stderr (not silently dropped) and the MCP server keeps running. Local disk is assumed — inotify on WSL / SMB / network shares is not guaranteed.
 
-### HuggingFace の TLS 失敗への対処 (初回 DL 時)
+### Working around HuggingFace TLS failures on first download
 
-環境によっては (企業プロキシ、TLS inspection を行うファイアウォール) fastembed の native TLS 接続が `huggingface.co` に対して `os error 10054` / "Connection was reset" で失敗する。その場合は Python の HuggingFace CLI で事前にモデルを DL し、`FASTEMBED_CACHE_DIR` で HF Hub キャッシュを指す:
+Some environments (corporate proxies, firewalls with TLS inspection) reject fastembed's native TLS connection to `huggingface.co` with `os error 10054` / "Connection was reset". In that case, pre-download the model via the Python HuggingFace CLI and point `FASTEMBED_CACHE_DIR` at the HF Hub cache:
 
 ```bash
-# 一度インストール
+# Install once
 pip install --user huggingface_hub
 
-# BGE-M3 を事前 DL (必要な ONNX ファイルのみ)
+# Pre-download BGE-M3 (required ONNX files only)
 hf download BAAI/bge-m3 \
     --include 'onnx/*' 'tokenizer*' 'config.json' 'special_tokens_map.json'
 
-# BGE-reranker-v2-m3 を事前 DL (`--reranker bge-v2-m3` 用)
+# Pre-download BGE-reranker-v2-m3 (for `--reranker bge-v2-m3`)
 hf download BAAI/bge-reranker-v2-m3
 
-# HF cache を指して kb-mcp を起動 (HF Hub cache は fastembed と互換)
+# Run kb-mcp pointing at the HF cache (HF Hub cache layout is compatible with fastembed)
 FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
     kb-mcp index --kb-path ./knowledge-base --model bge-m3 --force
 ```
 
-## MCP ツール
+## Tools
 
-| ツール | 説明 | 主なパラメータ |
+| Tool | Description | Key parameters |
 |---|---|---|
-| `search` | ベクトル + FTS5 全文検索を Reciprocal Rank Fusion でマージしたハイブリッド検索、任意で cross-encoder 再ランク。関連度でランク付けされた chunk を返す | `query` (必須)、`limit`、`category`、`topic`、`rerank` (サーバ既定を上書き)、`min_quality` (品質フィルタ閾値を 0.0-1.0 で上書き)、`include_low_quality` (このクエリで品質フィルタ無効化) |
-| `list_topics` | index 済みの全トピック / カテゴリと文書数を列挙 | (なし) |
-| `get_document` | 相対パスから文書の全文 + メタデータを取得 | `path` (例: `"deep-dive/mcp/overview.md"`) |
-| `get_best_practice` | 対象向けの best practice 文書を取得、任意で特定 h2 セクションを抽出。パス解決は `kb-mcp.toml` の `[best_practice].path_templates` (既定: `best-practices/{target}/PERFECT.md`) を使うので任意の KB レイアウトに対応 | `target` (例: `"claude-code"`)、`category` (任意) |
-| `rebuild_index` | すべてのソースファイル (Markdown + `[parsers].enabled` で有効化された拡張子) を走査してインデックス再構築 | `force` (任意、既定 false) |
-| `get_connection_graph` | ドキュメントパスを起点に意味的に関連するチャンクを BFS 展開。`parent_id` / `depth` / `score` / `snippet` 付きのノード配列を返し、呼び出し側でコンテキスト発見を連鎖させられる | `path` (必須)、`depth` (既定 2、最大 3)、`fan_out` (既定 5、最大 20)、`min_similarity` (既定 0.3)、`seed_strategy` (`all_chunks` / `centroid`)、`dedup_by_path`、`category`、`topic`、`exclude_paths` |
+| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion, optionally followed by cross-encoder reranking. Returns chunks ranked by relevance. | `query` (required), `limit`, `category`, `topic`, `rerank` (override server default), `min_quality` (override quality filter 0.0-1.0), `include_low_quality` (disable the filter for this query) |
+| `list_topics` | List all indexed topics and categories with document counts. | (none) |
+| `get_document` | Get the full content and metadata of a document by its relative path. | `path` (e.g. `"deep-dive/mcp/overview.md"`) |
+| `get_best_practice` | Get a best-practices document for the given target, optionally extracting a specific h2 section. Path resolution uses `[best_practice].path_templates` from `kb-mcp.toml` (default: `best-practices/{target}/PERFECT.md`), so arbitrary KB layouts are supported. | `target` (e.g. `"claude-code"`), `category` (optional) |
+| `rebuild_index` | Rebuild the search index by scanning all source files (Markdown plus any other extensions enabled via `[parsers].enabled`). | `force` (optional, default false) |
+| `get_connection_graph` | BFS-expand semantically related chunks starting from a document path. Returns a flat list of nodes with `parent_id` / `depth` / `score` / `snippet` so the caller can chain context discovery. | `path` (required), `depth` (default 2, max 3), `fan_out` (default 5, max 20), `min_similarity` (default 0.3), `seed_strategy` (`all_chunks` / `centroid`), `dedup_by_path`, `category`, `topic`, `exclude_paths` |
 
-## 補足
+## Notes
 
-- **埋め込みモデル**: 初回実行時、選択した ONNX モデルが OS 標準のキャッシュディレクトリに DL される。2 回目以降は再利用。解決順:
-  1. `FASTEMBED_CACHE_DIR` 環境変数 (設定されていれば)
-  2. OS キャッシュ + `fastembed` (Linux: `~/.cache/fastembed`、macOS: `~/Library/Caches/fastembed`、Windows: `%LOCALAPPDATA%\fastembed`)
-  3. CWD 直下の `.fastembed_cache` (最終フォールバック)
-- **インデックス保存先**: SQLite DB は `--kb-path` の**親ディレクトリ**に `.kb-mcp.db` として保存される (例: `--kb-path ./knowledge-base` ならリポジトリルート)
-- **Parser registry** (feature 20): `[parsers].enabled` に列挙された拡張子のみインデックス対象。既定は `["md"]` (feature 20 以前)、`["md", "txt"]` で `.txt` にオプトイン (タイトルはファイル名派生)。未知 id (例: `"pdf"` / `"rst"`) は起動時に拒否、空配列も「何もインデックスされない」事故防止のため拒否
-- **ライブ同期ウォッチャ** (feature 12): `kb-mcp serve` は `notify` ベースの watcher を既定 spawn (`[watch].enabled = true`、500ms debounce)。手動 save / `git pull` / 外部スクリプトを MCP ツールと同じ Mutex 付きリソース上で増分再インデックスするため、同時トリガは直列化される。`--no-watch` / `[watch].enabled = false` で無効化
-- **HTTP トランスポート** (feature 18): `--transport http --port 3100` で rmcp の Streamable HTTP を `/mcp` に提供し、`/healthz` をプローブ用、内部は Mutex 直列化。既定 bind は `127.0.0.1:3100`、`0.0.0.0` は明示 opt-in かつ**まだ認証機構無し** — リバースプロキシ / ファイアウォール側で保護すること
-- **埋め込み次元**: `--model` で決まる。BGE-small-en-v1.5 = 384、BGE-M3 = 1024。選択した次元は `vec_chunks` 仮想テーブルに宣言され `index_meta` に記録される。実行時の不一致は検出して拒否
-- **増分インデックス**: ファイルは SHA-256 content hash で追跡。以降の `index` 実行では変更されたファイルのみ再 embedding される (`--force` を渡さない限り)。内容を変えずに移動 / リネームすると hash 一致で検知され `documents.path` の UPDATE として処理 — 既存の chunk / embedding / FTS 行は再利用される。再構築サマリでは `updated` / `deleted` の隣に `renamed` としてカウントされる
-- **ハイブリッド検索 (FTS5 + ベクトル)**: `search` ツールは SQLite FTS5 全文検索 (trigram tokenizer、日本語 / CJK も動く。bm25 では `heading` 列を `content` の 2 倍重み) をベクトル検索と Reciprocal Rank Fusion (k=60) でマージする。返される `score` は RRF スコア (大きいほど良い) で距離ではない。3 文字未満のクエリは trigram の最小値を下回るためベクトルのみにフォールバック
-- **任意の再ランク**: `--reranker <model>` を付けると上位候補が cross-encoder で再スコアされてから返る。再ランク適用時は `score` が RRF 値ではなく cross-encoder の生スコアになる。再ランクは index 非依存 — サーバ起動時に再インデックスなしでトグル可能
-- **Connection graph**: `get_connection_graph` / `kb-mcp graph` はドキュメント起点でベクトルインデックス上を BFS する。追加インデックスは作らず、ホップ毎に sqlite-vec KNN を新規発行する。`depth ≤ 3` / `fan_out ≤ 20` で client-side クランプされるため、最悪でも 1 リクエストあたり約 21 KNN クエリ。スコアは L2 距離からの近似コサイン類似度 (`1 - d²/2` を `[0,1]` にクランプ、unit normalized embedding を前提 — BGE-small / BGE-M3 は内部で正規化済み)
-- **見出し除外**: 見出しテキストが `exclude_headings` のいずれか (既定 `["次の深堀り候補"]`) を含むセクションは、チャンキング時に落とされる。既定の除外を無効化するには `kb-mcp.toml` に `exclude_headings = []` を書く。マッチは部分文字列 (`heading.contains(pattern)`) なので、短いパターンは `"## 次の深堀り候補 (案)"` のようなバリエーションも拾う
-- **`get_best_practice` path templates** (feature 16): `get_best_practice(target: "claude-code")` が読むファイルは `kb-mcp.toml` の `[best_practice].path_templates` で解決される。各テンプレートは `{target}` をプレースホルダとして使える。サーバはリスト順にテンプレートを試し、`kb_path` 配下に最初に存在したファイルを返す (path traversal は拒否)。既定は `["best-practices/{target}/PERFECT.md"]` で legacy 構成もそのまま動く。`"docs/{target}.md"` 等を追加すれば、ツール呼び出し側を変えずに異なる KB レイアウトに対応できる
-- **チャンク単位品質フィルタ** (feature 13、**既定有効** 閾値 `0.3`): インデックス時に各チャンクに対し 3 つのシグナル — 長さ (30 文字未満 → -0.6)、定型語のみ (TBD / TODO / 詳細は後述 等 → -0.5)、弱い構造 (80 文字未満の 1 行 → -0.3) — から `quality_score` を計算。閾値未満のチャンクは `search` / `kb-mcp search` / `get_connection_graph` で非表示。`get_connection_graph` の seed チャンクは免除。フィルタ無効化は `kb-mcp.toml` の `[quality_filter] enabled = false`、per-query は CLI `--include-low-quality` / MCP `include_low_quality: true`。閾値上書きは `--min-quality 0.5` / `min_quality: 0.5`。既存 index のアップグレード: 次の `kb-mcp index` 実行時に `quality_score` 列が透過的に追加され (ALTER TABLE)、1 度だけ backfill される (冪等)
+- **Embedding model**: On first run, the selected ONNX model is downloaded to an OS-standard cache directory. Subsequent runs reuse the cached model. Resolution order:
+  1. `FASTEMBED_CACHE_DIR` environment variable, if set.
+  2. OS cache dir joined with `fastembed` (Linux: `~/.cache/fastembed`, macOS: `~/Library/Caches/fastembed`, Windows: `%LOCALAPPDATA%\fastembed`).
+  3. `.fastembed_cache` under the current working directory (final fallback).
+- **Index storage**: The SQLite database is stored as `.kb-mcp.db` in the **parent** directory of the `--kb-path` (i.e. the repository root when `--kb-path` points to `knowledge-base/`).
+- **Parser registry** (feature 20): only file extensions listed in `[parsers].enabled` are indexed. The section defaults to `["md"]` (pre-feature-20 behavior); `["md", "txt"]` opts into `.txt` where the title is derived from the filename. Unknown ids (e.g. `"pdf"` / `"rst"`) are rejected at startup; an empty array is also rejected to avoid silent "nothing is indexed" failures.
+- **Live-sync file watcher** (feature 12): `kb-mcp serve` spawns a `notify`-based watcher by default (`[watch].enabled = true`, 500 ms debounce). Manual saves, `git pull`, and external scripts are re-indexed incrementally on the same Mutex-guarded resources used by MCP tools, so concurrent triggers are serialized. Disable with `--no-watch` or `[watch].enabled = false`.
+- **HTTP transport** (feature 18): `--transport http --port 3100` serves MCP over rmcp's Streamable HTTP at `/mcp`, with `/healthz` for probes and a Mutex-serialized pipeline inside. Default bind is `127.0.0.1:3100` — `0.0.0.0` is opt-in and **has no built-in authentication yet**; restrict with a reverse proxy / firewall until that arrives.
+- **Embedding dimensions**: Depends on `--model`. BGE-small-en-v1.5 = 384, BGE-M3 = 1024. The chosen dim is declared on the `vec_chunks` virtual table and recorded in the `index_meta` table; a mismatch at runtime is detected and rejected.
+- **Incremental indexing**: Files are tracked by SHA-256 content hash. Only changed files are re-embedded on subsequent `index` runs (unless `--force` is passed). Moving / renaming a file without modifying its content is detected via hash match and handled as a `documents.path` UPDATE — the existing chunks, embeddings, and FTS rows are reused instead of being rebuilt. The rebuild summary reports the number of renames as `renamed` next to `updated` / `deleted`.
+- **Hybrid search (FTS5 + vector)**: The `search` tool combines SQLite FTS5 full-text search (trigram tokenizer, works for Japanese/CJK too; `heading` column is weighted 2× `content` in bm25) with the vector search via Reciprocal Rank Fusion (k=60). The returned `score` is the RRF score (higher = better), not a distance. Queries shorter than 3 characters fall back to vector-only (below the trigram minimum).
+- **Optional reranking**: With `--reranker <model>` the top candidates are re-scored by a cross-encoder before being returned. When rerank is applied, `score` is the cross-encoder raw score instead of the RRF value. Reranking is index-independent — you can toggle it at server start without re-indexing.
+- **Connection graph**: `get_connection_graph` / `kb-mcp graph` do BFS over the vector index starting from a document. No extra index is built; every hop runs a fresh sqlite-vec KNN. Bounded by `depth ≤ 3` / `fan_out ≤ 20` with client-side clamping, so worst-case is ~21 KNN queries per request. Scores are cosine similarity approximated from L2 distance (`1 - d²/2`, clamped to `[0,1]`) assuming unit-normalized embeddings (BGE-small / BGE-M3 are normalized internally).
+- **Heading exclusion**: Sections whose heading text contains any of `exclude_headings` (defaults to `["次の深堀り候補"]`) are dropped during chunking. Set `exclude_headings = []` in `kb-mcp.toml` to disable the default. Matching is substring-based (`heading.contains(pattern)`), so short patterns catch suffixed variants (`"## 次の深堀り候補 (案)"` etc.).
+- **`get_best_practice` path templates** (feature 16): the file a call like `get_best_practice(target: "claude-code")` reads is resolved through `[best_practice].path_templates` in `kb-mcp.toml`. Each template may use `{target}` as a placeholder. The server tries templates in order and returns the first existing file under `kb_path` (path-traversal attempts are rejected). The default list is `["best-practices/{target}/PERFECT.md"]` so legacy setups keep working; add entries like `"docs/{target}.md"` to support different KB layouts without changing the tool call site.
+- **Per-chunk quality filter** (feature 13, **enabled by default** with threshold `0.3`): each indexed chunk gets a `quality_score` computed from three signals — length (< 30 chars → -0.6), boilerplate-only content (TBD / TODO / 詳細は後述 / etc. → -0.5), poor structure (single line < 80 chars → -0.3). Chunks scoring below the threshold are hidden from `search`, `kb-mcp search`, and `get_connection_graph`. Seed chunks of `get_connection_graph` are exempt. Disable the filter with `[quality_filter] enabled = false` in `kb-mcp.toml`, or opt out per-query with `--include-low-quality` (CLI) / `include_low_quality: true` (MCP). Override the threshold with `--min-quality 0.5` / `min_quality: 0.5`. Upgrading an existing index: the next `kb-mcp index` run transparently adds the `quality_score` column (ALTER TABLE) and backfills scores once (idempotent).
