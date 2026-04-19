@@ -37,6 +37,16 @@
 # 例: 「参考リンク」と「次の深堀り候補」を落としたい場合:
 #exclude_headings = ["参考リンク", "次の深堀り候補"]
 
+# インデックス走査時にスキップするディレクトリ basename のリスト。
+# basename 完全一致 (substring や glob ではない)。省略時の既定は
+# [".obsidian", ".git", "node_modules", "target", ".vscode", ".idea"]。
+# 指定すると既定を**置き換える** (merge ではない)。`[]` を明示すると
+# 何も除外せず全ディレクトリを走査する。
+# 例: 既定 + Next.js ビルド出力を足したい場合:
+#exclude_dirs = [".obsidian", ".git", "node_modules", "target", ".vscode", ".idea", "dist", ".next"]
+# 例: 除外を全部外して全ディレクトリを走査したい場合:
+#exclude_dirs = []
+
 # 検索時のチャンク品質フィルタ (feature 13)。
 # enabled を false にすると MCP search / CLI search / get_connection_graph
 # すべてでフィルタが無効になり、従来の全件返却動作に戻る。

@@ -121,6 +121,7 @@ pub fn rebuild_index(
     kb_path: &Path,
     force: bool,
     exclude_headings: Option<&[String]>,
+    exclude_dirs: &[String],
     registry: &Registry,
 ) -> Result<IndexResult> {
     let start = Instant::now();
@@ -145,7 +146,7 @@ pub fn rebuild_index(
 
     // [feature 20] Registry の対応拡張子リストで source files を収集する。
     // 旧 collect_md_files は .md 固定だったが、.txt 等にも対応。
-    let source_files = collect_source_files(&kb_path, registry)?;
+    let source_files = collect_source_files(&kb_path, registry, exclude_dirs)?;
     eprintln!(
         "Found {} source files (extensions: {:?})",
         source_files.len(),
@@ -470,12 +471,14 @@ pub fn rename_single_file(
     }
 }
 
-/// [feature 20] Collect all files under `kb_path` whose extension is
-/// registered in `registry`. Skips `.obsidian/` directories. Sort for
+/// Collect all files under `kb_path` whose extension is registered in
+/// `registry`. Directories whose basename matches any entry in
+/// `exclude_dirs` are skipped (along with their subtree). Sort for
 /// deterministic ordering.
 fn collect_source_files(
     kb_path: &Path,
     registry: &Registry,
+    exclude_dirs: &[String],
 ) -> Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
     let extensions = registry.extensions();
@@ -484,8 +487,11 @@ fn collect_source_files(
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
+            if !e.file_type().is_dir() {
+                return true;
+            }
             let name = e.file_name().to_string_lossy();
-            !(e.file_type().is_dir() && name == ".obsidian")
+            !exclude_dirs.iter().any(|d| d.as_str() == name.as_ref())
         })
     {
         let entry = entry.context("walkdir error")?;
@@ -699,7 +705,7 @@ mod tests {
         write_file(&tmp.0, "ignore.rst", "rst");
 
         let reg = Registry::defaults(); // md only
-        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        let files = collect_source_files(&tmp.0, &reg, &[".obsidian".to_string()]).unwrap();
         let rels: Vec<String> = files
             .iter()
             .map(|p| {
@@ -723,7 +729,7 @@ mod tests {
         write_file(&tmp.0, "ignore.rst", "rst");
 
         let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
-        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        let files = collect_source_files(&tmp.0, &reg, &[".obsidian".to_string()]).unwrap();
         let rels: Vec<String> = files
             .iter()
             .map(|p| {
@@ -746,7 +752,7 @@ mod tests {
         write_file(&tmp.0, ".obsidian/nested/evil.md", "# skip too");
 
         let reg = Registry::defaults();
-        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        let files = collect_source_files(&tmp.0, &reg, &[".obsidian".to_string()]).unwrap();
         let rels: Vec<String> = files
             .iter()
             .map(|p| {
@@ -767,7 +773,7 @@ mod tests {
         write_file(&tmp.0, "note.TXT", "txt");
 
         let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
-        let files = collect_source_files(&tmp.0, &reg).unwrap();
+        let files = collect_source_files(&tmp.0, &reg, &[".obsidian".to_string()]).unwrap();
         assert_eq!(files.len(), 3, "should match regardless of case: {files:?}");
     }
 
@@ -779,8 +785,8 @@ mod tests {
         write_file(&tmp.0, "mmm.md", "m");
 
         let reg = Registry::defaults();
-        let f1 = collect_source_files(&tmp.0, &reg).unwrap();
-        let f2 = collect_source_files(&tmp.0, &reg).unwrap();
+        let f1 = collect_source_files(&tmp.0, &reg, &[".obsidian".to_string()]).unwrap();
+        let f2 = collect_source_files(&tmp.0, &reg, &[".obsidian".to_string()]).unwrap();
         assert_eq!(f1, f2);
         // First one should be aaa
         assert!(f1[0].file_name().unwrap().to_string_lossy().starts_with("aaa"));

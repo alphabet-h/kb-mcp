@@ -92,7 +92,21 @@ pub struct WatcherState {
     pub embedder: Arc<Mutex<Embedder>>,
     pub registry: Arc<Registry>,
     pub exclude_headings: Option<Vec<String>>,
+    pub exclude_dirs: Vec<String>,
     pub config: WatchConfig,
+}
+
+/// `rel` (forward-slash 相対パス) が `exclude_dirs` のいずれかの配下に
+/// あるかを判定する。basename 完全一致を `/` 境界で判定するため、
+/// 例えば `["node_modules"]` に対して `"node_modules/"` 開始や
+/// `"sub/node_modules/"` 含みはヒットするが、`"node_modules-bak/"` は
+/// ヒットしない。
+fn is_under_excluded_dir(rel: &str, exclude_dirs: &[String]) -> bool {
+    exclude_dirs.iter().any(|d| {
+        rel == d
+            || rel.starts_with(&format!("{d}/"))
+            || rel.contains(&format!("/{d}/"))
+    })
 }
 
 /// Watcher タスク本体。notify の裏スレッドから tokio channel 越しにイベントを
@@ -287,10 +301,10 @@ fn handle_events(state: &WatcherState, events: &[DebouncedEvent]) {
     }
 }
 
-/// 対象ファイルの拡張子が `registry` にあり、`.obsidian/` 配下でないこと。
+/// 対象ファイルの拡張子が `registry` にあり、`exclude_dirs` 配下でないこと。
 fn should_process(rel: &str, full: &Path, state: &WatcherState) -> bool {
-    // `.obsidian/` 配下は無視 (rebuild_index と同じ扱い)
-    if rel.starts_with(".obsidian/") || rel.contains("/.obsidian/") {
+    // 除外ディレクトリ配下は無視 (rebuild_index と同じ扱い)
+    if is_under_excluded_dir(rel, &state.exclude_dirs) {
         return false;
     }
     // `.kb-mcp.db*` は kb_path の外にあるので通常ヒットしないが念のため
@@ -444,11 +458,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&kb);
     }
 
-    /// `should_process` は WatcherState のうち `kb_path` と `registry` しか
-    /// 見ないので、test 用にその 2 つだけ差し込んだ軽量判定ヘルパを用意する
-    /// (`Database` / `Embedder` のダミー構築を避けるため)。
-    fn should_process_lite(rel: &str, full: &Path, registry: &Registry) -> bool {
-        if rel.starts_with(".obsidian/") || rel.contains("/.obsidian/") {
+    /// `should_process` は WatcherState のうち `kb_path` / `registry` /
+    /// `exclude_dirs` しか見ないので、test 用にその 3 つだけ差し込んだ
+    /// 軽量判定ヘルパを用意する (`Database` / `Embedder` のダミー構築を
+    /// 避けるため)。
+    fn should_process_lite(
+        rel: &str,
+        full: &Path,
+        registry: &Registry,
+        exclude_dirs: &[String],
+    ) -> bool {
+        if is_under_excluded_dir(rel, exclude_dirs) {
             return false;
         }
         if rel.ends_with(".kb-mcp.db") || rel.ends_with(".kb-mcp.db-journal") {
@@ -461,41 +481,45 @@ mod tests {
             .any(|e| e.eq_ignore_ascii_case(ext))
     }
 
+    fn default_exclude_dirs() -> Vec<String> {
+        vec![".obsidian".to_string()]
+    }
+
     #[test]
     fn test_should_process_lite_md_ok() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/notes/a.md");
-        assert!(should_process_lite("notes/a.md", full, &reg));
+        assert!(should_process_lite("notes/a.md", full, &reg, &default_exclude_dirs()));
     }
 
     #[test]
     fn test_should_process_lite_obsidian_rejected() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/.obsidian/workspace.md");
-        assert!(!should_process_lite(".obsidian/workspace.md", full, &reg));
+        assert!(!should_process_lite(".obsidian/workspace.md", full, &reg, &default_exclude_dirs()));
         let full2 = Path::new("/tmp/a/sub/.obsidian/x.md");
-        assert!(!should_process_lite("sub/.obsidian/x.md", full2, &reg));
+        assert!(!should_process_lite("sub/.obsidian/x.md", full2, &reg, &default_exclude_dirs()));
     }
 
     #[test]
     fn test_should_process_lite_wrong_extension() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/notes/a.txt");
-        assert!(!should_process_lite("notes/a.txt", full, &reg));
+        assert!(!should_process_lite("notes/a.txt", full, &reg, &default_exclude_dirs()));
     }
 
     #[test]
     fn test_should_process_lite_txt_accepted_when_opted_in() {
         let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
         let full = Path::new("/tmp/a/notes/a.txt");
-        assert!(should_process_lite("notes/a.txt", full, &reg));
+        assert!(should_process_lite("notes/a.txt", full, &reg, &default_exclude_dirs()));
     }
 
     #[test]
     fn test_should_process_lite_db_file_rejected() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/.kb-mcp.db");
-        assert!(!should_process_lite(".kb-mcp.db", full, &reg));
+        assert!(!should_process_lite(".kb-mcp.db", full, &reg, &default_exclude_dirs()));
     }
 
     // -----------------------------------------------------------------------

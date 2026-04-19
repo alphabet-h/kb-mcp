@@ -14,6 +14,19 @@ use crate::quality::QualityFilterConfig;
 use crate::transport::TransportConfig;
 use crate::watcher::WatchConfig;
 
+/// インデックス走査時にスキップするディレクトリ basename の既定リスト。
+/// basename 完全一致 (substring や glob ではない)。`kb-mcp.toml` の
+/// `exclude_dirs` キーを指定するとこのリスト全体が置き換わる
+/// (merge ではない)。`exclude_dirs = []` を明示すると「全走査」になる。
+pub const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
+    ".obsidian",
+    ".git",
+    "node_modules",
+    "target",
+    ".vscode",
+    ".idea",
+];
+
 /// バイナリと同じディレクトリに置く `kb-mcp.toml` の表現。
 /// すべてのフィールドは optional で、指定しなかった項目は CLI 引数 or
 /// ビルトインデフォルトで補われる。
@@ -35,6 +48,10 @@ pub struct Config {
     /// 省略時 (`None`) は [`crate::markdown::DEFAULT_EXCLUDED_HEADINGS`]。
     /// 明示的に `[]` を与えると「除外しない」という意味になる。
     pub exclude_headings: Option<Vec<String>>,
+    /// インデックス走査時にスキップするディレクトリ basename (完全一致)。
+    /// 省略時は [`DEFAULT_EXCLUDE_DIRS`] が適用される。明示的な `[]` を
+    /// 与えると「全ディレクトリを走査する」という意味になる。
+    pub exclude_dirs: Option<Vec<String>>,
     /// [feature 13] 検索時に適用するチャンク品質フィルタの設定。
     /// 省略時は [`QualityFilterConfig::default()`] (enabled=true, threshold=0.3)。
     pub quality_filter: Option<QualityFilterConfig>,
@@ -144,11 +161,21 @@ impl Config {
             && self.rerank_by_default.is_none()
             && self.fastembed_cache_dir.is_none()
             && self.exclude_headings.is_none()
+            && self.exclude_dirs.is_none()
             && self.quality_filter.is_none()
             && self.best_practice.is_none()
             && self.parsers.is_none()
             && self.watch.is_none()
             && self.transport.is_none()
+    }
+
+    /// `exclude_dirs` の実効値を返す。設定省略時は [`DEFAULT_EXCLUDE_DIRS`]
+    /// を `Vec<String>` 化して返す。明示的な `[]` はそのまま空 Vec。
+    pub fn resolve_exclude_dirs(&self) -> Vec<String> {
+        match &self.exclude_dirs {
+            Some(list) => list.clone(),
+            None => DEFAULT_EXCLUDE_DIRS.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     /// [feature 20] 設定から `parser::Registry` を構築する。キー省略時は

@@ -30,6 +30,8 @@ pub struct KbServer {
     /// `rebuild_index` ツールで markdown パース時に使う除外見出し。
     /// `None` のときは [`markdown::DEFAULT_EXCLUDED_HEADINGS`] を使う。
     exclude_headings: Option<Vec<String>>,
+    /// `rebuild_index` ツールで walkdir 時にスキップするディレクトリ basename。
+    exclude_dirs: Vec<String>,
     /// feature 13: 既定の品質フィルタしきい値。`search` / graph で適用。
     /// 0.0 ならフィルタ無効。
     quality_threshold: f32,
@@ -422,6 +424,7 @@ impl KbServer {
             &self.kb_path,
             force,
             self.exclude_headings.as_deref(),
+            &self.exclude_dirs,
             &self.parser_registry,
         ) {
             Ok(result) => {
@@ -626,6 +629,7 @@ pub struct KbServerShared {
     pub rerank_by_default: bool,
     pub kb_path: PathBuf,
     pub exclude_headings: Option<Vec<String>>,
+    pub exclude_dirs: Vec<String>,
     pub quality_threshold: f32,
     pub best_practice_templates: Vec<String>,
     pub parser_registry: Arc<Registry>,
@@ -642,6 +646,7 @@ impl KbServer {
             rerank_by_default: shared.rerank_by_default,
             kb_path: shared.kb_path.clone(),
             exclude_headings: shared.exclude_headings.clone(),
+            exclude_dirs: shared.exclude_dirs.clone(),
             quality_threshold: shared.quality_threshold,
             best_practice_templates: shared.best_practice_templates.clone(),
             parser_registry: Arc::clone(&shared.parser_registry),
@@ -658,6 +663,7 @@ pub async fn run_server(
     reranker_choice: RerankerChoice,
     rerank_by_default: bool,
     exclude_headings: Option<Vec<String>>,
+    exclude_dirs: Vec<String>,
     quality_threshold: f32,
     best_practice_templates: Vec<String>,
     parser_registry: Registry,
@@ -683,6 +689,7 @@ pub async fn run_server(
         rerank_by_default,
         kb_path: kb_path.clone(),
         exclude_headings,
+        exclude_dirs,
         quality_threshold,
         best_practice_templates,
         parser_registry: Arc::new(parser_registry),
@@ -695,6 +702,7 @@ pub async fn run_server(
         embedder: Arc::clone(&shared.embedder),
         registry: Arc::clone(&shared.parser_registry),
         exclude_headings: shared.exclude_headings.clone(),
+        exclude_dirs: shared.exclude_dirs.clone(),
         config: watch_config,
     };
     let watcher_handle = tokio::spawn(async move {

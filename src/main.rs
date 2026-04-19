@@ -280,6 +280,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(true);
 
             let exclude_headings = cfg.exclude_headings.clone();
+            let exclude_dirs = cfg.resolve_exclude_dirs();
             let quality_threshold = cfg
                 .quality_filter
                 .clone()
@@ -329,6 +330,7 @@ fn main() -> anyhow::Result<()> {
                     reranker,
                     rerank_by_default,
                     exclude_headings,
+                    exclude_dirs,
                     quality_threshold,
                     best_practice_templates,
                     parser_registry,
@@ -360,12 +362,14 @@ fn main() -> anyhow::Result<()> {
             }
             let registry = cfg.build_parser_registry()?;
             eprintln!("Indexing {}...", kb_path.display());
+            let exclude_dirs = cfg.resolve_exclude_dirs();
             let result = indexer::rebuild_index(
                 &db,
                 &mut embedder,
                 &kb_path,
                 force,
                 cfg.exclude_headings.as_deref(),
+                &exclude_dirs,
                 &registry,
             )?;
             eprintln!(
@@ -518,7 +522,8 @@ fn main() -> anyhow::Result<()> {
             // canonicalize は使わない: walkdir は相対パスでも動作し、strip_prefix
             // も同形のパスで一致する。Windows の UNC (\\?\) prefix 漏れを避ける。
             let schema_path = schema.unwrap_or_else(|| kb_path.join("kb-mcp-schema.toml"));
-            let exit = run_validate(&kb_path, &schema_path, format, no_color, fail_fast)?;
+            let exclude_dirs = cfg.resolve_exclude_dirs();
+            let exit = run_validate(&kb_path, &schema_path, format, no_color, fail_fast, &exclude_dirs)?;
             std::process::exit(exit);
         }
     }
@@ -533,6 +538,7 @@ fn run_validate(
     format: ValidateFormat,
     no_color: bool,
     fail_fast: bool,
+    exclude_dirs: &[String],
 ) -> Result<i32> {
     // スキーマ読み込み: 存在しなければ pre-feature-17 挙動 (exit 0)
     let schema_obj = match schema::Schema::load_optional(schema_path) {
@@ -553,7 +559,7 @@ fn run_validate(
     // parser registry は `[parsers].enabled` 準拠で .md ファイル列挙に再利用
     // (.txt は frontmatter 概念なしで対象外)。
     let md_parser = parser::MarkdownParser;
-    let files = validate_collect_md_files(kb_path)?;
+    let files = validate_collect_md_files(kb_path, exclude_dirs)?;
 
     let mut reports: Vec<FileReport> = Vec::new();
     let mut scanned: u32 = 0;
@@ -601,14 +607,17 @@ fn run_validate(
     Ok(if has_violation { 1 } else { 0 })
 }
 
-/// validate 専用の `.md` ファイル列挙。`.obsidian/` スキップと
+/// validate 専用の `.md` ファイル列挙。除外ディレクトリスキップと
 /// deterministic ordering は indexer の collect_source_files と同じ方針。
-fn validate_collect_md_files(kb_path: &Path) -> Result<Vec<PathBuf>> {
+fn validate_collect_md_files(kb_path: &Path, exclude_dirs: &[String]) -> Result<Vec<PathBuf>> {
     use walkdir::WalkDir;
     let mut out = Vec::new();
     for entry in WalkDir::new(kb_path).follow_links(false).into_iter().filter_entry(|e| {
+        if !e.file_type().is_dir() {
+            return true;
+        }
         let name = e.file_name().to_string_lossy();
-        !(e.file_type().is_dir() && name == ".obsidian")
+        !exclude_dirs.iter().any(|d| d.as_str() == name.as_ref())
     }) {
         let entry = entry.context("walkdir error during validate")?;
         if entry.file_type().is_file()
