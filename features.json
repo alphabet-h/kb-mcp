@@ -117,9 +117,9 @@
     {
       "id": 17,
       "category": "upgrade-tools",
-      "description": "Frontmatter スキーマ検証 (schema_infer / schema_validate)",
-      "status": "failing",
-      "verification": "kb-mcp validate でスキーマ違反ファイルを検出しレポートを出力する"
+      "description": "Frontmatter スキーマ検証 (独自 TOML DSL + kb-mcp validate CLI)",
+      "status": "passing",
+      "verification": "kb_path 直下の kb-mcp-schema.toml で title/date/topic/depth/tags に required / type / pattern / enum / min/max_length / allow_empty を指定し、kb-mcp validate が違反ファイルを text / json / github 形式で出力。exit 0 (no) / 1 (violations) / 2 (schema load error)。schema 不在なら exit 0 で pre-feature-17 挙動維持、index / serve 非侵襲"
     },
     {
       "id": 18,

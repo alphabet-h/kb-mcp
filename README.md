@@ -278,6 +278,44 @@ If you edit the knowledge base from inside a Claude Code session (or run a skill
 
 SHA-256 diffing in `kb-mcp index` makes the second-and-later invocations fast (usually sub-second on small KBs). A richer shell script that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH` ships with the repo: see [`examples/hooks/`](./examples/hooks/README.md). SQLite runs in WAL mode so the hook can safely run while the MCP server is still up.
 
+### Frontmatter schema validation (feature 17)
+
+If your knowledge base follows a frontmatter convention (e.g. `title` required, `date` is YYYY-MM-DD, `topic` limited to an enum), you can check every `.md` file for violations with:
+
+```bash
+kb-mcp validate --kb-path /path/to/knowledge-base
+```
+
+Put a `kb-mcp-schema.toml` at the root of `--kb-path` (template: `kb-mcp-schema.toml.example`):
+
+```toml
+[fields.title]
+required = true
+type = "string"
+min_length = 1
+
+[fields.date]
+required = true
+type = "string"
+pattern = '^\d{4}-\d{2}-\d{2}$'
+
+[fields.topic]
+required = true
+type = "string"
+enum = ["mcp", "rag", "ai", "tooling", "ops"]
+
+[fields.tags]
+required = true
+type = "array"
+min_length = 1
+```
+
+- **No schema file → exit 0** with a short "no schema found" note. Pre-feature-17 behavior is preserved.
+- `--format text` (default, color when TTY) / `json` / `github` for CI annotations.
+- Exit codes: `0` (no violations), `1` (violations), `2` (schema load error).
+- `.txt` files are skipped (no frontmatter concept).
+- The `index` and `serve` commands are not affected — validation is opt-in only.
+
 ### HTTP transport for multiple simultaneous clients (feature 18)
 
 By default `kb-mcp serve` speaks MCP over stdio — one client per server process. To serve multiple clients simultaneously (e.g. several Claude Code sessions or an external script hitting the same index), switch to Streamable HTTP:

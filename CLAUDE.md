@@ -116,6 +116,7 @@ bind = "127.0.0.1:3100"
 | `src/markdown.rs` | Parser trait への移行後は `crate::parser::markdown::MarkdownParser` への薄い shim (legacy `parse()` / `parse_with_excludes()` 公開 API を維持) |
 | `src/watcher.rs` | [feature 12] `notify-debouncer-full` を tokio channel 越しに受信し、拡張子フィルタ + path filter (`.obsidian/`) を経由して `indexer::{reindex,deindex,rename}_single_file` にディスパッチ。server 並走は `tokio::spawn` |
 | `src/transport/` | [feature 18] MCP transport 抽象。`mod.rs` に `Transport` enum + CLI/config 解決、`stdio.rs` は既存 stdio 経路、`http.rs` は rmcp `StreamableHttpService` + axum 0.8 で `/mcp` マウント + `/healthz`。`KbServerShared` を Arc 共有し session factory で軽量生成 |
+| `src/schema.rs` | [feature 17] frontmatter スキーマ検証。`kb-mcp-schema.toml` を `kb_path` 直下から読み、required / type / pattern / enum / min/max_length / allow_empty を検証。`kb-mcp validate` CLI から呼ばれ text / json / github 形式でレポート |
 | `src/embedder.rs` | fastembed-rs の薄いラッパ。`ModelChoice` で埋め込みモデル (BGE-small-en-v1.5 / BGE-M3) を、`RerankerChoice` + `Reranker` で optional な cross-encoder 再ランクを提供 |
 | `src/db.rs` | rusqlite + sqlite-vec + FTS5 (trigram)。`chunks` / `vec_chunks` / `fts_chunks` の schema と CRUD、`search_hybrid` (RRF k=60) を提供 |
 

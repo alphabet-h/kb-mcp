@@ -1239,3 +1239,132 @@ port.is_some())` なら anyhow::bail!。親切なメッセージ:
 - cargo test --test http_transport: 1 ignored (integration、DL 前提)
 - cargo clippy --all-targets -- -D warnings: クリーン
 - cargo build --release: 成功
+
+## 2026-04-19: feature 17 (Frontmatter スキーマ検証) 仕様策定
+
+残 1 件の #17 に着手。planner 仕様を docs/plans/feature-17-frontmatter-schema.md
+に保存。
+
+### 採用予定の方針
+- 独自 TOML DSL (kb-mcp-schema.toml) を kb_path 直下に配置
+- バリデータは自前実装 (JSON Schema は非採用、階層 C 維持)
+- `kb-mcp validate` サブコマンド専用 (index/serve 統合は EXT-2)
+- 検証項目: required / type / pattern / enum / min/max_length
+- format: text / json / github の 3 種
+- exit code: 0 / 1 / 2
+- regex crate 追加依存 (~500KB)
+- .md のみ対象 (.txt skip)
+- スキーマ不在なら pre-feature-17 挙動を完全維持
+
+### スコープ
+- MVP (~900 LOC、1-2 日)
+- 拡張 (EXT-1 glob / EXT-2 index 統合 / EXT-3 watcher / EXT-4 MCP tool) は別 feature
+
+### ユーザ確認待ち (6 点)
+1. MVP スコープ (MVP-1〜7) で先に merge、EXT は別 feature
+2. ファイル名 kb-mcp-schema.toml + kb_path 直下
+3. MVP は .md のみ
+4. format 3 種 + TTY text デフォルト
+5. exit code 0/1/2
+6. regex crate 追加依存 ~500KB
+
+## 2026-04-19: feature 17 実装完了 (Frontmatter スキーマ検証)
+
+ユーザ確認 6 点「提案通り」で合意 → 実装。
+
+### 新設
+- src/schema.rs: RawSchema / FieldRule / FieldType / Schema / CompiledRule /
+  Violation enum + validate(fm, schema) 関数、19 ユニットテスト
+  - required / type / pattern / enum / min_length / max_length / allow_empty
+  - 未サポートキー reject、無効 regex reject、array への pattern reject
+  - check_string / check_tags をフィールド種別ごとに分離
+- kb-mcp-schema.toml.example: ai_organization 向けサンプル
+
+### 変更
+- Cargo.toml: regex = "1" 追加
+- src/main.rs: schema モジュール pub 宣言 + Commands::Validate 追加
+  - `--kb-path / --schema / --format text|json|github / --no-color / --fail-fast`
+  - exit code: 0 (no violations) / 1 (violations) / 2 (schema load error)
+  - schema 不在時は exit 0 で pre-feature-17 挙動維持
+  - ValidateFormat enum で 3 出力形式を分離
+  - TTY 自動検出で text format の色付け切替 (`std::io::IsTerminal`)
+  - validate_collect_md_files で .md のみ列挙 (.obsidian skip + sort 済)
+  - print_validate_report で text/json/github を分岐
+
+### 更新
+- README.md: "Frontmatter schema validation" 節を追加
+- CLAUDE.md: src/schema.rs をアーキテクチャ表に追記
+- TODO.md: feature 17 を実装済にマーク、EXT-1〜4 を残タスクとして記載
+- features.json: feature 17 を passing に
+
+### Smoke test 結果 (実バイナリ)
+/tmp/kb-validate-test/knowledge-base に good.md + bad.md + schema を配置:
+- text format: 1 file with violations (1 OK) + 4 違反を人間向けに整形、exit 1
+- json format: scanned/violated/ok/files 構造の JSON、exit 1
+- github format: ::error file=... annotations × 4、exit 1
+- schema 削除 → "no schema found" + exit 0 (後方互換)
+
+### verification
+- cargo test --bins: 205 passed (186 → 205、+19 schema tests)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功
+
+### 見送り (将来拡張として TODO に記載)
+- EXT-1 path glob (`[[rules]] glob = ...`)
+- EXT-2 kb-mcp index 時の warn 統合
+- EXT-3 watcher 経由の違反通知
+- EXT-4 MCP ツール `validate_schema`
+- スキーマ推論 (basic-memory 由来)
+
+## 2026-04-19: feature 17 evaluator High/Med 反映
+
+evaluator PASS 30/40。High 2 件 + Med 2 件を反映。
+
+### High #1: --strict フラグ spec 明記されるが未実装 → 受理 no-op として追加
+main.rs の Validate に `--strict` (default_value_t = false) を追加し、run_validate
+内で `_strict` として受け取るが MVP では動作に影響しない (`Frontmatter` が固定
+スキーマのため未知キー概念が無い)。Spec 整合 + CI スクリプト互換のため parse
+エラーにならない形で受容。
+
+### High #2: type="integer"/"date" が silent pass
+Schema::compile 段階で Integer / Date を reject し、ユーザに pattern 使用を
+誘導する親切なメッセージを返す:
+"field X: type = \"integer\" is not implemented in MVP. Use type = \"string\"
+ with pattern = '...'"
+check_string からも Integer/Date 分岐を削除し string のみ許容に簡素化。
+
+### Med #3: allow_unknown_fields dead flag → SchemaOptions ごと削除
+RawSchema から options フィールドを削除、Schema からも options フィールドを
+削除。SchemaOptions struct 自体を削除。将来実装するときに追加で再導入する。
+
+### Med #4: CLI integration test 欠如 → tests/validate_cli.rs 追加
+5 テスト:
+- test_validate_no_schema_exits_zero (schema 不在 → exit 0 + "no schema found")
+- test_validate_violations_exit_one_json_format (違反あり → exit 1、JSON 形式
+  で scanned/violated/ok、違反 kind を検証)
+- test_validate_schema_load_error_exit_two (不正 regex → exit 2)
+- test_validate_ok_case_exit_zero (全 OK → exit 0 + "1 files OK")
+- test_validate_strict_flag_accepted_as_noop (--strict で clap parse エラーに
+  ならないことの回帰ガード)
+embedding DL 不要なので通常の cargo test に載せる (#[ignore] なし)。
+
+### Med #5: canonicalize による Windows UNC path 露出 → 削除
+run_validate 冒頭の `kb_path.canonicalize()?` を削除し、walkdir + strip_prefix
+が相対パスでも動作することを利用。schema load 失敗時のパス表示も UNC prefix が
+出なくなる。
+
+### Low (見送り)
+- Low #6 read 失敗ファイルの JSON 集計: 実害なし、pre-existing
+- Low #7 行番号固定: spec 明記、後続 EXT で拡張可
+- Low #8 ドキュメント整合: 既に --format text default の実装と README 一致
+
+### テスト追加
+- schema::tests::test_integer_type_is_rejected_in_mvp
+- schema::tests::test_date_type_is_rejected_in_mvp
+- tests/validate_cli.rs × 5
+
+### verification
+- cargo test --bins: 207 passed (205 → 207、+2 schema)
+- cargo test --test validate_cli: 5 passed (新規 integration)
+- cargo clippy --all-targets -- -D warnings: クリーン
+- cargo build --release: 成功

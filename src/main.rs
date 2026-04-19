@@ -6,6 +6,7 @@ pub mod indexer;
 pub mod markdown;
 pub mod parser;
 pub mod quality;
+pub mod schema;
 pub mod server;
 pub mod transport;
 pub mod watcher;
@@ -29,6 +30,40 @@ use std::path::{Path, PathBuf};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum SearchFormat {
+    /// JSON array of hit records (default, machine-readable)
+    Json,
+    /// Concatenated text blocks (title / path#heading / content, separated by ---)
+    Text,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ValidateFormat {
+    /// Human-readable (default). Uses ANSI color when stdout is a TTY.
+    Text,
+    /// JSON array for scripts / editors.
+    Json,
+    /// GitHub Actions annotations (`::error file=...::message`). Prints to
+    /// stdout so `$GITHUB_OUTPUT` / `$GITHUB_STEP_SUMMARY` can capture it.
+    Github,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum CliSeedStrategy {
+    AllChunks,
+    Centroid,
+}
+
+impl From<CliSeedStrategy> for graph::SeedStrategy {
+    fn from(c: CliSeedStrategy) -> Self {
+        match c {
+            CliSeedStrategy::AllChunks => graph::SeedStrategy::AllChunks,
+            CliSeedStrategy::Centroid => graph::SeedStrategy::Centroid,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -133,6 +168,34 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
         format: SearchFormat,
     },
+    /// [feature 17] Validate frontmatter against a TOML schema file.
+    ///
+    /// Scans `.md` files under --kb-path and reports frontmatter violations.
+    /// Exit code: 0 (no violations), 1 (violations), 2 (schema load error).
+    /// If the schema file is missing, reports "no schema found" and exits 0.
+    Validate {
+        /// Path to the knowledge-base directory
+        #[arg(long)]
+        kb_path: Option<PathBuf>,
+        /// Path to the schema TOML. Defaults to `<kb_path>/kb-mcp-schema.toml`.
+        #[arg(long)]
+        schema: Option<PathBuf>,
+        /// Output format: text (human), json (machine), github (CI annotations)
+        #[arg(long, value_enum, default_value_t = ValidateFormat::Text)]
+        format: ValidateFormat,
+        /// Disable ANSI color in text format (auto-disabled when stdout is not a TTY).
+        #[arg(long = "no-color", default_value_t = false)]
+        no_color: bool,
+        /// Exit 1 at the first violation without scanning the rest.
+        #[arg(long = "fail-fast", default_value_t = false)]
+        fail_fast: bool,
+        /// Treat unknown YAML keys in frontmatter as violations.
+        /// MVP では Frontmatter が固定スキーマのため no-op (accept するが現状
+        /// 動作に影響しない)。将来の `[options].allow_unknown_fields` 実装と
+        /// 合わせて有効化する予定。CI スクリプト互換のため accept のみ。
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+    },
     /// One-shot search from the command line (no MCP transport).
     /// Useful for shell scripts / skill bins where invoking the binary
     /// directly is simpler than talking MCP stdio.
@@ -169,29 +232,6 @@ enum Commands {
         #[arg(long = "include-low-quality", default_value_t = false)]
         include_low_quality: bool,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum SearchFormat {
-    /// JSON array of hit records (default, machine-readable)
-    Json,
-    /// Concatenated text blocks (title / path#heading / content, separated by ---)
-    Text,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum CliSeedStrategy {
-    AllChunks,
-    Centroid,
-}
-
-impl From<CliSeedStrategy> for graph::SeedStrategy {
-    fn from(c: CliSeedStrategy) -> Self {
-        match c {
-            CliSeedStrategy::AllChunks => graph::SeedStrategy::AllChunks,
-            CliSeedStrategy::Centroid => graph::SeedStrategy::Centroid,
-        }
-    }
 }
 
 /// Resolve the database path from a knowledge-base directory.
@@ -466,9 +506,221 @@ fn main() -> anyhow::Result<()> {
             let g = graph::build_connection_graph(&db, &start, &opts)?;
             print_graph(g, format);
         }
+        Commands::Validate {
+            kb_path,
+            schema,
+            format,
+            no_color,
+            fail_fast,
+            strict: _strict, // MVP では no-op (schema.rs 側の拡張待ち)
+        } => {
+            let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
+            // canonicalize は使わない: walkdir は相対パスでも動作し、strip_prefix
+            // も同形のパスで一致する。Windows の UNC (\\?\) prefix 漏れを避ける。
+            let schema_path = schema.unwrap_or_else(|| kb_path.join("kb-mcp-schema.toml"));
+            let exit = run_validate(&kb_path, &schema_path, format, no_color, fail_fast)?;
+            std::process::exit(exit);
+        }
     }
 
     Ok(())
+}
+
+/// [feature 17] validate サブコマンド本体。exit code (0/1/2) を返す。
+fn run_validate(
+    kb_path: &Path,
+    schema_path: &Path,
+    format: ValidateFormat,
+    no_color: bool,
+    fail_fast: bool,
+) -> Result<i32> {
+    // スキーマ読み込み: 存在しなければ pre-feature-17 挙動 (exit 0)
+    let schema_obj = match schema::Schema::load_optional(schema_path) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            eprintln!(
+                "kb-mcp validate: no schema found at {} (skipping)",
+                schema_path.display()
+            );
+            return Ok(0);
+        }
+        Err(e) => {
+            eprintln!("kb-mcp validate: schema load error: {e:#}");
+            return Ok(2);
+        }
+    };
+
+    // parser registry は `[parsers].enabled` 準拠で .md ファイル列挙に再利用
+    // (.txt は frontmatter 概念なしで対象外)。
+    let md_parser = parser::MarkdownParser;
+    let files = validate_collect_md_files(kb_path)?;
+
+    let mut reports: Vec<FileReport> = Vec::new();
+    let mut scanned: u32 = 0;
+    let mut violated: u32 = 0;
+    let mut has_violation = false;
+
+    for path in files {
+        scanned += 1;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("warning: failed to read {}: {e}", path.display());
+                continue;
+            }
+        };
+        let rel = path
+            .strip_prefix(kb_path)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        use parser::Parser as ParserTrait;
+        let parsed = md_parser.parse(&raw, &rel, &[]);
+        let violations = schema::validate(&parsed.frontmatter, &schema_obj);
+        if !violations.is_empty() {
+            violated += 1;
+            has_violation = true;
+            reports.push(FileReport {
+                path: rel,
+                violations,
+            });
+            if fail_fast {
+                break;
+            }
+        }
+    }
+
+    print_validate_report(
+        &reports,
+        scanned,
+        violated,
+        format,
+        no_color_for(no_color, format),
+    );
+
+    Ok(if has_violation { 1 } else { 0 })
+}
+
+/// validate 専用の `.md` ファイル列挙。`.obsidian/` スキップと
+/// deterministic ordering は indexer の collect_source_files と同じ方針。
+fn validate_collect_md_files(kb_path: &Path) -> Result<Vec<PathBuf>> {
+    use walkdir::WalkDir;
+    let mut out = Vec::new();
+    for entry in WalkDir::new(kb_path).follow_links(false).into_iter().filter_entry(|e| {
+        let name = e.file_name().to_string_lossy();
+        !(e.file_type().is_dir() && name == ".obsidian")
+    }) {
+        let entry = entry.context("walkdir error during validate")?;
+        if entry.file_type().is_file()
+            && let Some(ext) = entry.path().extension()
+            && ext.eq_ignore_ascii_case("md")
+        {
+            out.push(entry.into_path());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+struct FileReport {
+    path: String,
+    violations: Vec<schema::Violation>,
+}
+
+/// text format の色付けを stdout の TTY 状態に応じて自動 on/off。
+/// `--no-color` 指定または非 TTY なら false。
+fn no_color_for(explicit: bool, format: ValidateFormat) -> bool {
+    use std::io::IsTerminal;
+    if explicit {
+        return true;
+    }
+    if format != ValidateFormat::Text {
+        return true;
+    }
+    !std::io::stdout().is_terminal()
+}
+
+fn print_validate_report(
+    reports: &[FileReport],
+    scanned: u32,
+    violated: u32,
+    format: ValidateFormat,
+    no_color: bool,
+) {
+    match format {
+        ValidateFormat::Json => {
+            #[derive(serde::Serialize)]
+            struct JsonReport<'a> {
+                scanned: u32,
+                violated: u32,
+                ok: u32,
+                files: &'a [FileReportJson<'a>],
+            }
+            #[derive(serde::Serialize)]
+            struct FileReportJson<'a> {
+                path: &'a str,
+                violations: &'a [schema::Violation],
+            }
+            let files: Vec<FileReportJson> = reports
+                .iter()
+                .map(|r| FileReportJson {
+                    path: &r.path,
+                    violations: &r.violations,
+                })
+                .collect();
+            let ok = scanned.saturating_sub(violated);
+            let out = JsonReport {
+                scanned,
+                violated,
+                ok,
+                files: &files,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into())
+            );
+        }
+        ValidateFormat::Github => {
+            // `::error file=<path>::<message>` 形式。ファイル位置は frontmatter
+            // の行数を特定できれば better だが MVP では先頭固定 (line=1)。
+            for r in reports {
+                for v in &r.violations {
+                    let msg = v.message();
+                    let msg = msg.replace('\n', " ");
+                    println!(
+                        "::error file={},line=1,title=frontmatter::{msg}",
+                        r.path
+                    );
+                }
+            }
+        }
+        ValidateFormat::Text => {
+            let ok = scanned.saturating_sub(violated);
+            if reports.is_empty() {
+                println!("kb-mcp validate: {scanned} files OK");
+                return;
+            }
+            let header = format!(
+                "kb-mcp validate — {violated} file(s) with violations ({ok} OK)"
+            );
+            if no_color {
+                println!("{header}");
+            } else {
+                println!("\x1b[1;31m{header}\x1b[0m");
+            }
+            for r in reports {
+                println!();
+                if no_color {
+                    println!("{}", r.path);
+                } else {
+                    println!("\x1b[1;34m{}\x1b[0m", r.path);
+                }
+                for v in &r.violations {
+                    println!("  {}", v.message());
+                }
+            }
+        }
+    }
 }
 
 fn print_graph(g: graph::ConnectionGraph, format: SearchFormat) {
