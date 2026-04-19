@@ -83,7 +83,7 @@ thanks to diffing).
 - **Concurrency**: SQLite is configured in WAL mode, so a running MCP server
   and a hook-triggered `kb-mcp index` can coexist. The hook blocks the tool
   use until the rebuild finishes; for small KBs this is imperceptible.
-- **Quality filter (feature 13)**: rebuild respects `[quality_filter]` in
+- **Quality filter**: rebuild respects `[quality_filter]` in
   `kb-mcp.toml`. Backfill runs at the start of every `kb-mcp index` but is
   idempotent.
 - **Skipping rebuilds**: to disable temporarily without removing the hook,

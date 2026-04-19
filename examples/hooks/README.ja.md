@@ -67,5 +67,5 @@ Claude Code の [PostToolUse hook](https://docs.claude.com/en/docs/claude-code/h
 ## 補足
 
 - **並行実行**: SQLite は WAL モードで構成されているため、起動中の MCP サーバと hook トリガーの `kb-mcp index` が共存できる。hook は rebuild 完了までツール実行をブロックするが、小さな KB では気にならないほど速い
-- **品質フィルタ (feature 13)**: rebuild は `kb-mcp.toml` の `[quality_filter]` を尊重する。backfill は `kb-mcp index` の冒頭で毎回走るが冪等
+- **品質フィルタ**: rebuild は `kb-mcp.toml` の `[quality_filter]` を尊重する。backfill は `kb-mcp index` の冒頭で毎回走るが冪等
 - **一時的にスキップ**: hook を削除せず無効化したいときは、Tier B なら `KB_PATH=` (空) に、Tier A ならエントリをコメントアウトする

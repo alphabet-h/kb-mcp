@@ -39,20 +39,20 @@ exclude_headings = ["次の深堀り候補", "参考リンク"]
 # everything.
 # exclude_dirs = [".obsidian", ".git", "node_modules", "target", ".vscode", ".idea", "dist", ".next"]
 
-# Per-chunk quality filter (feature 13). Enabled by default, threshold 0.3.
-# Set `enabled = false` to restore pre-feature-13 behavior (return every chunk).
+# Per-chunk quality filter. Enabled by default, threshold 0.3.
+# Set `enabled = false` to restore the previous (filter-off) behavior (return every chunk).
 [quality_filter]
 enabled = true
 threshold = 0.3
 
-# Indexing extensions (feature 20). Omit the section to keep the pre-feature-20
+# Indexing extensions. Omit the section to keep the previous default
 # behavior (.md only). Opt-in to .txt via an explicit list. An empty array is
 # rejected to prevent silent "nothing is indexed" failures.
 # Currently supported ids: "md", "txt".
 [parsers]
 enabled = ["md", "txt"]
 
-# Live-sync file watcher (feature 12). When `kb-mcp serve` is running, changes
+# Live-sync file watcher. When `kb-mcp serve` is running, changes
 # under kb_path are detected and the affected files are re-indexed incrementally
 # within `debounce_ms`. Complementary to the PostToolUse hook: covers manual
 # edits, `git pull`, external scripts, etc. CLI `--no-watch` / `--debounce-ms`
@@ -61,7 +61,7 @@ enabled = ["md", "txt"]
 enabled = true
 debounce_ms = 500
 
-# Transport for `kb-mcp serve` (feature 18). `kind = "stdio"` (default)
+# Transport for `kb-mcp serve`. `kind = "stdio"` (default)
 # supports one client at a time; `kind = "http"` (Streamable HTTP) allows
 # many simultaneous clients at `/mcp`. `/healthz` returns 200 for health
 # checks. CLI `--transport http --port 3100` overrides.
@@ -84,7 +84,7 @@ kb-mcp index --kb-path /path/to/knowledge-base --force   # full re-index
 kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # switch to BGE-M3 (1024 dim, multilingual)
 ```
 
-Scans source files under the given directory, skipping `.obsidian/`. By default only `.md` is picked up (pre-feature-20 behavior). Add `[parsers].enabled = ["md", "txt"]` to `kb-mcp.toml` to also index `.txt` files — their title is derived from the filename (`deep-dive-2026.txt` → `"deep dive 2026"`) and the whole body becomes a single chunk. Files whose content hash has not changed since the last run are skipped unless `--force` is passed.
+Scans source files under the given directory, skipping `.obsidian/`. By default only `.md` is picked up (the default behavior). Add `[parsers].enabled = ["md", "txt"]` to `kb-mcp.toml` to also index `.txt` files — their title is derived from the filename (`deep-dive-2026.txt` → `"deep dive 2026"`) and the whole body becomes a single chunk. Files whose content hash has not changed since the last run are skipped unless `--force` is passed.
 
 `--model` accepts:
 - `bge-small-en-v1.5` (default) — 384 dim, English-focused, ~130 MB first download.
@@ -116,9 +116,7 @@ Practical recommendation: pick the model that matches your knowledge base's **pr
 kb-mcp serve --kb-path /path/to/knowledge-base
 kb-mcp serve --kb-path /path/to/knowledge-base --model bge-m3   # must match the indexed model
 kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder reranking
-kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP, multi-client (feature 18)
-kb-mcp serve --kb-path ... --no-watch                           # disable live-sync (feature 12)
-```
+kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP, multi-clientkb-mcp serve --kb-path ... --no-watch                           # disable live-sync```
 
 Starts the MCP server on stdio transport by default (one client at a time). Pass `--transport http --port <PORT>` (or `--bind <SOCKETADDR>`) to serve multiple clients simultaneously via Streamable HTTP — details in the [HTTP transport](#http-transport-for-multiple-simultaneous-clients-feature-18) section.
 
@@ -169,7 +167,7 @@ kb-mcp search "E0382" --category deep-dive --format json | jq '.[] | .path'
 kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # optional per-invocation rerank
 ```
 
-`--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The quality filter is on by default — pass `--include-low-quality` or `--min-quality 0` to restore pre-feature-13 behavior for a single query. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
+`--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The quality filter is on by default — pass `--include-low-quality` or `--min-quality 0` to restore the previous (filter-off) behavior for a single query. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
 
 Typical skill-bin use: a Claude Code skill places `kb-mcp.exe` + `kb-mcp.toml` in its `bin/`, then a command like `kb-mcp search "{{user_query}}" --format text --limit 3` returns a focused reference excerpt for the LLM to cite.
 
@@ -284,8 +282,7 @@ Or, if you placed a `kb-mcp.toml` next to the binary with those options set, the
 
 The server will be started automatically when the client connects.
 
-### Keeping the index fresh via PostToolUse hook (feature 19)
-
+### Keeping the index fresh via PostToolUse hook
 If you edit the knowledge base from inside a Claude Code session (or run a skill that writes Markdown files), the running MCP server will keep returning stale results until the index is rebuilt. A `PostToolUse` hook in `.claude/settings.json` can re-index automatically after every write. Minimal form:
 
 ```json
@@ -305,8 +302,7 @@ If you edit the knowledge base from inside a Claude Code session (or run a skill
 
 SHA-256 diffing in `kb-mcp index` makes the second-and-later invocations fast (usually sub-second on small KBs). A richer shell script that inspects the tool payload and only rebuilds when the edited file is under `$KB_PATH` ships with the repo: see [`examples/hooks/`](./examples/hooks/README.md). SQLite runs in WAL mode so the hook can safely run while the MCP server is still up.
 
-### Frontmatter schema validation (feature 17)
-
+### Frontmatter schema validation
 If your knowledge base follows a frontmatter convention (e.g. `title` required, `date` is YYYY-MM-DD, `topic` limited to an enum), you can check every `.md` file for violations with:
 
 ```bash
@@ -343,8 +339,7 @@ min_length = 1
 - `.txt` files are skipped (no frontmatter concept).
 - The `index` and `serve` commands are not affected — validation is opt-in only.
 
-### HTTP transport for multiple simultaneous clients (feature 18)
-
+### HTTP transport for multiple simultaneous clients
 By default `kb-mcp serve` speaks MCP over stdio — one client per server process. To serve multiple clients simultaneously (e.g. several Claude Code sessions or an external script hitting the same index), switch to Streamable HTTP:
 
 ```bash
@@ -370,8 +365,7 @@ Security notes:
 - rmcp's Streamable HTTP layer enforces Host header validation (loopback only by default) to prevent DNS rebinding attacks.
 - Mutex-based serialization inside the server means HTTP concurrent requests are still processed sequentially at the embedder / DB level (~10 qps expected for `search`). Heavy parallelism is a future enhancement.
 
-### Live-sync via file watcher (feature 12)
-
+### Live-sync via file watcher
 `kb-mcp serve` runs a `notify`-based file watcher by default. Any change under `--kb-path` (create / modify / delete / rename) is detected, debounced, and only the affected file is re-indexed. This covers manual editor saves, `git pull`, and external scripts — cases the PostToolUse hook cannot intercept.
 
 - **Default on**. `[watch].enabled = false` in `kb-mcp.toml` or `--no-watch` on the command line disables it.
@@ -418,9 +412,9 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
   2. OS cache dir joined with `fastembed` (Linux: `~/.cache/fastembed`, macOS: `~/Library/Caches/fastembed`, Windows: `%LOCALAPPDATA%\fastembed`).
   3. `.fastembed_cache` under the current working directory (final fallback).
 - **Index storage**: The SQLite database is stored as `.kb-mcp.db` in the **parent** directory of the `--kb-path` (i.e. the repository root when `--kb-path` points to `knowledge-base/`).
-- **Parser registry** (feature 20): only file extensions listed in `[parsers].enabled` are indexed. The section defaults to `["md"]` (pre-feature-20 behavior); `["md", "txt"]` opts into `.txt` where the title is derived from the filename. Unknown ids (e.g. `"pdf"` / `"rst"`) are rejected at startup; an empty array is also rejected to avoid silent "nothing is indexed" failures.
-- **Live-sync file watcher** (feature 12): `kb-mcp serve` spawns a `notify`-based watcher by default (`[watch].enabled = true`, 500 ms debounce). Manual saves, `git pull`, and external scripts are re-indexed incrementally on the same Mutex-guarded resources used by MCP tools, so concurrent triggers are serialized. Disable with `--no-watch` or `[watch].enabled = false`.
-- **HTTP transport** (feature 18): `--transport http --port 3100` serves MCP over rmcp's Streamable HTTP at `/mcp`, with `/healthz` for probes and a Mutex-serialized pipeline inside. Default bind is `127.0.0.1:3100` — `0.0.0.0` is opt-in and **has no built-in authentication yet**; restrict with a reverse proxy / firewall until that arrives.
+- **Parser registry**: only file extensions listed in `[parsers].enabled` are indexed. The section defaults to `["md"]` (the default behavior); `["md", "txt"]` opts into `.txt` where the title is derived from the filename. Unknown ids (e.g. `"pdf"` / `"rst"`) are rejected at startup; an empty array is also rejected to avoid silent "nothing is indexed" failures.
+- **Live-sync file watcher**: `kb-mcp serve` spawns a `notify`-based watcher by default (`[watch].enabled = true`, 500 ms debounce). Manual saves, `git pull`, and external scripts are re-indexed incrementally on the same Mutex-guarded resources used by MCP tools, so concurrent triggers are serialized. Disable with `--no-watch` or `[watch].enabled = false`.
+- **HTTP transport**: `--transport http --port 3100` serves MCP over rmcp's Streamable HTTP at `/mcp`, with `/healthz` for probes and a Mutex-serialized pipeline inside. Default bind is `127.0.0.1:3100` — `0.0.0.0` is opt-in and **has no built-in authentication yet**; restrict with a reverse proxy / firewall until that arrives.
 - **Embedding dimensions**: Depends on `--model`. BGE-small-en-v1.5 = 384, BGE-M3 = 1024. The chosen dim is declared on the `vec_chunks` virtual table and recorded in the `index_meta` table; a mismatch at runtime is detected and rejected.
 - **Incremental indexing**: Files are tracked by SHA-256 content hash. Only changed files are re-embedded on subsequent `index` runs (unless `--force` is passed). Moving / renaming a file without modifying its content is detected via hash match and handled as a `documents.path` UPDATE — the existing chunks, embeddings, and FTS rows are reused instead of being rebuilt. The rebuild summary reports the number of renames as `renamed` next to `updated` / `deleted`.
 - **Hybrid search (FTS5 + vector)**: The `search` tool combines SQLite FTS5 full-text search (trigram tokenizer, works for Japanese/CJK too; `heading` column is weighted 2× `content` in bm25) with the vector search via Reciprocal Rank Fusion (k=60). The returned `score` is the RRF score (higher = better), not a distance. Queries shorter than 3 characters fall back to vector-only (below the trigram minimum).
@@ -429,4 +423,4 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 - **Heading exclusion**: Sections whose heading text contains any of `exclude_headings` are dropped during chunking. The default is an empty list (keep every section); populate `exclude_headings` in `kb-mcp.toml` to opt in. Matching is substring-based (`heading.contains(pattern)`), so short patterns catch suffixed variants (`"参考リンク"` would also match `"## 参考リンク (旧)"`).
 - **Directory exclusion**: `walkdir` skips any directory whose basename matches an entry in `exclude_dirs`. The default list is `[".obsidian", ".git", "node_modules", "target", ".vscode", ".idea"]`. A user-specified list replaces the default entirely (no merging); `exclude_dirs = []` walks everything, including `.git/`.
 - **`get_best_practice` path templates**: the tool is opt-in and requires `[best_practice].path_templates` in `kb-mcp.toml`. Each template may use `{target}` as a placeholder (e.g. `"best-practices/{target}/PERFECT.md"` or `"docs/{target}.md"`). The server tries templates in order and returns the first existing file under `kb_path` (path-traversal attempts are rejected). Omitting the section — or writing `path_templates = []` — leaves the tool registered but makes it return a "not configured" error, so accidental calls fail loudly instead of silently retrieving an unrelated file.
-- **Per-chunk quality filter** (feature 13, **enabled by default** with threshold `0.3`): each indexed chunk gets a `quality_score` computed from three signals — length (< 30 chars → -0.6), boilerplate-only content (TBD / TODO / 詳細は後述 / etc. → -0.5), poor structure (single line < 80 chars → -0.3). Chunks scoring below the threshold are hidden from `search`, `kb-mcp search`, and `get_connection_graph`. Seed chunks of `get_connection_graph` are exempt. Disable the filter with `[quality_filter] enabled = false` in `kb-mcp.toml`, or opt out per-query with `--include-low-quality` (CLI) / `include_low_quality: true` (MCP). Override the threshold with `--min-quality 0.5` / `min_quality: 0.5`. Upgrading an existing index: the next `kb-mcp index` run transparently adds the `quality_score` column (ALTER TABLE) and backfills scores once (idempotent).
+- **Per-chunk quality filter** (**enabled by default** with threshold `0.3`): each indexed chunk gets a `quality_score` computed from three signals — length (< 30 chars → -0.6), boilerplate-only content (TBD / TODO / 詳細は後述 / etc. → -0.5), poor structure (single line < 80 chars → -0.3). Chunks scoring below the threshold are hidden from `search`, `kb-mcp search`, and `get_connection_graph`. Seed chunks of `get_connection_graph` are exempt. Disable the filter with `[quality_filter] enabled = false` in `kb-mcp.toml`, or opt out per-query with `--include-low-quality` (CLI) / `include_low_quality: true` (MCP). Override the threshold with `--min-quality 0.5` / `min_quality: 0.5`. Upgrading an existing index: the next `kb-mcp index` run transparently adds the `quality_score` column (ALTER TABLE) and backfills scores once (idempotent).

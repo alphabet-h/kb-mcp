@@ -39,19 +39,19 @@ exclude_headings = ["次の深堀り候補", "参考リンク"]
 # `[]` を明示すると全ディレクトリを走査する。
 # exclude_dirs = [".obsidian", ".git", "node_modules", "target", ".vscode", ".idea", "dist", ".next"]
 
-# チャンク単位の品質フィルタ (feature 13)。既定で有効、閾値 0.3。
-# `enabled = false` で feature 13 以前の挙動 (全チャンク返却) に戻せる。
+# チャンク単位の品質フィルタ。既定で有効、閾値 0.3。
+# `enabled = false` で 従来挙動 (全チャンク返却) に戻せる。
 [quality_filter]
 enabled = true
 threshold = 0.3
 
-# index 対象拡張子 (feature 20)。セクション省略で feature 20 以前の挙動
+# index 対象拡張子。セクション省略で デフォルト挙動
 # (.md のみ)。明示リストで .txt にオプトイン。空配列 [] は「何もインデッ
 # クスされない」事故を防ぐため拒否される。現在サポート id: "md" / "txt"。
 [parsers]
 enabled = ["md", "txt"]
 
-# ライブ同期ファイルウォッチャ (feature 12)。`kb-mcp serve` 実行中、
+# ライブ同期ファイルウォッチャ。`kb-mcp serve` 実行中、
 # kb_path 配下の変更が `debounce_ms` 窓内に検出され、該当ファイルのみ
 # 増分再インデックスされる。PostToolUse hook を補完する位置付け:
 # 手動編集 / `git pull` / 外部スクリプトをカバーする。CLI の
@@ -61,7 +61,7 @@ enabled = ["md", "txt"]
 enabled = true
 debounce_ms = 500
 
-# `kb-mcp serve` のトランスポート (feature 18)。`kind = "stdio"` (既定)
+# `kb-mcp serve` のトランスポート。`kind = "stdio"` (既定)
 # は 1 クライアント / サーバプロセス。`kind = "http"` (Streamable HTTP)
 # なら `/mcp` で複数クライアント同時接続が可能。`/healthz` は 200 OK を
 # 返しヘルスチェックに使える。CLI `--transport http --port 3100` で
@@ -85,7 +85,7 @@ kb-mcp index --kb-path /path/to/knowledge-base --force   # 完全再インデッ
 kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # BGE-M3 (1024 dim、多言語) に切替
 ```
 
-指定ディレクトリ配下のソースファイルを走査し、`.obsidian/` はスキップする。既定では `.md` のみ取り込み (feature 20 以前の挙動)。`kb-mcp.toml` に `[parsers].enabled = ["md", "txt"]` を追加すると `.txt` もインデックス対象になる (タイトルはファイル名から派生: `deep-dive-2026.txt` → `"deep dive 2026"`、本文全体が 1 チャンク)。前回実行時と content hash が変わっていないファイルは `--force` を渡さない限りスキップされる。
+指定ディレクトリ配下のソースファイルを走査し、`.obsidian/` はスキップする。既定では `.md` のみ取り込み (デフォルト挙動)。`kb-mcp.toml` に `[parsers].enabled = ["md", "txt"]` を追加すると `.txt` もインデックス対象になる (タイトルはファイル名から派生: `deep-dive-2026.txt` → `"deep dive 2026"`、本文全体が 1 チャンク)。前回実行時と content hash が変わっていないファイルは `--force` を渡さない限りスキップされる。
 
 `--model` が受け付ける値:
 - `bge-small-en-v1.5` (既定) — 384 次元、英語特化、初回 DL 約 130 MB
@@ -117,9 +117,7 @@ kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # BGE-M3 
 kb-mcp serve --kb-path /path/to/knowledge-base
 kb-mcp serve --kb-path /path/to/knowledge-base --model bge-m3   # index 時と一致必須
 kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder 再ランク
-kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP、複数クライアント (feature 18)
-kb-mcp serve --kb-path ... --no-watch                           # ライブ同期無効 (feature 12)
-```
+kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP、複数クライアントkb-mcp serve --kb-path ... --no-watch                           # ライブ同期無効```
 
 既定では stdio トランスポート (1 クライアント / サーバ) で MCP サーバを起動する。複数クライアントを同時接続するには `--transport http --port <PORT>` (または `--bind <SOCKETADDR>`) を渡し Streamable HTTP に切り替える — 詳細は [HTTP トランスポート (複数クライアント同時接続)](#http-トランスポート-複数クライアント同時接続-feature-18) 参照。
 
@@ -170,7 +168,7 @@ kb-mcp search "E0382" --category deep-dive --format json | jq '.[] | .path'
 kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # 呼び出し単位の再ランクも可
 ```
 
-`--format` は `json` (既定、`{score, path, title, heading, topic, date, content}` の配列) か `text` (`---` 区切りの LLM フレンドリなブロック)。他のフラグは `serve` と同じ: `--kb-path` / `--model` / `--reranker` / `--category` / `--topic` / `--limit`。品質フィルタは既定有効 — 単発クエリで feature 13 以前の挙動に戻すには `--include-low-quality` または `--min-quality 0` を渡す。`kb-mcp.toml` の既定値は `serve` / `index` と同じく適用される。
+`--format` は `json` (既定、`{score, path, title, heading, topic, date, content}` の配列) か `text` (`---` 区切りの LLM フレンドリなブロック)。他のフラグは `serve` と同じ: `--kb-path` / `--model` / `--reranker` / `--category` / `--topic` / `--limit`。品質フィルタは既定有効 — 単発クエリで フィルタ無効状態に戻すには `--include-low-quality` または `--min-quality 0` を渡す。`kb-mcp.toml` の既定値は `serve` / `index` と同じく適用される。
 
 典型的な skill-bin 用途: Claude Code の skill が `bin/` に `kb-mcp.exe` + `kb-mcp.toml` を同梱し、`kb-mcp search "{{user_query}}" --format text --limit 3` のようなコマンドで LLM が引用するための参照抜粋を返す。
 
@@ -285,8 +283,7 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 
 クライアント接続時にサーバが自動起動する。
 
-### PostToolUse hook による index 鮮度保守 (feature 19)
-
+### PostToolUse hook による index 鮮度保守
 Claude Code セッション内部からナレッジベースを編集する (または Markdown を書く skill を実行する) 場合、MCP サーバは再構築されるまで古い結果を返し続ける。`.claude/settings.json` の `PostToolUse` hook で書込み後に自動再 index できる。最小形:
 
 ```json
@@ -306,8 +303,7 @@ Claude Code セッション内部からナレッジベースを編集する (ま
 
 `kb-mcp index` の SHA-256 差分検出により 2 回目以降は高速 (小さな KB なら大抵 1 秒未満)。ツールペイロードを精査して編集ファイルが `$KB_PATH` 配下のときだけ再構築する、より精密なシェルスクリプトがリポジトリ同梱 — [`examples/hooks/`](./examples/hooks/README.ja.md) 参照。SQLite は WAL モードで動作するため、MCP サーバ起動中に hook が走っても安全。
 
-### Frontmatter スキーマ検証 (feature 17)
-
+### Frontmatter スキーマ検証
 ナレッジベースで frontmatter 規約を運用しているなら (例: `title` 必須、`date` は YYYY-MM-DD、`topic` は enum)、以下でファイル毎の違反をチェックできる:
 
 ```bash
@@ -338,14 +334,13 @@ type = "array"
 min_length = 1
 ```
 
-- **スキーマファイル無し → exit 0** と短い "no schema found" メッセージ。feature 17 以前の挙動を保持
+- **スキーマファイル無し → exit 0** と短い "no schema found" メッセージ。従来挙動を保持
 - `--format text` (既定、TTY では色付き) / `json` / `github` (CI annotation 用)
 - 終了コード: `0` (違反なし) / `1` (違反あり) / `2` (スキーマロードエラー)
 - `.txt` は frontmatter の概念が無いのでスキップ
 - `index` / `serve` コマンドには影響しない — 検証は opt-in のみ
 
-### HTTP トランスポート (複数クライアント同時接続) (feature 18)
-
+### HTTP トランスポート (複数クライアント同時接続)
 既定の `kb-mcp serve` は stdio で MCP を話す — 1 クライアント / サーバプロセス。複数クライアント同時接続 (例: 複数の Claude Code セッション、または外部スクリプトが同じ index を叩く) には Streamable HTTP に切替:
 
 ```bash
@@ -371,8 +366,7 @@ kb-mcp serve --kb-path /path/to/knowledge-base --transport http --port 3100
 - rmcp の Streamable HTTP 層は Host ヘッダ検証を強制 (既定で loopback のみ) し、DNS rebinding 攻撃を防ぐ
 - サーバ内部の Mutex ベース直列化により、HTTP の並列リクエストでも embedder / DB 層では逐次処理される (`search` で目安 10 qps 程度)。本格的な並列化は将来の拡張
 
-### ライブ同期 (file watcher) (feature 12)
-
+### ライブ同期 (file watcher)
 `kb-mcp serve` は既定で `notify` ベースのファイルウォッチャを走らせる。`--kb-path` 配下の任意の変更 (create / modify / delete / rename) が検知され、debounce ののち該当ファイルのみが再インデックスされる。手動の editor save・`git pull`・外部スクリプトといった、PostToolUse hook では捕まえられないケースをカバーする。
 
 - **既定 on**。`kb-mcp.toml` の `[watch].enabled = false` または CLI `--no-watch` で無効化
@@ -419,9 +413,9 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
   2. OS キャッシュ + `fastembed` (Linux: `~/.cache/fastembed`、macOS: `~/Library/Caches/fastembed`、Windows: `%LOCALAPPDATA%\fastembed`)
   3. CWD 直下の `.fastembed_cache` (最終フォールバック)
 - **インデックス保存先**: SQLite DB は `--kb-path` の**親ディレクトリ**に `.kb-mcp.db` として保存される (例: `--kb-path ./knowledge-base` ならリポジトリルート)
-- **Parser registry** (feature 20): `[parsers].enabled` に列挙された拡張子のみインデックス対象。既定は `["md"]` (feature 20 以前)、`["md", "txt"]` で `.txt` にオプトイン (タイトルはファイル名派生)。未知 id (例: `"pdf"` / `"rst"`) は起動時に拒否、空配列も「何もインデックスされない」事故防止のため拒否
-- **ライブ同期ウォッチャ** (feature 12): `kb-mcp serve` は `notify` ベースの watcher を既定 spawn (`[watch].enabled = true`、500ms debounce)。手動 save / `git pull` / 外部スクリプトを MCP ツールと同じ Mutex 付きリソース上で増分再インデックスするため、同時トリガは直列化される。`--no-watch` / `[watch].enabled = false` で無効化
-- **HTTP トランスポート** (feature 18): `--transport http --port 3100` で rmcp の Streamable HTTP を `/mcp` に提供し、`/healthz` をプローブ用、内部は Mutex 直列化。既定 bind は `127.0.0.1:3100`、`0.0.0.0` は明示 opt-in かつ**まだ認証機構無し** — リバースプロキシ / ファイアウォール側で保護すること
+- **Parser registry**: `[parsers].enabled` に列挙された拡張子のみインデックス対象。既定は `["md"]` (従来デフォルト)、`["md", "txt"]` で `.txt` にオプトイン (タイトルはファイル名派生)。未知 id (例: `"pdf"` / `"rst"`) は起動時に拒否、空配列も「何もインデックスされない」事故防止のため拒否
+- **ライブ同期ウォッチャ**: `kb-mcp serve` は `notify` ベースの watcher を既定 spawn (`[watch].enabled = true`、500ms debounce)。手動 save / `git pull` / 外部スクリプトを MCP ツールと同じ Mutex 付きリソース上で増分再インデックスするため、同時トリガは直列化される。`--no-watch` / `[watch].enabled = false` で無効化
+- **HTTP トランスポート**: `--transport http --port 3100` で rmcp の Streamable HTTP を `/mcp` に提供し、`/healthz` をプローブ用、内部は Mutex 直列化。既定 bind は `127.0.0.1:3100`、`0.0.0.0` は明示 opt-in かつ**まだ認証機構無し** — リバースプロキシ / ファイアウォール側で保護すること
 - **埋め込み次元**: `--model` で決まる。BGE-small-en-v1.5 = 384、BGE-M3 = 1024。選択した次元は `vec_chunks` 仮想テーブルに宣言され `index_meta` に記録される。実行時の不一致は検出して拒否
 - **増分インデックス**: ファイルは SHA-256 content hash で追跡。以降の `index` 実行では変更されたファイルのみ再 embedding される (`--force` を渡さない限り)。内容を変えずに移動 / リネームすると hash 一致で検知され `documents.path` の UPDATE として処理 — 既存の chunk / embedding / FTS 行は再利用される。再構築サマリでは `updated` / `deleted` の隣に `renamed` としてカウントされる
 - **ハイブリッド検索 (FTS5 + ベクトル)**: `search` ツールは SQLite FTS5 全文検索 (trigram tokenizer、日本語 / CJK も動く。bm25 では `heading` 列を `content` の 2 倍重み) をベクトル検索と Reciprocal Rank Fusion (k=60) でマージする。返される `score` は RRF スコア (大きいほど良い) で距離ではない。3 文字未満のクエリは trigram の最小値を下回るためベクトルのみにフォールバック
@@ -430,4 +424,4 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 - **見出し除外**: 見出しテキストが `exclude_headings` のいずれかを含むセクションは、チャンキング時に落とされる。既定は空リスト (全セクション残す)。`kb-mcp.toml` の `exclude_headings` に substring を列挙するとオプトインになる。マッチは部分文字列 (`heading.contains(pattern)`) で、短いパターンは `"参考リンク"` → `"## 参考リンク (旧)"` のような変種も拾う
 - **ディレクトリ除外**: `walkdir` は basename が `exclude_dirs` のいずれかと一致するディレクトリ (とその subtree) をスキップする。既定は `[".obsidian", ".git", "node_modules", "target", ".vscode", ".idea"]`。ユーザ指定リストは既定を完全に置き換える (merge ではない)。`exclude_dirs = []` を明示すると `.git/` 等も含めて全走査する
 - **`get_best_practice` path templates**: opt-in 機能で、使うには `kb-mcp.toml` の `[best_practice].path_templates` を設定する必要がある。各テンプレートは `{target}` をプレースホルダとして使える (例: `"best-practices/{target}/PERFECT.md"`、`"docs/{target}.md"`)。サーバはリスト順に試して `kb_path` 配下に最初に存在したファイルを返す (path traversal は拒否)。セクション省略 or `path_templates = []` の場合はツール自体は登録されるが "not configured" エラーを返すため、意図しない呼び出しは明示的に失敗する
-- **チャンク単位品質フィルタ** (feature 13、**既定有効** 閾値 `0.3`): インデックス時に各チャンクに対し 3 つのシグナル — 長さ (30 文字未満 → -0.6)、定型語のみ (TBD / TODO / 詳細は後述 等 → -0.5)、弱い構造 (80 文字未満の 1 行 → -0.3) — から `quality_score` を計算。閾値未満のチャンクは `search` / `kb-mcp search` / `get_connection_graph` で非表示。`get_connection_graph` の seed チャンクは免除。フィルタ無効化は `kb-mcp.toml` の `[quality_filter] enabled = false`、per-query は CLI `--include-low-quality` / MCP `include_low_quality: true`。閾値上書きは `--min-quality 0.5` / `min_quality: 0.5`。既存 index のアップグレード: 次の `kb-mcp index` 実行時に `quality_score` 列が透過的に追加され (ALTER TABLE)、1 度だけ backfill される (冪等)
+- **チャンク単位品質フィルタ** (**既定有効** 閾値 `0.3`): インデックス時に各チャンクに対し 3 つのシグナル — 長さ (30 文字未満 → -0.6)、定型語のみ (TBD / TODO / 詳細は後述 等 → -0.5)、弱い構造 (80 文字未満の 1 行 → -0.3) — から `quality_score` を計算。閾値未満のチャンクは `search` / `kb-mcp search` / `get_connection_graph` で非表示。`get_connection_graph` の seed チャンクは免除。フィルタ無効化は `kb-mcp.toml` の `[quality_filter] enabled = false`、per-query は CLI `--include-low-quality` / MCP `include_low_quality: true`。閾値上書きは `--min-quality 0.5` / `min_quality: 0.5`。既存 index のアップグレード: 次の `kb-mcp index` 実行時に `quality_score` 列が透過的に追加され (ALTER TABLE)、1 度だけ backfill される (冪等)

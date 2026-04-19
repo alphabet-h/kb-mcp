@@ -47,7 +47,7 @@
 # 例: 除外を全部外して全ディレクトリを走査したい場合:
 #exclude_dirs = []
 
-# 検索時のチャンク品質フィルタ (feature 13)。
+# 検索時のチャンク品質フィルタ。
 # enabled を false にすると MCP search / CLI search / get_connection_graph
 # すべてでフィルタが無効になり、従来の全件返却動作に戻る。
 # threshold は 0.0 から 1.0 の範囲で、未満のスコアのチャンクを除外する。
@@ -65,9 +65,9 @@ threshold = 0.3
 [best_practice]
 path_templates = ["best-practices/{target}/PERFECT.md", "docs/{target}.md"]
 
-# Indexing 対象の拡張子レジストリ (feature 20)。
+# Indexing 対象の拡張子レジストリ。
 # 3 状態セマンティクス:
-#   - セクション自体なし        … ["md"] のみ (pre-feature-20 完全後方互換)
+#   - セクション自体なし        … ["md"] のみ (デフォルト)
 #   - 明示的な空配列           … エラー (silent failure 防止)
 #   - 独自リスト                … そのリストに含まれる拡張子だけを対象に
 # 現状のバイナリで対応する id: "md" / "txt"
@@ -76,7 +76,7 @@ path_templates = ["best-practices/{target}/PERFECT.md", "docs/{target}.md"]
 [parsers]
 enabled = ["md", "txt"]
 
-# ファイルウォッチャー (feature 12)。`kb-mcp serve` 中のみ有効。
+# ファイルウォッチャー。`kb-mcp serve` 中のみ有効。
 # 有効時は kb_path 配下の変更 / 追加 / 削除 / rename を検知して
 # 該当ファイルだけを増分再インデックスする (PostToolUse hook が拾えない
 # 手動編集・git pull・外部スクリプト経由の更新もカバー)。
@@ -86,8 +86,8 @@ enabled = ["md", "txt"]
 enabled = true
 debounce_ms = 500
 
-# トランスポート設定 (feature 18)。`kb-mcp serve` が listen する方式を選ぶ。
-# kind は "stdio" (1 クライアント限定、pre-feature-18 既定) か "http"
+# トランスポート設定。`kb-mcp serve` が listen する方式を選ぶ。
+# kind は "stdio" (1 クライアント限定、既定) か "http"
 # (Streamable HTTP、複数クライアント同時接続可)。省略 (セクション自体なし)
 # なら stdio。[transport.http] だけ書けば kind 省略でも http 扱い (糖衣)。
 # HTTP 時の mount path は /mcp 固定、/healthz が 200 を返す。CLI

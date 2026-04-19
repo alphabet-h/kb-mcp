@@ -1,8 +1,8 @@
-# kb-mcp frontmatter スキーマのサンプル (feature 17)。
+# kb-mcp frontmatter スキーマのサンプル。
 #
 # このファイルを `<kb-path>/kb-mcp-schema.toml` にコピーして使う。
 # スキーマファイルが存在しない場合、`kb-mcp validate` は "no schema found"
-# として exit 0 で終了する (pre-feature-17 と完全同一挙動)。
+# として exit 0 で終了する (検証を有効化していない状態と同じ挙動)。
 #
 # フィールド単位で以下の制約が書ける:
 #   required      : true なら欠落 / 空文字列 / 空配列は違反
