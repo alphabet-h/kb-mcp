@@ -17,7 +17,11 @@ fn kb_mcp_bin() -> Option<PathBuf> {
     let target = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     #[cfg(windows)]
     let bin = target.join(profile).join("kb-mcp.exe");
     #[cfg(not(windows))]
@@ -76,12 +80,15 @@ fn test_validate_no_schema_exits_zero() {
     };
     let kb = TempKb::new("kb-validate-noschema");
     kb.write("a.md", "---\ntitle: X\n---\n# body\n");
-    let (code, _out, err) = run(
-        &bin,
-        &["validate", "--kb-path", kb.path.to_str().unwrap()],
+    let (code, _out, err) = run(&bin, &["validate", "--kb-path", kb.path.to_str().unwrap()]);
+    assert_eq!(
+        code, 0,
+        "exit should be 0 when schema is absent: stderr={err}"
     );
-    assert_eq!(code, 0, "exit should be 0 when schema is absent: stderr={err}");
-    assert!(err.contains("no schema found"), "expected info message, got: {err}");
+    assert!(
+        err.contains("no schema found"),
+        "expected info message, got: {err}"
+    );
 }
 
 #[test]
@@ -169,11 +176,11 @@ fn test_validate_schema_load_error_exit_two() {
 pattern = '[unclosed'
 "#,
     );
-    let (code, _out, err) = run(
-        &bin,
-        &["validate", "--kb-path", kb.path.to_str().unwrap()],
+    let (code, _out, err) = run(&bin, &["validate", "--kb-path", kb.path.to_str().unwrap()]);
+    assert_eq!(
+        code, 2,
+        "exit should be 2 on schema load error: stderr={err}"
     );
-    assert_eq!(code, 2, "exit should be 2 on schema load error: stderr={err}");
     assert!(err.contains("schema load error"));
 }
 

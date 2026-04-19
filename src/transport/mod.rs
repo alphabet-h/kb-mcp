@@ -114,10 +114,13 @@ fn resolve_http_addr(
     if let Some(port) = cli_port {
         return Ok(SocketAddr::from(([127, 0, 0, 1], port)));
     }
-    if let Some(bind_str) = cfg.and_then(|c| c.http.as_ref()).and_then(|h| h.bind.as_deref()) {
-        return bind_str
-            .parse()
-            .map_err(|e| anyhow::anyhow!("[transport.http].bind is not a valid SocketAddr: {bind_str}: {e}"));
+    if let Some(bind_str) = cfg
+        .and_then(|c| c.http.as_ref())
+        .and_then(|h| h.bind.as_deref())
+    {
+        return bind_str.parse().map_err(|e| {
+            anyhow::anyhow!("[transport.http].bind is not a valid SocketAddr: {bind_str}: {e}")
+        });
     }
     Ok(SocketAddr::from(([127, 0, 0, 1], DEFAULT_HTTP_PORT)))
 }

@@ -38,8 +38,7 @@ fn detect_renames(
     disk_entries: &[DiskEntry],
     db_path_hashes: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, String)> {
-    let disk_paths: HashSet<&str> =
-        disk_entries.iter().map(|e| e.rel.as_str()).collect();
+    let disk_paths: HashSet<&str> = disk_entries.iter().map(|e| e.rel.as_str()).collect();
 
     // DB ∖ disk, path で sort
     let mut orphan_in_db: Vec<(&String, &String)> = db_path_hashes
@@ -202,14 +201,7 @@ pub fn rebuild_index(
     for entry in &disk_entries {
         visited_paths.insert(entry.rel.clone());
 
-        match index_single_disk_entry(
-            db,
-            embedder,
-            entry,
-            exclude_headings,
-            registry,
-            force,
-        )? {
+        match index_single_disk_entry(db, embedder, entry, exclude_headings, registry, force)? {
             SingleResult::Updated { chunks } => {
                 updated += 1;
                 eprintln!("  indexed: {} ({} chunks)", entry.rel, chunks);
@@ -351,8 +343,7 @@ fn index_single_disk_entry(
         .with_context(|| format!("failed to embed chunks for {}", entry.rel))?;
 
     for (chunk, embedding) in parsed.chunks.iter().zip(embeddings.iter()) {
-        let score =
-            quality::chunk_quality_score(chunk.heading.as_deref(), &chunk.content);
+        let score = quality::chunk_quality_score(chunk.heading.as_deref(), &chunk.content);
         db.insert_chunk(
             doc_id,
             chunk.index as i32,
@@ -498,9 +489,7 @@ fn collect_source_files(
         if entry.file_type().is_file()
             && let Some(ext) = entry.path().extension()
             && let Some(ext_str) = ext.to_str()
-            && extensions
-                .iter()
-                .any(|e| e.eq_ignore_ascii_case(ext_str))
+            && extensions.iter().any(|e| e.eq_ignore_ascii_case(ext_str))
         {
             files.push(entry.into_path());
         }
@@ -561,7 +550,10 @@ mod tests {
         db.insert("old/x.md".to_string(), "h1".to_string());
         db.insert("keep.md".to_string(), "h2".to_string());
         let pairs = detect_renames(&disk, &db);
-        assert_eq!(pairs, vec![("old/x.md".to_string(), "new/x.md".to_string())]);
+        assert_eq!(
+            pairs,
+            vec![("old/x.md".to_string(), "new/x.md".to_string())]
+        );
     }
 
     #[test]
@@ -641,8 +633,7 @@ mod tests {
 
     #[test]
     fn test_extract_category_topic_very_deep_path() {
-        let (cat, topic) =
-            extract_category_topic("tech-watch/anthropic/subdir/2026-04-16.md");
+        let (cat, topic) = extract_category_topic("tech-watch/anthropic/subdir/2026-04-16.md");
         assert_eq!(cat.as_deref(), Some("tech-watch"));
         assert_eq!(topic.as_deref(), Some("anthropic"));
     }
@@ -789,7 +780,13 @@ mod tests {
         let f2 = collect_source_files(&tmp.0, &reg, &[".obsidian".to_string()]).unwrap();
         assert_eq!(f1, f2);
         // First one should be aaa
-        assert!(f1[0].file_name().unwrap().to_string_lossy().starts_with("aaa"));
+        assert!(
+            f1[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("aaa")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -869,16 +866,7 @@ mod tests {
     fn test_update_document_meta_missing_path_returns_false() {
         let db = test_db();
         let updated = db
-            .update_document_meta(
-                "never-existed.md",
-                None,
-                None,
-                None,
-                None,
-                &[],
-                None,
-                "h",
-            )
+            .update_document_meta("never-existed.md", None, None, None, None, &[], None, "h")
             .unwrap();
         assert!(!updated);
     }
@@ -970,5 +958,4 @@ mod tests {
         );
         assert_ne!(RenameOutcome::Renamed, RenameOutcome::OldPathMissing);
     }
-
 }

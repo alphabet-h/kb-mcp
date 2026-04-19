@@ -275,9 +275,7 @@ fn main() -> anyhow::Result<()> {
             let model = model.or(cfg.model).unwrap_or_default();
             let reranker = reranker.or(cfg.reranker).unwrap_or_default();
             // rerank_by_default の CLI 既定値は `true` (reranker 有効時のみ意味を持つ)。
-            let rerank_by_default = rerank_by_default
-                .or(cfg.rerank_by_default)
-                .unwrap_or(true);
+            let rerank_by_default = rerank_by_default.or(cfg.rerank_by_default).unwrap_or(true);
 
             let exclude_headings = cfg.exclude_headings.clone();
             let exclude_dirs = cfg.resolve_exclude_dirs();
@@ -286,11 +284,8 @@ fn main() -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_default()
                 .effective_threshold();
-            let best_practice_templates = cfg
-                .best_practice
-                .clone()
-                .unwrap_or_default()
-                .path_templates;
+            let best_practice_templates =
+                cfg.best_practice.clone().unwrap_or_default().path_templates;
             let parser_registry = cfg.build_parser_registry()?;
 
             // watch config の解決
@@ -304,12 +299,8 @@ fn main() -> anyhow::Result<()> {
             }
 
             // transport の解決: CLI > config > default (stdio)
-            let resolved_transport = transport::Transport::resolve(
-                cli_transport,
-                bind,
-                port,
-                cfg.transport.as_ref(),
-            )?;
+            let resolved_transport =
+                transport::Transport::resolve(cli_transport, bind, port, cfg.transport.as_ref())?;
 
             // evaluator 指摘 High #2: `--bind` / `--port` が指定されているのに
             // 実効 transport が Stdio なら silent ignore は footgun なので reject。
@@ -455,10 +446,24 @@ fn main() -> anyhow::Result<()> {
                 if let Some(mut r) = embedder::Reranker::try_new(reranker_choice)? {
                     r.rerank_candidates(&query, candidates, limit)?
                 } else {
-                    db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref(), effective_min_quality)?
+                    db.search_hybrid(
+                        &query,
+                        &query_embedding,
+                        limit,
+                        category.as_deref(),
+                        topic.as_deref(),
+                        effective_min_quality,
+                    )?
                 }
             } else {
-                db.search_hybrid(&query, &query_embedding, limit, category.as_deref(), topic.as_deref(), effective_min_quality)?
+                db.search_hybrid(
+                    &query,
+                    &query_embedding,
+                    limit,
+                    category.as_deref(),
+                    topic.as_deref(),
+                    effective_min_quality,
+                )?
             };
 
             print_search_results(results, format);
@@ -523,7 +528,14 @@ fn main() -> anyhow::Result<()> {
             // も同形のパスで一致する。Windows の UNC (\\?\) prefix 漏れを避ける。
             let schema_path = schema.unwrap_or_else(|| kb_path.join("kb-mcp-schema.toml"));
             let exclude_dirs = cfg.resolve_exclude_dirs();
-            let exit = run_validate(&kb_path, &schema_path, format, no_color, fail_fast, &exclude_dirs)?;
+            let exit = run_validate(
+                &kb_path,
+                &schema_path,
+                format,
+                no_color,
+                fail_fast,
+                &exclude_dirs,
+            )?;
             std::process::exit(exit);
         }
     }
@@ -612,13 +624,17 @@ fn run_validate(
 fn validate_collect_md_files(kb_path: &Path, exclude_dirs: &[String]) -> Result<Vec<PathBuf>> {
     use walkdir::WalkDir;
     let mut out = Vec::new();
-    for entry in WalkDir::new(kb_path).follow_links(false).into_iter().filter_entry(|e| {
-        if !e.file_type().is_dir() {
-            return true;
-        }
-        let name = e.file_name().to_string_lossy();
-        !exclude_dirs.iter().any(|d| d.as_str() == name.as_ref())
-    }) {
+    for entry in WalkDir::new(kb_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            if !e.file_type().is_dir() {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            !exclude_dirs.iter().any(|d| d.as_str() == name.as_ref())
+        })
+    {
         let entry = entry.context("walkdir error during validate")?;
         if entry.file_type().is_file()
             && let Some(ext) = entry.path().extension()
@@ -696,10 +712,7 @@ fn print_validate_report(
                 for v in &r.violations {
                     let msg = v.message();
                     let msg = msg.replace('\n', " ");
-                    println!(
-                        "::error file={},line=1,title=frontmatter::{msg}",
-                        r.path
-                    );
+                    println!("::error file={},line=1,title=frontmatter::{msg}", r.path);
                 }
             }
         }
@@ -709,9 +722,7 @@ fn print_validate_report(
                 println!("kb-mcp validate: {scanned} files OK");
                 return;
             }
-            let header = format!(
-                "kb-mcp validate — {violated} file(s) with violations ({ok} OK)"
-            );
+            let header = format!("kb-mcp validate — {violated} file(s) with violations ({ok} OK)");
             if no_color {
                 println!("{header}");
             } else {

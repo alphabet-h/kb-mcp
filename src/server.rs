@@ -181,10 +181,7 @@ impl KbServer {
         name = "search",
         description = "Hybrid search (vector + FTS5 full-text, merged via Reciprocal Rank Fusion) over the knowledge base. The `score` field is the RRF score (higher = better)."
     )]
-    async fn search(
-        &self,
-        Parameters(params): Parameters<SearchParams>,
-    ) -> String {
+    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(5);
 
         // Embed the query
@@ -224,7 +221,9 @@ impl KbServer {
                 effective_min_quality,
             ) {
                 Ok(cands) => {
-                    let r = reranker_guard.as_mut().expect("reranker Some checked above");
+                    let r = reranker_guard
+                        .as_mut()
+                        .expect("reranker Some checked above");
                     r.rerank_candidates(&params.query, cands, limit)
                 }
                 Err(e) => Err(e),
@@ -283,10 +282,7 @@ impl KbServer {
         name = "get_document",
         description = "Get the full content and metadata of a document by its relative path within knowledge-base/."
     )]
-    async fn get_document(
-        &self,
-        Parameters(params): Parameters<GetDocumentParams>,
-    ) -> String {
+    async fn get_document(&self, Parameters(params): Parameters<GetDocumentParams>) -> String {
         let file_path = self.kb_path.join(&params.path);
 
         // Path traversal prevention: ensure resolved path stays inside kb_path
@@ -311,12 +307,8 @@ impl KbServer {
 
         match std::fs::read_to_string(&canonical) {
             Ok(raw) => {
-                let ext = canonical
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                let resp =
-                    build_document_response(&self.parser_registry, &params.path, ext, raw);
+                let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let resp = build_document_response(&self.parser_registry, &params.path, ext, raw);
                 serde_json::to_string_pretty(&resp).unwrap_or_default()
             }
             Err(e) => serde_json::to_string_pretty(&ErrorResponse {
@@ -414,10 +406,7 @@ impl KbServer {
         name = "rebuild_index",
         description = "Rebuild the search index by scanning all source files in the knowledge base (Markdown plus any other extensions enabled via `[parsers].enabled` in kb-mcp.toml)."
     )]
-    async fn rebuild_index(
-        &self,
-        Parameters(params): Parameters<RebuildIndexParams>,
-    ) -> String {
+    async fn rebuild_index(&self, Parameters(params): Parameters<RebuildIndexParams>) -> String {
         let force = params.force.unwrap_or(false);
 
         // Lock order: embedder first, then db (consistent with search)
@@ -684,7 +673,9 @@ pub async fn run_server(
     let embedder = Embedder::with_model(model)?;
     let reranker = Reranker::try_new(reranker_choice)?;
 
-    let kb_path = kb_path.canonicalize().unwrap_or_else(|_| kb_path.to_path_buf());
+    let kb_path = kb_path
+        .canonicalize()
+        .unwrap_or_else(|_| kb_path.to_path_buf());
 
     // watcher と共有するため Arc 化。
     // HTTP service factory でも共有するため KbServerShared にまとめる。
@@ -718,9 +709,7 @@ pub async fn run_server(
     });
 
     let result = match transport {
-        crate::transport::Transport::Stdio => {
-            crate::transport::stdio::run_stdio(&shared).await
-        }
+        crate::transport::Transport::Stdio => crate::transport::stdio::run_stdio(&shared).await,
         crate::transport::Transport::Http { addr } => {
             // move shared to http runner (no clone needed — stdio branch
             // consumes it only by reference and is mutually exclusive).
@@ -779,8 +768,10 @@ mod tests {
         let r = resolve_best_practice_path(&kb.path, &templates, "claude-code");
         match r {
             ResolveOutcome::Found(p) => {
-                assert!(p.ends_with("best-practices/claude-code/PERFECT.md")
-                    || p.ends_with("best-practices\\claude-code\\PERFECT.md"));
+                assert!(
+                    p.ends_with("best-practices/claude-code/PERFECT.md")
+                        || p.ends_with("best-practices\\claude-code\\PERFECT.md")
+                );
             }
             other => panic!("expected Found, got {other:?}"),
         }
@@ -796,8 +787,9 @@ mod tests {
         ];
         let r = resolve_best_practice_path(&kb.path, &templates, "cursor");
         match r {
-            ResolveOutcome::Found(p) => assert!(p.ends_with("docs/cursor.md")
-                || p.ends_with("docs\\cursor.md")),
+            ResolveOutcome::Found(p) => {
+                assert!(p.ends_with("docs/cursor.md") || p.ends_with("docs\\cursor.md"))
+            }
             other => panic!("expected Found, got {other:?}"),
         }
     }
@@ -833,14 +825,14 @@ mod tests {
     #[test]
     fn test_resolve_best_practice_all_missing_returns_tried_list() {
         let kb = TempKb::new("bp4");
-        let templates = vec![
-            "a/{target}.md".to_string(),
-            "b/{target}.md".to_string(),
-        ];
+        let templates = vec!["a/{target}.md".to_string(), "b/{target}.md".to_string()];
         let r = resolve_best_practice_path(&kb.path, &templates, "nope");
         match r {
             ResolveOutcome::NotFound(tried) => {
-                assert_eq!(tried, vec!["a/nope.md".to_string(), "b/nope.md".to_string()]);
+                assert_eq!(
+                    tried,
+                    vec!["a/nope.md".to_string(), "b/nope.md".to_string()]
+                );
             }
             ResolveOutcome::Found(p) => panic!("expected NotFound, got {p:?}"),
         }
@@ -865,8 +857,7 @@ mod tests {
     fn test_build_document_response_md_with_frontmatter() {
         let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
         let md = "---\ntitle: Hello\ntags: [a, b]\n---\n\n# body";
-        let resp =
-            build_document_response(&reg, "notes/hello.md", "md", md.to_string());
+        let resp = build_document_response(&reg, "notes/hello.md", "md", md.to_string());
         assert_eq!(resp.title.as_deref(), Some("Hello"));
         assert_eq!(resp.tags, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(resp.path, "notes/hello.md");

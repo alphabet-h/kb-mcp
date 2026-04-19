@@ -29,10 +29,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use notify::RecursiveMode;
-use notify_debouncer_full::{
-    DebouncedEvent, new_debouncer,
-};
 use notify_debouncer_full::notify::event::{EventKind, ModifyKind, RenameMode};
+use notify_debouncer_full::{DebouncedEvent, new_debouncer};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -102,11 +100,9 @@ pub struct WatcherState {
 /// `"sub/node_modules/"` 含みはヒットするが、`"node_modules-bak/"` は
 /// ヒットしない。
 fn is_under_excluded_dir(rel: &str, exclude_dirs: &[String]) -> bool {
-    exclude_dirs.iter().any(|d| {
-        rel == d
-            || rel.starts_with(&format!("{d}/"))
-            || rel.contains(&format!("/{d}/"))
-    })
+    exclude_dirs
+        .iter()
+        .any(|d| rel == d || rel.starts_with(&format!("{d}/")) || rel.contains(&format!("/{d}/")))
 }
 
 /// Watcher タスク本体。notify の裏スレッドから tokio channel 越しにイベントを
@@ -165,8 +161,7 @@ pub async fn run_watch_loop(state: WatcherState) -> Result<()> {
                         continue;
                     }
                 };
-                if let Err(e) = debouncer.watch(&kb_watch_path, RecursiveMode::Recursive)
-                {
+                if let Err(e) = debouncer.watch(&kb_watch_path, RecursiveMode::Recursive) {
                     eprintln!(
                         "watcher: failed to watch {}: {e} (retry in {}s)",
                         kb_watch_path.display(),
@@ -227,7 +222,10 @@ pub async fn run_watch_loop(state: WatcherState) -> Result<()> {
 /// 起きるため、この関数で排他的に分類する。
 #[derive(Debug, PartialEq)]
 enum Classified<'a> {
-    Rename { from: &'a std::path::PathBuf, to: &'a std::path::PathBuf },
+    Rename {
+        from: &'a std::path::PathBuf,
+        to: &'a std::path::PathBuf,
+    },
     Reindex(&'a [std::path::PathBuf]),
     Deindex(&'a [std::path::PathBuf]),
     Ignore,
@@ -243,12 +241,10 @@ fn classify(evt: &DebouncedEvent) -> Classified<'_> {
             }
         }
         // 一般的な Modify(Name(Any)) 等で paths.len()==2 のケース
-        EventKind::Modify(ModifyKind::Name(_)) if evt.paths.len() == 2 => {
-            Classified::Rename {
-                from: &evt.paths[0],
-                to: &evt.paths[1],
-            }
-        }
+        EventKind::Modify(ModifyKind::Name(_)) if evt.paths.len() == 2 => Classified::Rename {
+            from: &evt.paths[0],
+            to: &evt.paths[1],
+        },
         // Name(From) 単独 → 旧 path の削除として扱う
         EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Classified::Deindex(&evt.paths),
         // Name(To) / Name(Any) で 1 path → 新 path の reindex として扱う
@@ -265,15 +261,12 @@ fn handle_events(state: &WatcherState, events: &[DebouncedEvent]) {
     for evt in events {
         match classify(evt) {
             Classified::Rename { from, to } => {
-                let (Some(old_rel), Some(new_rel)) = (
-                    to_rel(&state.kb_path, from),
-                    to_rel(&state.kb_path, to),
-                ) else {
+                let (Some(old_rel), Some(new_rel)) =
+                    (to_rel(&state.kb_path, from), to_rel(&state.kb_path, to))
+                else {
                     continue;
                 };
-                if !should_process(&new_rel, to, state)
-                    && !should_process(&old_rel, from, state)
-                {
+                if !should_process(&new_rel, to, state) && !should_process(&old_rel, from, state) {
                     continue;
                 }
                 dispatch_rename(state, &old_rel, &new_rel);
@@ -326,9 +319,11 @@ fn to_rel(kb_path: &Path, full: &Path) -> Option<String> {
         Ok(rel) => Some(rel.to_string_lossy().replace('\\', "/")),
         Err(_) => {
             // canonicalize ズレで失敗することがある — 再度 canonicalize して再試行
-            full.canonicalize()
-                .ok()
-                .and_then(|c| c.strip_prefix(kb_path).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
+            full.canonicalize().ok().and_then(|c| {
+                c.strip_prefix(kb_path)
+                    .ok()
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+            })
         }
     }
 }
@@ -397,9 +392,7 @@ fn dispatch_rename(state: &WatcherState, old_rel: &str, new_rel: &str) {
             eprintln!("watcher: renamed {old_rel} -> {new_rel}");
         }
         Ok(indexer::RenameOutcome::RenamedAndReindexed { chunks }) => {
-            eprintln!(
-                "watcher: renamed+reindexed {old_rel} -> {new_rel} ({chunks} chunks)"
-            );
+            eprintln!("watcher: renamed+reindexed {old_rel} -> {new_rel} ({chunks} chunks)");
         }
         Ok(indexer::RenameOutcome::OldPathMissing) => {
             eprintln!("watcher: rename target {old_rel} not in DB, indexed {new_rel}");
@@ -440,8 +433,7 @@ mod tests {
 
     #[test]
     fn test_watch_config_rejects_unknown_fields() {
-        let err: Result<WatchConfig, _> =
-            toml::from_str("enabled = true\nbogus = 1\n");
+        let err: Result<WatchConfig, _> = toml::from_str("enabled = true\nbogus = 1\n");
         assert!(err.is_err());
     }
 
@@ -489,37 +481,67 @@ mod tests {
     fn test_should_process_lite_md_ok() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/notes/a.md");
-        assert!(should_process_lite("notes/a.md", full, &reg, &default_exclude_dirs()));
+        assert!(should_process_lite(
+            "notes/a.md",
+            full,
+            &reg,
+            &default_exclude_dirs()
+        ));
     }
 
     #[test]
     fn test_should_process_lite_obsidian_rejected() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/.obsidian/workspace.md");
-        assert!(!should_process_lite(".obsidian/workspace.md", full, &reg, &default_exclude_dirs()));
+        assert!(!should_process_lite(
+            ".obsidian/workspace.md",
+            full,
+            &reg,
+            &default_exclude_dirs()
+        ));
         let full2 = Path::new("/tmp/a/sub/.obsidian/x.md");
-        assert!(!should_process_lite("sub/.obsidian/x.md", full2, &reg, &default_exclude_dirs()));
+        assert!(!should_process_lite(
+            "sub/.obsidian/x.md",
+            full2,
+            &reg,
+            &default_exclude_dirs()
+        ));
     }
 
     #[test]
     fn test_should_process_lite_wrong_extension() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/notes/a.txt");
-        assert!(!should_process_lite("notes/a.txt", full, &reg, &default_exclude_dirs()));
+        assert!(!should_process_lite(
+            "notes/a.txt",
+            full,
+            &reg,
+            &default_exclude_dirs()
+        ));
     }
 
     #[test]
     fn test_should_process_lite_txt_accepted_when_opted_in() {
         let reg = Registry::from_enabled(&["md".into(), "txt".into()]).unwrap();
         let full = Path::new("/tmp/a/notes/a.txt");
-        assert!(should_process_lite("notes/a.txt", full, &reg, &default_exclude_dirs()));
+        assert!(should_process_lite(
+            "notes/a.txt",
+            full,
+            &reg,
+            &default_exclude_dirs()
+        ));
     }
 
     #[test]
     fn test_should_process_lite_db_file_rejected() {
         let reg = Registry::defaults();
         let full = Path::new("/tmp/a/.kb-mcp.db");
-        assert!(!should_process_lite(".kb-mcp.db", full, &reg, &default_exclude_dirs()));
+        assert!(!should_process_lite(
+            ".kb-mcp.db",
+            full,
+            &reg,
+            &default_exclude_dirs()
+        ));
     }
 
     // -----------------------------------------------------------------------

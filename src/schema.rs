@@ -161,14 +161,15 @@ impl Schema {
             // array フィールドに pattern が付いていても現状意味がないため
             // 明示的にはじく (将来 array 要素への pattern を入れる場合は要拡張)
             if rule.field_type == Some(FieldType::Array) && rule.pattern.is_some() {
-                anyhow::bail!(
-                    "field {name:?}: `pattern` is only valid for string-typed fields"
-                );
+                anyhow::bail!("field {name:?}: `pattern` is only valid for string-typed fields");
             }
             // MVP では Frontmatter 側が全フィールドを string で持つため、
             // integer / date は実装されていない。silent pass を避けるため
             // compile 段階で reject し、代わりに pattern で表現するよう誘導する。
-            if matches!(rule.field_type, Some(FieldType::Integer) | Some(FieldType::Date)) {
+            if matches!(
+                rule.field_type,
+                Some(FieldType::Integer) | Some(FieldType::Date)
+            ) {
                 anyhow::bail!(
                     "field {name:?}: type = {:?} is not implemented in MVP. \
                      Use `type = \"string\"` with `pattern = '...'` for now \
@@ -178,8 +179,7 @@ impl Schema {
             }
             let pattern = match &rule.pattern {
                 Some(p) => Some(
-                    Regex::new(p)
-                        .with_context(|| format!("invalid regex for field {name:?}"))?,
+                    Regex::new(p).with_context(|| format!("invalid regex for field {name:?}"))?,
                 ),
                 None => None,
             };
@@ -269,10 +269,7 @@ impl Violation {
                 actual,
                 allowed,
             } => {
-                format!(
-                    "{field} {actual:?} is not in enum [{}]",
-                    allowed.join(", ")
-                )
+                format!("{field} {actual:?} is not in enum [{}]", allowed.join(", "))
             }
             Violation::LengthOutOfRange {
                 field,
@@ -314,12 +311,7 @@ pub fn validate(fm: &Frontmatter, schema: &Schema) -> Vec<Violation> {
     out
 }
 
-fn check_string(
-    out: &mut Vec<Violation>,
-    name: &str,
-    rule: &CompiledRule,
-    value: Option<&str>,
-) {
+fn check_string(out: &mut Vec<Violation>, name: &str, rule: &CompiledRule, value: Option<&str>) {
     // MVP では Frontmatter 側が全フィールド string なので、許容する型は
     // `string` のみ。`integer` / `date` は compile 段階で reject 済 (後ろに
     // 到達しない)。array は明示的に mismatch 扱い。
@@ -397,12 +389,7 @@ fn check_string(
     }
 }
 
-fn check_tags(
-    out: &mut Vec<Violation>,
-    name: &str,
-    rule: &CompiledRule,
-    tags: &[String],
-) {
+fn check_tags(out: &mut Vec<Violation>, name: &str, rule: &CompiledRule, tags: &[String]) {
     // type 不一致: array 以外を期待していたら mismatch
     if let Some(ft) = rule.field_type
         && ft != FieldType::Array
@@ -555,9 +542,11 @@ mod tests {
 
     #[test]
     fn test_validate_missing_required() {
-        let s = schema(r#"[fields.title]
+        let s = schema(
+            r#"[fields.title]
 required = true
-type = "string""#);
+type = "string""#,
+        );
         let v = validate(&fm(), &s);
         assert_eq!(v.len(), 1);
         assert!(matches!(&v[0], Violation::MissingRequired { field } if field == "title"));
@@ -565,9 +554,11 @@ type = "string""#);
 
     #[test]
     fn test_validate_empty_string_is_missing_when_required() {
-        let s = schema(r#"[fields.title]
+        let s = schema(
+            r#"[fields.title]
 required = true
-type = "string""#);
+type = "string""#,
+        );
         let mut f = fm();
         f.title = Some(String::new());
         let v = validate(&f, &s);
@@ -577,22 +568,29 @@ type = "string""#);
 
     #[test]
     fn test_validate_empty_string_allowed_with_allow_empty() {
-        let s = schema(r#"[fields.title]
+        let s = schema(
+            r#"[fields.title]
 required = true
 type = "string"
-allow_empty = true"#);
+allow_empty = true"#,
+        );
         let mut f = fm();
         f.title = Some(String::new());
         let v = validate(&f, &s);
-        assert!(v.is_empty(), "allow_empty must suppress empty missing, got {v:?}");
+        assert!(
+            v.is_empty(),
+            "allow_empty must suppress empty missing, got {v:?}"
+        );
     }
 
     #[test]
     fn test_validate_pattern_mismatch() {
-        let s = schema(r#"[fields.date]
+        let s = schema(
+            r#"[fields.date]
 required = true
 type = "string"
-pattern = '^\d{4}-\d{2}-\d{2}$'"#);
+pattern = '^\d{4}-\d{2}-\d{2}$'"#,
+        );
         let mut f = fm();
         f.date = Some("2026/04/19".into()); // slashes, not dashes
         let v = validate(&f, &s);
@@ -602,8 +600,10 @@ pattern = '^\d{4}-\d{2}-\d{2}$'"#);
 
     #[test]
     fn test_validate_pattern_match_ok() {
-        let s = schema(r#"[fields.date]
-pattern = '^\d{4}-\d{2}-\d{2}$'"#);
+        let s = schema(
+            r#"[fields.date]
+pattern = '^\d{4}-\d{2}-\d{2}$'"#,
+        );
         let mut f = fm();
         f.date = Some("2026-04-19".into());
         let v = validate(&f, &s);
@@ -612,10 +612,12 @@ pattern = '^\d{4}-\d{2}-\d{2}$'"#);
 
     #[test]
     fn test_validate_enum_miss() {
-        let s = schema(r#"[fields.topic]
+        let s = schema(
+            r#"[fields.topic]
 required = true
 type = "string"
-enum = ["mcp", "rag"]"#);
+enum = ["mcp", "rag"]"#,
+        );
         let mut f = fm();
         f.topic = Some("general".into());
         let v = validate(&f, &s);
@@ -625,10 +627,12 @@ enum = ["mcp", "rag"]"#);
 
     #[test]
     fn test_validate_tags_empty_required() {
-        let s = schema(r#"[fields.tags]
+        let s = schema(
+            r#"[fields.tags]
 required = true
 type = "array"
-min_length = 1"#);
+min_length = 1"#,
+        );
         let v = validate(&fm(), &s);
         assert_eq!(v.len(), 1);
         assert!(matches!(&v[0], Violation::MissingRequired { field } if field == "tags"));
@@ -636,24 +640,32 @@ min_length = 1"#);
 
     #[test]
     fn test_validate_tags_length_out_of_range() {
-        let s = schema(r#"[fields.tags]
+        let s = schema(
+            r#"[fields.tags]
 type = "array"
-max_length = 2"#);
+max_length = 2"#,
+        );
         let mut f = fm();
         f.tags = vec!["a".into(), "b".into(), "c".into()];
         let v = validate(&f, &s);
         assert_eq!(v.len(), 1);
         assert!(matches!(
             &v[0],
-            Violation::LengthOutOfRange { actual: 3, max: Some(2), .. }
+            Violation::LengthOutOfRange {
+                actual: 3,
+                max: Some(2),
+                ..
+            }
         ));
     }
 
     #[test]
     fn test_validate_tags_enum_on_each_element() {
-        let s = schema(r#"[fields.tags]
+        let s = schema(
+            r#"[fields.tags]
 type = "array"
-enum = ["mcp", "rag"]"#);
+enum = ["mcp", "rag"]"#,
+        );
         let mut f = fm();
         f.tags = vec!["mcp".into(), "random".into(), "rag".into()];
         let v = validate(&f, &s);
@@ -667,8 +679,10 @@ enum = ["mcp", "rag"]"#);
     #[test]
     fn test_validate_type_mismatch_string_vs_array() {
         // title に array 型を指定すると Frontmatter 側 string と不一致
-        let s = schema(r#"[fields.title]
-type = "array""#);
+        let s = schema(
+            r#"[fields.title]
+type = "array""#,
+        );
         let mut f = fm();
         f.title = Some("hi".into());
         let v = validate(&f, &s);
@@ -682,7 +696,8 @@ type = "array""#);
 
     #[test]
     fn test_validate_multiple_violations() {
-        let s = schema(r#"[fields.title]
+        let s = schema(
+            r#"[fields.title]
 required = true
 type = "string"
 min_length = 10
@@ -690,7 +705,8 @@ min_length = 10
 [fields.date]
 required = true
 type = "string"
-pattern = '^\d{4}-\d{2}-\d{2}$'"#);
+pattern = '^\d{4}-\d{2}-\d{2}$'"#,
+        );
         let mut f = fm();
         f.title = Some("hi".into()); // too short
         f.date = Some("bogus".into()); // no match
@@ -728,7 +744,8 @@ pattern = '^\d{4}-\d{2}-\d{2}$'"#);
 
     #[test]
     fn test_validate_ok_when_all_fields_valid() {
-        let s = schema(r#"[fields.title]
+        let s = schema(
+            r#"[fields.title]
 required = true
 type = "string"
 min_length = 1
@@ -746,7 +763,8 @@ enum = ["mcp", "rag", "ai"]
 [fields.tags]
 required = true
 type = "array"
-min_length = 1"#);
+min_length = 1"#,
+        );
         let mut f = fm();
         f.title = Some("Hello".into());
         f.date = Some("2026-04-19".into());

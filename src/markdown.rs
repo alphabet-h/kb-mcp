@@ -7,9 +7,7 @@
 //!
 //! Indexing / server code paths have migrated to the `Registry`-based API.
 
-pub use crate::parser::{
-    Chunk, Frontmatter, ParsedDocument, DEFAULT_EXCLUDED_HEADINGS,
-};
+pub use crate::parser::{Chunk, DEFAULT_EXCLUDED_HEADINGS, Frontmatter, ParsedDocument};
 
 use crate::parser::{MarkdownParser, Parser};
 
@@ -23,10 +21,7 @@ pub fn parse(raw: &str) -> ParsedDocument {
 
 /// Same as [`parse`] but with a custom exclude list (substring match on
 /// heading text).
-pub fn parse_with_excludes(
-    raw: &str,
-    excludes: &[impl AsRef<str>],
-) -> ParsedDocument {
+pub fn parse_with_excludes(raw: &str, excludes: &[impl AsRef<str>]) -> ParsedDocument {
     let excludes: Vec<&str> = excludes.iter().map(AsRef::as_ref).collect();
     // path_hint is unused by the Markdown parser (only `.txt` and similar
     // use it for filename-derived titles), so pass an empty string.
@@ -140,11 +135,7 @@ mod tests {
 候補 本文 十分な長さで 書く必要がある ので埋める埋める埋める。
 ";
         let doc = parse_with_excludes(md, &["参考リンク"]);
-        let headings: Vec<Option<&str>> = doc
-            .chunks
-            .iter()
-            .map(|c| c.heading.as_deref())
-            .collect();
+        let headings: Vec<Option<&str>> = doc.chunks.iter().map(|c| c.heading.as_deref()).collect();
         assert!(
             !headings.contains(&Some("参考リンク")),
             "custom excluded heading should not appear: {headings:?}"

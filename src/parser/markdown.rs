@@ -15,12 +15,7 @@ impl Parser for MarkdownParser {
         "md"
     }
 
-    fn parse(
-        &self,
-        raw: &str,
-        _path_hint: &str,
-        exclude_headings: &[&str],
-    ) -> ParsedDocument {
+    fn parse(&self, raw: &str, _path_hint: &str, exclude_headings: &[&str]) -> ParsedDocument {
         let (frontmatter, body) = extract_frontmatter(raw);
         let chunks = chunk_body(&body, exclude_headings);
         ParsedDocument {
@@ -199,6 +194,8 @@ fn strip_heading(line: &str) -> Option<String> {
     if let Some(rest) = trimmed.strip_prefix("### ") {
         Some(rest.trim().to_string())
     } else {
-        trimmed.strip_prefix("## ").map(|rest| rest.trim().to_string())
+        trimmed
+            .strip_prefix("## ")
+            .map(|rest| rest.trim().to_string())
     }
 }

@@ -72,7 +72,6 @@ impl ModelChoice {
     }
 }
 
-
 /// Thin wrapper around fastembed for generating text embeddings.
 ///
 /// モデルは [`ModelChoice`] で切替可能。ONNX モデルは初回実行時に
@@ -348,7 +347,10 @@ mod tests {
         };
         let candidates = vec![
             (1i64, mk("天気予報の話題です")),
-            (2, mk("E0382 は所有権が移動した後の値を使ったときに出るエラーです")),
+            (
+                2,
+                mk("E0382 は所有権が移動した後の値を使ったときに出るエラーです"),
+            ),
             (3, mk("映画のレビューについて")),
         ];
         let out = r
@@ -365,8 +367,7 @@ mod tests {
     #[test]
     #[ignore] // requires BGE-M3 download (~2.3 GB)
     fn test_bge_m3_produces_1024_dim() {
-        let mut embedder =
-            Embedder::with_model(ModelChoice::BgeM3).expect("failed to load BGE-M3");
+        let mut embedder = Embedder::with_model(ModelChoice::BgeM3).expect("failed to load BGE-M3");
         let emb = embedder
             .embed_single("こんにちは、世界")
             .expect("failed to embed");

@@ -14,8 +14,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::{Router, routing::get};
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 
 use crate::server::{KbServer, KbServerShared};
@@ -33,9 +32,8 @@ pub async fn run_http(addr: SocketAddr, shared: KbServerShared) -> Result<()> {
     // return `Result<_, std::io::Error>` per rmcp's trait. `shared` は以降
     // 使わないので clone せず move する (evaluator Med #4)。
     let factory_shared = shared;
-    let factory = move || -> Result<KbServer, std::io::Error> {
-        Ok(KbServer::from_shared(&factory_shared))
-    };
+    let factory =
+        move || -> Result<KbServer, std::io::Error> { Ok(KbServer::from_shared(&factory_shared)) };
 
     let mcp_service = StreamableHttpService::new(
         factory,
@@ -47,14 +45,12 @@ pub async fn run_http(addr: SocketAddr, shared: KbServerShared) -> Result<()> {
         .route("/healthz", get(healthz))
         .nest_service("/mcp", mcp_service);
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to bind {addr}: is another kb-mcp instance running, or the \
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| {
+        format!(
+            "failed to bind {addr}: is another kb-mcp instance running, or the \
                  port occupied?"
-            )
-        })?;
+        )
+    })?;
     eprintln!(
         "kb-mcp server ready (http transport, listening on {})",
         listener.local_addr().unwrap_or(addr)

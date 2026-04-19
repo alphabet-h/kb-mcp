@@ -115,9 +115,7 @@ impl Config {
         // cwd は MCP 起動時に呼び出し側プロジェクトに依存するため当てにならない。
         if let Some(base) = path.parent() {
             cfg.kb_path = cfg.kb_path.map(|p| resolve_relative(base, p));
-            cfg.fastembed_cache_dir = cfg
-                .fastembed_cache_dir
-                .map(|p| resolve_relative(base, p));
+            cfg.fastembed_cache_dir = cfg.fastembed_cache_dir.map(|p| resolve_relative(base, p));
         }
 
         // Phase 2.3 で opt-in 化: `[best_practice]` セクション省略、
@@ -361,10 +359,7 @@ mod tests {
         .unwrap();
         let cfg = Config::load_from(file.path()).unwrap();
         let t = cfg.transport.expect("transport must be Some");
-        assert_eq!(
-            t.kind,
-            Some(crate::transport::TransportKindConfig::Http)
-        );
+        assert_eq!(t.kind, Some(crate::transport::TransportKindConfig::Http));
         let http = t.http.expect("http section must be Some");
         assert_eq!(http.bind.as_deref(), Some("0.0.0.0:4000"));
     }
@@ -411,8 +406,7 @@ mod tests {
              bogus_field = 42\n"
         )
         .unwrap();
-        let err =
-            Config::load_from(file.path()).expect_err("unknown [watch] field must reject");
+        let err = Config::load_from(file.path()).expect_err("unknown [watch] field must reject");
         assert!(err.to_string().contains("failed to parse config"));
     }
 
@@ -456,7 +450,9 @@ mod tests {
         .unwrap();
         let cfg = Config::load_from(file.path()).unwrap();
         // validate is passed, but build_parser_registry should fail on "pdf"
-        let err = cfg.build_parser_registry().expect_err("pdf must be rejected");
+        let err = cfg
+            .build_parser_registry()
+            .expect_err("pdf must be rejected");
         assert!(err.to_string().contains("pdf"));
     }
 
@@ -467,7 +463,9 @@ mod tests {
         let mut file = tempfile("kb-mcp-config-empty-excludes");
         writeln!(file, "exclude_headings = []").unwrap();
         let cfg = Config::load_from(file.path()).unwrap();
-        let list = cfg.exclude_headings.expect("Some(vec![]) must be preserved");
+        let list = cfg
+            .exclude_headings
+            .expect("Some(vec![]) must be preserved");
         assert!(list.is_empty());
     }
 
@@ -521,8 +519,13 @@ mod tests {
         let cfg = Config::load_from(&cfg_path).unwrap();
 
         let kb = cfg.kb_path.expect("kb_path must be Some");
-        let cache = cfg.fastembed_cache_dir.expect("fastembed_cache_dir must be Some");
-        assert!(kb.is_absolute() || kb.starts_with(&dir), "kb_path not rebased: {kb:?}");
+        let cache = cfg
+            .fastembed_cache_dir
+            .expect("fastembed_cache_dir must be Some");
+        assert!(
+            kb.is_absolute() || kb.starts_with(&dir),
+            "kb_path not rebased: {kb:?}"
+        );
         assert!(kb.ends_with("knowledge-base"));
         assert!(cache.starts_with(&dir));
         assert!(cache.ends_with(Path::new("cache/hf")) || cache.ends_with(Path::new("cache\\hf")));
@@ -575,8 +578,7 @@ mod tests {
         // uncomment 後に重複キーになると toml::from_str がエラーになるので、
         // 「同じキーは最初の 1 行だけ uncomment、以降はコメントのまま残す」
         // 方針で剥がす。
-        let mut seen_keys: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         let uncommented: String = raw
             .lines()
             .map(|line| {

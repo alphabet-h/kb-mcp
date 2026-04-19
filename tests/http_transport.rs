@@ -83,12 +83,18 @@ fn test_http_serve_healthz_and_initialize() {
     let out = Command::new("curl")
         .args([
             "-s",
-            "-X", "POST",
-            "-H", "content-type: application/json",
-            "-H", "accept: application/json, text/event-stream",
-            "-o", "/dev/null",
-            "-w", "%{http_code}",
-            "-d", init_body,
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            "accept: application/json, text/event-stream",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-d",
+            init_body,
             &format!("{base}/mcp"),
         ])
         .output()
@@ -106,10 +112,12 @@ fn test_http_serve_healthz_and_initialize() {
 fn kb_mcp_bin() -> std::path::PathBuf {
     let target = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target")
-        });
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     #[cfg(windows)]
     let bin = target.join(profile).join("kb-mcp.exe");
     #[cfg(not(windows))]

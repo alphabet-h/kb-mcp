@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::sync::Once;
 
@@ -146,8 +146,8 @@ impl Database {
     /// Open (or create) a file-backed database at `path`.
     pub fn open(path: &str) -> Result<Self> {
         ensure_vec_extension();
-        let conn = Connection::open(path)
-            .with_context(|| format!("failed to open database at {path}"))?;
+        let conn =
+            Connection::open(path).with_context(|| format!("failed to open database at {path}"))?;
         let db = Self { conn };
         db.init()?;
         Ok(db)
@@ -156,8 +156,7 @@ impl Database {
     /// Open an in-memory database (useful for tests).
     pub fn open_in_memory() -> Result<Self> {
         ensure_vec_extension();
-        let conn =
-            Connection::open_in_memory().context("failed to open in-memory database")?;
+        let conn = Connection::open_in_memory().context("failed to open in-memory database")?;
         let db = Self { conn };
         db.init()?;
         Ok(db)
@@ -355,16 +354,24 @@ impl Database {
             )?;
             // Cascade will handle chunks when we update the document,
             // but we delete explicitly to be safe before the UPDATE
-            self.conn.execute(
-                "DELETE FROM chunks WHERE document_id = ?1",
-                params![doc_id],
-            )?;
+            self.conn
+                .execute("DELETE FROM chunks WHERE document_id = ?1", params![doc_id])?;
             // Update the document row
             self.conn.execute(
                 "UPDATE documents SET title = ?1, topic = ?2, category = ?3,
                  depth = ?4, tags = ?5, date = ?6, content_hash = ?7,
                  last_indexed = ?8 WHERE id = ?9",
-                params![title, topic, category, depth, tags_json, date, content_hash, now, doc_id],
+                params![
+                    title,
+                    topic,
+                    category,
+                    depth,
+                    tags_json,
+                    date,
+                    content_hash,
+                    now,
+                    doc_id
+                ],
             )?;
             Ok(doc_id)
         } else {
@@ -438,10 +445,7 @@ impl Database {
     /// 指定 path の chunk 本文 (heading, content) を
     /// chunk_index 順に返す。frontmatter のみ変更かどうかを判定するために
     /// 既存 chunks のテキストだけを読む。embedding は取得しない (軽量)。
-    pub fn chunk_texts_for_path(
-        &self,
-        path: &str,
-    ) -> Result<Vec<(Option<String>, String)>> {
+    pub fn chunk_texts_for_path(&self, path: &str) -> Result<Vec<(Option<String>, String)>> {
         let sql = "
             SELECT c.heading, c.content
             FROM chunks c
@@ -451,10 +455,7 @@ impl Database {
         ";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![path], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, String>(1)?,
-            ))
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
         })?;
         let mut out = Vec::new();
         for r in rows {
@@ -492,7 +493,17 @@ impl Database {
                     content_hash = ?7,
                     last_indexed = ?8
               WHERE path = ?9",
-            params![title, topic, category, depth, tags_json, date, content_hash, updated_at, path],
+            params![
+                title,
+                topic,
+                category,
+                depth,
+                tags_json,
+                date,
+                content_hash,
+                updated_at,
+                path
+            ],
         )?;
         Ok(n > 0)
     }
@@ -503,10 +514,7 @@ impl Database {
     /// `embedding` は `vec_to_json` で JSON 文字列として取り出し、serde_json で
     /// `Vec<f32>` に復元する。`SearchResult.score` はシード node 用に 1.0 を入れる
     /// (BFS 結果のスコアと同じ意味 = cos sim 換算値の上限)。
-    pub fn chunks_for_path(
-        &self,
-        path: &str,
-    ) -> Result<Vec<(i64, Vec<f32>, SearchResult)>> {
+    pub fn chunks_for_path(&self, path: &str) -> Result<Vec<(i64, Vec<f32>, SearchResult)>> {
         let sql = "
             SELECT c.id, vec_to_json(v.embedding),
                    c.content, c.heading,
@@ -668,14 +676,14 @@ impl Database {
             Ok((
                 chunk_id,
                 score,
-                row.get::<_, String>(2)?,           // content
-                row.get::<_, Option<String>>(3)?,   // heading
-                row.get::<_, f32>(4)?,              // quality_score
-                row.get::<_, String>(5)?,           // path
-                row.get::<_, Option<String>>(6)?,   // title
-                row.get::<_, Option<String>>(7)?,   // topic
-                row.get::<_, Option<String>>(8)?,   // date
-                row.get::<_, Option<String>>(9)?,   // category
+                row.get::<_, String>(2)?,         // content
+                row.get::<_, Option<String>>(3)?, // heading
+                row.get::<_, f32>(4)?,            // quality_score
+                row.get::<_, String>(5)?,         // path
+                row.get::<_, Option<String>>(6)?, // title
+                row.get::<_, Option<String>>(7)?, // topic
+                row.get::<_, Option<String>>(8)?, // date
+                row.get::<_, Option<String>>(9)?, // category
             ))
         })?;
 
@@ -740,7 +748,12 @@ impl Database {
         min_quality: f32,
     ) -> Result<Vec<SearchResult>> {
         let hits = self.search_hybrid_candidates(
-            query_text, query_embedding, limit, category, topic, min_quality,
+            query_text,
+            query_embedding,
+            limit,
+            category,
+            topic,
+            min_quality,
         )?;
         Ok(hits.into_iter().map(|(_, r)| r).collect())
     }
@@ -759,15 +772,10 @@ impl Database {
     ) -> Result<Vec<(i64, SearchResult)>> {
         let candidates = limit.saturating_mul(5).max(50);
 
-        let vec_hits = self.search_vec_candidates(
-            query_embedding,
-            candidates,
-            category,
-            topic,
-            min_quality,
-        )?;
-        let fts_hits = self
-            .search_fts_candidates(query_text, candidates, category, topic, min_quality)?;
+        let vec_hits =
+            self.search_vec_candidates(query_embedding, candidates, category, topic, min_quality)?;
+        let fts_hits =
+            self.search_fts_candidates(query_text, candidates, category, topic, min_quality)?;
 
         // RRF: chunk_id ごとに 1/(K + rank + 1) を加算
         let mut scores: HashMap<i64, f32> = HashMap::new();
@@ -844,14 +852,14 @@ impl Database {
             Ok((
                 chunk_id,
                 distance,
-                row.get::<_, String>(2)?,           // content
-                row.get::<_, Option<String>>(3)?,   // heading
-                row.get::<_, f32>(4)?,              // quality_score
-                row.get::<_, String>(5)?,           // path
-                row.get::<_, Option<String>>(6)?,   // title
-                row.get::<_, Option<String>>(7)?,   // topic
-                row.get::<_, Option<String>>(8)?,   // date
-                row.get::<_, Option<String>>(9)?,   // category
+                row.get::<_, String>(2)?,         // content
+                row.get::<_, Option<String>>(3)?, // heading
+                row.get::<_, f32>(4)?,            // quality_score
+                row.get::<_, String>(5)?,         // path
+                row.get::<_, Option<String>>(6)?, // title
+                row.get::<_, Option<String>>(7)?, // topic
+                row.get::<_, Option<String>>(8)?, // date
+                row.get::<_, Option<String>>(9)?, // category
             ))
         })?;
 
@@ -1039,9 +1047,7 @@ impl Database {
         ";
         let mut stmt = self.conn.prepare(sql)?;
         let rows: Vec<(i64, Option<String>, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut count = 0u32;
@@ -1105,7 +1111,8 @@ impl Database {
     /// 呼び出し側で `chunks` / `documents` の整合を別途管理すること
     /// (通常は [`Database::reset_for_model`] 経由で呼ぶ)。
     fn recreate_vec_chunks(&self, dim: u32) -> Result<()> {
-        self.conn.execute_batch("DROP TABLE IF EXISTS vec_chunks;")?;
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS vec_chunks;")?;
         let sql = format!(
             "CREATE VIRTUAL TABLE vec_chunks USING vec0(
                  chunk_id INTEGER PRIMARY KEY,
@@ -1132,7 +1139,9 @@ impl Database {
 
     /// Return every indexed document path.
     pub fn all_document_paths(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT path FROM documents ORDER BY path")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM documents ORDER BY path")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.into_iter()
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -1174,9 +1183,7 @@ impl Database {
                 )
             })?;
         if updated == 0 {
-            anyhow::bail!(
-                "rename_document: no document with path '{old_path}' (rows updated: 0)"
-            );
+            anyhow::bail!("rename_document: no document with path '{old_path}' (rows updated: 0)");
         }
         Ok(())
     }
@@ -1261,8 +1268,15 @@ mod tests {
         assert_eq!(db.document_count().unwrap(), 1);
 
         // Insert a chunk so we can verify cascade-on-upsert
-        db.insert_chunk(id1, 0, Some("Intro"), "Hello MCP", &dummy_embedding(0.1), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            id1,
+            0,
+            Some("Intro"),
+            "Hello MCP",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
         assert_eq!(db.chunk_count().unwrap(), 1);
 
         // Upsert same path with new hash — should still be 1 doc, 0 chunks
@@ -1366,13 +1380,22 @@ mod tests {
                 "h1",
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("Intro"), "hello", &dummy_embedding(0.1), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("Intro"),
+            "hello",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
         db.insert_chunk(doc_id, 1, Some("Body"), "world", &dummy_embedding(0.2), 1.0)
             .unwrap();
 
         // No filter path
-        let hits = db.search_similar(&dummy_embedding(0.1), 5, None, None, 0.0).unwrap();
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 5, None, None, 0.0)
+            .unwrap();
         assert_eq!(hits.len(), 2, "both chunks should be returned");
 
         // Filter path (category match)
@@ -1395,8 +1418,15 @@ mod tests {
             .upsert_document("q.md", Some("Q"), None, None, None, &[], None, "h")
             .unwrap();
         // 高品質チャンク (1.0) と低品質チャンク (0.1)
-        db.insert_chunk(doc_id, 0, Some("high"), "rich body with plenty of content", &dummy_embedding(0.1), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("high"),
+            "rich body with plenty of content",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
         db.insert_chunk(doc_id, 1, Some("low"), "stub", &dummy_embedding(0.11), 0.1)
             .unwrap();
 
@@ -1431,8 +1461,15 @@ mod tests {
         // 本当はスタブ (短い定型) だが quality_score=1.0 で insert
         db.insert_chunk(doc_id, 0, None, "TBD", &dummy_embedding(0.1), 1.0)
             .unwrap();
-        db.insert_chunk(doc_id, 1, None, "plenty of informative content indeed, long enough to avoid penalties", &dummy_embedding(0.2), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            None,
+            "plenty of informative content indeed, long enough to avoid penalties",
+            &dummy_embedding(0.2),
+            1.0,
+        )
+        .unwrap();
 
         let updated1 = db.backfill_quality().unwrap();
         assert!(updated1 >= 1, "stub chunk must be updated, got {updated1}");
@@ -1480,7 +1517,9 @@ mod tests {
     #[test]
     fn test_rename_document_missing_source_errors() {
         let db = db_with_384();
-        let err = db.rename_document("nope.md", "else.md").expect_err("must error");
+        let err = db
+            .rename_document("nope.md", "else.md")
+            .expect_err("must error");
         assert!(err.to_string().contains("no document"));
     }
 
@@ -1577,8 +1616,15 @@ mod tests {
                 "h1",
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("Intro"), "hello", &dummy_embedding(0.1), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("Intro"),
+            "hello",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
         db.insert_chunk(doc_id, 1, Some("Body"), "world", &dummy_embedding(0.2), 1.0)
             .unwrap();
 
@@ -1607,16 +1653,7 @@ mod tests {
     fn test_get_chunk_embedding_roundtrip() {
         let db = db_with_384();
         let doc_id = db
-            .upsert_document(
-                "a.md",
-                None,
-                None,
-                None,
-                None,
-                &[],
-                None,
-                "h1",
-            )
+            .upsert_document("a.md", None, None, None, None, &[], None, "h1")
             .unwrap();
         db.insert_chunk(doc_id, 0, None, "x", &dummy_embedding(0.3), 1.0)
             .unwrap();
@@ -1630,7 +1667,10 @@ mod tests {
             )
             .unwrap();
 
-        let emb = db.get_chunk_embedding(chunk_id).unwrap().expect("must exist");
+        let emb = db
+            .get_chunk_embedding(chunk_id)
+            .unwrap()
+            .expect("must exist");
         assert_eq!(emb.len(), 384);
         assert!((emb[0] - 0.3).abs() < 1e-5);
 
@@ -1695,9 +1735,7 @@ mod tests {
 
         // 1024-dim embedding を insert できることを確認
         let doc_id = db
-            .upsert_document(
-                "x.md", Some("x"), None, None, None, &[], None, "h",
-            )
+            .upsert_document("x.md", Some("x"), None, None, None, &[], None, "h")
             .unwrap();
         let emb: Vec<f32> = vec![0.1; 1024];
         db.insert_chunk(doc_id, 0, None, "hi", &emb, 1.0).unwrap();
@@ -1726,7 +1764,14 @@ mod tests {
             .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
             .unwrap();
         let chunk_id = db
-            .insert_chunk(doc_id, 0, Some("Intro"), "hello world", &dummy_embedding(0.1), 1.0)
+            .insert_chunk(
+                doc_id,
+                0,
+                Some("Intro"),
+                "hello world",
+                &dummy_embedding(0.1),
+                1.0,
+            )
             .unwrap();
         assert_eq!(fts_count(&db), 1);
 
@@ -1776,11 +1821,25 @@ mod tests {
             .unwrap();
         // chunk A: 完全一致語 E0382 を含む。埋め込みはクエリから等距離
         let a_id = db
-            .insert_chunk(doc_id, 0, Some("Errors"), "E0382 is a move error", &dummy_embedding(0.5), 1.0)
+            .insert_chunk(
+                doc_id,
+                0,
+                Some("Errors"),
+                "E0382 is a move error",
+                &dummy_embedding(0.5),
+                1.0,
+            )
             .unwrap();
         // chunk B: 完全一致語を含まない。埋め込みはクエリから等距離
         let b_id = db
-            .insert_chunk(doc_id, 1, Some("Other"), "unrelated content here", &dummy_embedding(0.5), 1.0)
+            .insert_chunk(
+                doc_id,
+                1,
+                Some("Other"),
+                "unrelated content here",
+                &dummy_embedding(0.5),
+                1.0,
+            )
             .unwrap();
 
         let hits = db
@@ -1788,7 +1847,11 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 2);
         // FTS でヒットするのは A だけ → A が上位
-        assert!(hits[0].content.contains("E0382"), "got: {:?}", hits[0].content);
+        assert!(
+            hits[0].content.contains("E0382"),
+            "got: {:?}",
+            hits[0].content
+        );
         let _ = (a_id, b_id);
     }
 
@@ -1816,10 +1879,24 @@ mod tests {
             .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
             .unwrap();
         let c1 = db
-            .insert_chunk(doc_id, 0, None, "E0382 moved value", &dummy_embedding(0.1), 1.0)
+            .insert_chunk(
+                doc_id,
+                0,
+                None,
+                "E0382 moved value",
+                &dummy_embedding(0.1),
+                1.0,
+            )
             .unwrap();
         let c2 = db
-            .insert_chunk(doc_id, 1, None, "unrelated note", &dummy_embedding(0.9), 1.0)
+            .insert_chunk(
+                doc_id,
+                1,
+                None,
+                "unrelated note",
+                &dummy_embedding(0.9),
+                1.0,
+            )
             .unwrap();
 
         let hits = db
@@ -1891,7 +1968,14 @@ mod tests {
         }
 
         let hits = db
-            .search_hybrid("noexistent_query", &dummy_embedding(0.5), 5, Some("target"), None, 0.0)
+            .search_hybrid(
+                "noexistent_query",
+                &dummy_embedding(0.5),
+                5,
+                Some("target"),
+                None,
+                0.0,
+            )
             .unwrap();
         assert_eq!(hits.len(), 1, "target カテゴリの 1 件を取りこぼさない");
     }
@@ -1931,10 +2015,24 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("H1"), "hello world", &dummy_embedding(0.1), 1.0)
-            .unwrap();
-        db.insert_chunk(doc_id, 1, Some("H2"), "second chunk", &dummy_embedding(0.2), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("H1"),
+            "hello world",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            Some("H2"),
+            "second chunk",
+            &dummy_embedding(0.2),
+            1.0,
+        )
+        .unwrap();
         assert_eq!(fts_count(&db), 2);
 
         // legacy DB を模擬: FTS だけ空にする

@@ -84,12 +84,7 @@ pub trait Parser: Send + Sync {
     ///   形式 (`.txt` 等) で title をファイル名から derive する時に使う
     /// - `exclude_headings` — 見出しベースのチャンク除外リスト (substring 一致)。
     ///   見出し概念のない形式は無視してよい
-    fn parse(
-        &self,
-        raw: &str,
-        path_hint: &str,
-        exclude_headings: &[&str],
-    ) -> ParsedDocument;
+    fn parse(&self, raw: &str, path_hint: &str, exclude_headings: &[&str]) -> ParsedDocument;
 }
 
 // ---------------------------------------------------------------------------

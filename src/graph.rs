@@ -354,13 +354,7 @@ mod tests {
     }
 
     /// doc + 1 chunk を挿入する helper。chunk_index=0。
-    fn insert_doc_with_chunk(
-        db: &Database,
-        path: &str,
-        heading: &str,
-        content: &str,
-        val: f32,
-    ) {
+    fn insert_doc_with_chunk(db: &Database, path: &str, heading: &str, content: &str, val: f32) {
         let doc_id = db
             .upsert_document(
                 path,
@@ -373,8 +367,15 @@ mod tests {
                 &format!("h-{path}"),
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some(heading), content, &dummy_embedding(val), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some(heading),
+            content,
+            &dummy_embedding(val),
+            1.0,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -503,13 +504,7 @@ mod tests {
         let db = setup_db();
         insert_doc_with_chunk(&db, "s.md", "s", "s body", 0.0);
         for i in 1..=10 {
-            insert_doc_with_chunk(
-                &db,
-                &format!("a{i}.md"),
-                "a",
-                "a body",
-                0.001 * i as f32,
-            );
+            insert_doc_with_chunk(&db, &format!("a{i}.md"), "a", "a body", 0.001 * i as f32);
         }
         let opts = GraphOptions {
             depth: 1,
@@ -611,7 +606,11 @@ mod tests {
             ..Default::default()
         };
         let g = build_connection_graph(&db, "s.md", &opts).unwrap();
-        assert_eq!(g.nodes.len(), 1, "only seed should be present when fan_out=0");
+        assert_eq!(
+            g.nodes.len(),
+            1,
+            "only seed should be present when fan_out=0"
+        );
         assert_eq!(g.stats.knn_queries, 0);
         assert_eq!(g.stats.max_depth_reached, 0);
     }
@@ -652,7 +651,10 @@ mod tests {
         };
         let g = build_connection_graph(&db, "s.md", &opts_nodedup).unwrap();
         let a_count = g.nodes.iter().filter(|n| n.path == "a.md").count();
-        assert!(a_count >= 2, "dedup_by_path=false should allow multiple chunks from a.md, got {a_count}");
+        assert!(
+            a_count >= 2,
+            "dedup_by_path=false should allow multiple chunks from a.md, got {a_count}"
+        );
     }
 
     #[test]

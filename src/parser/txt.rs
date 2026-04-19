@@ -15,12 +15,7 @@ impl Parser for TxtParser {
         "txt"
     }
 
-    fn parse(
-        &self,
-        raw: &str,
-        path_hint: &str,
-        _exclude_headings: &[&str],
-    ) -> ParsedDocument {
+    fn parse(&self, raw: &str, path_hint: &str, _exclude_headings: &[&str]) -> ParsedDocument {
         let body = normalize_text(raw);
         let title = derive_title(path_hint);
 
@@ -69,10 +64,7 @@ fn normalize_text(raw: &str) -> String {
 fn derive_title(path_hint: &str) -> Option<String> {
     // Take the last path segment (handles both `/` and `\`, though our
     // indexer normalizes to forward-slash before calling).
-    let last = path_hint
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(path_hint);
+    let last = path_hint.rsplit(['/', '\\']).next().unwrap_or(path_hint);
 
     // Strip extension.
     let stem = match last.rfind('.') {
@@ -93,10 +85,7 @@ fn derive_title(path_hint: &str) -> Option<String> {
         .collect();
 
     // Collapse runs of whitespace. (e.g. "foo--bar" → "foo  bar" → "foo bar")
-    let collapsed: String = title
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
 
     if collapsed.is_empty() {
         None
@@ -147,10 +136,7 @@ mod tests {
     #[test]
     fn test_derive_title_mixed_separators() {
         // `-` and `_` both become space; runs collapse to single space.
-        assert_eq!(
-            derive_title("a_b--c_d.txt").as_deref(),
-            Some("a b c d")
-        );
+        assert_eq!(derive_title("a_b--c_d.txt").as_deref(), Some("a b c d"));
     }
 
     #[test]

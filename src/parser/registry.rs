@@ -15,20 +15,14 @@ impl Registry {
     /// `"md"`) and parsers that don't exist yet (`"pdf"` / `"rst"` / `"adoc"`).
     pub fn from_enabled(ids: &[String]) -> Result<Self> {
         if ids.is_empty() {
-            anyhow::bail!(
-                "[parsers].enabled must contain at least one id (got empty list)"
-            );
+            anyhow::bail!("[parsers].enabled must contain at least one id (got empty list)");
         }
         let mut parsers: Vec<Box<dyn Parser>> = Vec::with_capacity(ids.len());
-        let mut seen: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for id in ids {
             let lower = id.to_ascii_lowercase();
             if !seen.insert(lower.clone()) {
-                anyhow::bail!(
-                    "[parsers].enabled contains duplicate id {:?}",
-                    id
-                );
+                anyhow::bail!("[parsers].enabled contains duplicate id {:?}", id);
             }
             let parser: Box<dyn Parser> = match lower.as_str() {
                 "md" => Box::new(MarkdownParser),
@@ -116,8 +110,7 @@ mod tests {
 
     #[test]
     fn test_from_enabled_rejects_unknown() {
-        let err = Registry::from_enabled(&["pdf".into()])
-            .expect_err("unknown id must fail");
+        let err = Registry::from_enabled(&["pdf".into()]).expect_err("unknown id must fail");
         let msg = err.to_string();
         assert!(msg.contains("pdf"));
         assert!(msg.contains("supported"));
