@@ -28,8 +28,9 @@ reranker = "bge-v2-m3"
 rerank_by_default = true
 fastembed_cache_dir = "/home/you/.cache/huggingface/hub"
 
-# チャンキング時に除外する見出し部分文字列。キー省略時の既定は
-# ["次の深堀り候補"]。明示的に空配列 [] を与えると除外を完全に無効化。
+# チャンキング時に除外する見出し部分文字列。省略すると除外なし
+# (既定は空リスト)。いずれかを substring として含む見出しのセクションは
+# 本文ごとチャンク化対象から外される。
 exclude_headings = ["次の深堀り候補", "参考リンク"]
 
 # チャンク単位の品質フィルタ (feature 13)。既定で有効、閾値 0.3。
@@ -420,6 +421,6 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 - **ハイブリッド検索 (FTS5 + ベクトル)**: `search` ツールは SQLite FTS5 全文検索 (trigram tokenizer、日本語 / CJK も動く。bm25 では `heading` 列を `content` の 2 倍重み) をベクトル検索と Reciprocal Rank Fusion (k=60) でマージする。返される `score` は RRF スコア (大きいほど良い) で距離ではない。3 文字未満のクエリは trigram の最小値を下回るためベクトルのみにフォールバック
 - **任意の再ランク**: `--reranker <model>` を付けると上位候補が cross-encoder で再スコアされてから返る。再ランク適用時は `score` が RRF 値ではなく cross-encoder の生スコアになる。再ランクは index 非依存 — サーバ起動時に再インデックスなしでトグル可能
 - **Connection graph**: `get_connection_graph` / `kb-mcp graph` はドキュメント起点でベクトルインデックス上を BFS する。追加インデックスは作らず、ホップ毎に sqlite-vec KNN を新規発行する。`depth ≤ 3` / `fan_out ≤ 20` で client-side クランプされるため、最悪でも 1 リクエストあたり約 21 KNN クエリ。スコアは L2 距離からの近似コサイン類似度 (`1 - d²/2` を `[0,1]` にクランプ、unit normalized embedding を前提 — BGE-small / BGE-M3 は内部で正規化済み)
-- **見出し除外**: 見出しテキストが `exclude_headings` のいずれか (既定 `["次の深堀り候補"]`) を含むセクションは、チャンキング時に落とされる。既定の除外を無効化するには `kb-mcp.toml` に `exclude_headings = []` を書く。マッチは部分文字列 (`heading.contains(pattern)`) なので、短いパターンは `"## 次の深堀り候補 (案)"` のようなバリエーションも拾う
+- **見出し除外**: 見出しテキストが `exclude_headings` のいずれかを含むセクションは、チャンキング時に落とされる。既定は空リスト (全セクション残す)。`kb-mcp.toml` の `exclude_headings` に substring を列挙するとオプトインになる。マッチは部分文字列 (`heading.contains(pattern)`) で、短いパターンは `"参考リンク"` → `"## 参考リンク (旧)"` のような変種も拾う
 - **`get_best_practice` path templates** (feature 16): `get_best_practice(target: "claude-code")` が読むファイルは `kb-mcp.toml` の `[best_practice].path_templates` で解決される。各テンプレートは `{target}` をプレースホルダとして使える。サーバはリスト順にテンプレートを試し、`kb_path` 配下に最初に存在したファイルを返す (path traversal は拒否)。既定は `["best-practices/{target}/PERFECT.md"]` で legacy 構成もそのまま動く。`"docs/{target}.md"` 等を追加すれば、ツール呼び出し側を変えずに異なる KB レイアウトに対応できる
 - **チャンク単位品質フィルタ** (feature 13、**既定有効** 閾値 `0.3`): インデックス時に各チャンクに対し 3 つのシグナル — 長さ (30 文字未満 → -0.6)、定型語のみ (TBD / TODO / 詳細は後述 等 → -0.5)、弱い構造 (80 文字未満の 1 行 → -0.3) — から `quality_score` を計算。閾値未満のチャンクは `search` / `kb-mcp search` / `get_connection_graph` で非表示。`get_connection_graph` の seed チャンクは免除。フィルタ無効化は `kb-mcp.toml` の `[quality_filter] enabled = false`、per-query は CLI `--include-low-quality` / MCP `include_low_quality: true`。閾値上書きは `--min-quality 0.5` / `min_quality: 0.5`。既存 index のアップグレード: 次の `kb-mcp index` 実行時に `quality_score` 列が透過的に追加され (ALTER TABLE)、1 度だけ backfill される (冪等)

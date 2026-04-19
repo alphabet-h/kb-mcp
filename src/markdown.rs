@@ -90,8 +90,10 @@ mod tests {
     }
 
     #[test]
-    fn test_chunking_excludes_next_candidates() {
-        let doc = parse(&fixture("sample.md"));
+    fn test_chunking_excludes_explicit_heading() {
+        // With an explicit exclude list, matching headings (and their body
+        // content) must be dropped from the chunk stream.
+        let doc = parse_with_excludes(&fixture("sample.md"), &["次の深堀り候補"]);
         for chunk in &doc.chunks {
             if let Some(ref heading) = chunk.heading {
                 assert!(

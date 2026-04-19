@@ -52,8 +52,10 @@ pub struct ParsedDocument {
 }
 
 /// Section headings excluded by default when the caller does not override.
-/// Matching is substring-based inside the Markdown chunker.
-pub const DEFAULT_EXCLUDED_HEADINGS: &[&str] = &["次の深堀り候補"];
+/// Empty by default; callers typically configure this via `kb-mcp.toml`'s
+/// `exclude_headings` key. Matching is substring-based inside the Markdown
+/// chunker.
+pub const DEFAULT_EXCLUDED_HEADINGS: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Parser trait
