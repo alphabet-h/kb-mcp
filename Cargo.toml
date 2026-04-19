@@ -2,6 +2,14 @@
 name = "kb-mcp"
 version = "0.1.0"
 edition = "2024"
+description = "MCP server providing semantic hybrid search (sqlite-vec + FTS5 with optional cross-encoder reranking) over a Markdown / plain-text knowledge base."
+authors = ["koshian"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alphabet-h/kb-mcp"
+homepage = "https://github.com/alphabet-h/kb-mcp"
+readme = "README.md"
+keywords = ["mcp", "rag", "search", "embedding", "sqlite-vec"]
+categories = ["command-line-utilities", "database", "text-processing"]
 
 [dependencies]
 rmcp = { version = "1", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }

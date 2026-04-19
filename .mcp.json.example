@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "kb-mcp": {
+      "type": "stdio",
+      "command": "/absolute/path/to/kb-mcp",
+      "args": ["serve", "--kb-path", "/absolute/path/to/knowledge-base"]
+    }
+  }
+}
