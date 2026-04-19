@@ -1,8 +1,10 @@
 # kb-mcp
 
-MCP server for semantic search over a Markdown knowledge base.
+MCP server for semantic search over a Markdown / plain-text knowledge base.
 
-Parses Markdown files with YAML frontmatter, splits them into heading-based chunks, generates embeddings with a selectable model (BGE-small-en-v1.5 by default, BGE-M3 for multilingual/Japanese knowledge bases), and stores everything in SQLite with sqlite-vec for vector similarity search. Connects to Claude Code, Cursor, or any MCP-compatible client via stdio transport.
+Parses Markdown (and optionally `.txt`) files with YAML frontmatter, splits them into heading-based chunks, generates embeddings with a selectable model (BGE-small-en-v1.5 by default, BGE-M3 for multilingual/Japanese knowledge bases), and stores everything in SQLite with sqlite-vec for vector similarity search. Connects to Claude Code, Cursor, or any MCP-compatible client via stdio (default, 1 client) or Streamable HTTP (many clients) transport.
+
+A live-sync file watcher keeps the index fresh on manual edits, `git pull`, and external scripts; an optional TOML schema can validate frontmatter conventions via `kb-mcp validate`.
 
 ## Build
 
@@ -105,9 +107,13 @@ Practical recommendation: pick the model that matches your knowledge base's **pr
 kb-mcp serve --kb-path /path/to/knowledge-base
 kb-mcp serve --kb-path /path/to/knowledge-base --model bge-m3   # must match the indexed model
 kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder reranking
+kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP, multi-client (feature 18)
+kb-mcp serve --kb-path ... --no-watch                           # disable live-sync (feature 12)
 ```
 
-Starts the MCP server on stdio transport. The server exposes 5 tools (see below) and keeps the index in-process for low-latency queries. `--model` must match the model that built the current index, otherwise the server refuses to start with an actionable error message.
+Starts the MCP server on stdio transport by default (one client at a time). Pass `--transport http --port <PORT>` (or `--bind <SOCKETADDR>`) to serve multiple clients simultaneously via Streamable HTTP — details in the [HTTP transport](#http-transport-for-multiple-simultaneous-clients-feature-18) section.
+
+The server exposes 6 tools (see below) and keeps the index in-process for low-latency queries. `--model` must match the model that built the current index, otherwise the server refuses to start with an actionable error message. A file watcher (enabled by default) re-indexes affected files when `--kb-path` changes — see [Live-sync via file watcher](#live-sync-via-file-watcher-feature-12).
 
 `--reranker` (optional, default `none`) enables a cross-encoder re-ranking pass over the top candidates of the hybrid search:
 
@@ -181,6 +187,18 @@ Flags:
 - `--format json|text` — same as `search`.
 
 The output is a flat array of nodes with `parent_id` / `depth` / `score` so the consumer can reconstruct the tree if it wants. Good use cases: "give me 30 chunks of related context around this note for the LLM to read", or "walk two hops from this overview to see what topics it touches".
+
+### Validate frontmatter against a TOML schema
+
+If your knowledge base follows a frontmatter convention, `kb-mcp validate` checks every `.md` file against a TOML schema and reports violations. See the [Frontmatter schema validation](#frontmatter-schema-validation-feature-17) section below for the schema format; the command itself is:
+
+```bash
+kb-mcp validate --kb-path /path/to/knowledge-base
+kb-mcp validate --kb-path ... --format json | jq '.files[]'
+kb-mcp validate --kb-path ... --format github         # ::error annotations for CI
+```
+
+Exit codes: `0` (no violations), `1` (violations), `2` (schema load error). When `kb-mcp-schema.toml` is absent under `--kb-path`, the command exits 0 with a short "no schema found" note, so adding `kb-mcp validate` to an existing workflow is non-disruptive until you actually write a schema.
 
 ## Connecting to Claude Code / Cursor
 
@@ -381,7 +399,7 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 | `list_topics` | List all indexed topics and categories with document counts. | (none) |
 | `get_document` | Get the full content and metadata of a document by its relative path. | `path` (e.g. `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | Get a best-practices document for the given target, optionally extracting a specific h2 section. Path resolution uses `[best_practice].path_templates` from `kb-mcp.toml` (default: `best-practices/{target}/PERFECT.md`), so arbitrary KB layouts are supported. | `target` (e.g. `"claude-code"`), `category` (optional) |
-| `rebuild_index` | Rebuild the search index by scanning all Markdown files. | `force` (optional, default false) |
+| `rebuild_index` | Rebuild the search index by scanning all source files (Markdown plus any other extensions enabled via `[parsers].enabled`). | `force` (optional, default false) |
 | `get_connection_graph` | BFS-expand semantically related chunks starting from a document path. Returns a flat list of nodes with `parent_id` / `depth` / `score` / `snippet` so the caller can chain context discovery. | `path` (required), `depth` (default 2, max 3), `fan_out` (default 5, max 20), `min_similarity` (default 0.3), `seed_strategy` (`all_chunks` / `centroid`), `dedup_by_path`, `category`, `topic`, `exclude_paths` |
 
 ## Notes
@@ -391,6 +409,9 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
   2. OS cache dir joined with `fastembed` (Linux: `~/.cache/fastembed`, macOS: `~/Library/Caches/fastembed`, Windows: `%LOCALAPPDATA%\fastembed`).
   3. `.fastembed_cache` under the current working directory (final fallback).
 - **Index storage**: The SQLite database is stored as `.kb-mcp.db` in the **parent** directory of the `--kb-path` (i.e. the repository root when `--kb-path` points to `knowledge-base/`).
+- **Parser registry** (feature 20): only file extensions listed in `[parsers].enabled` are indexed. The section defaults to `["md"]` (pre-feature-20 behavior); `["md", "txt"]` opts into `.txt` where the title is derived from the filename. Unknown ids (e.g. `"pdf"` / `"rst"`) are rejected at startup; an empty array is also rejected to avoid silent "nothing is indexed" failures.
+- **Live-sync file watcher** (feature 12): `kb-mcp serve` spawns a `notify`-based watcher by default (`[watch].enabled = true`, 500 ms debounce). Manual saves, `git pull`, and external scripts are re-indexed incrementally on the same Mutex-guarded resources used by MCP tools, so concurrent triggers are serialized. Disable with `--no-watch` or `[watch].enabled = false`.
+- **HTTP transport** (feature 18): `--transport http --port 3100` serves MCP over rmcp's Streamable HTTP at `/mcp`, with `/healthz` for probes and a Mutex-serialized pipeline inside. Default bind is `127.0.0.1:3100` — `0.0.0.0` is opt-in and **has no built-in authentication yet**; restrict with a reverse proxy / firewall until that arrives.
 - **Embedding dimensions**: Depends on `--model`. BGE-small-en-v1.5 = 384, BGE-M3 = 1024. The chosen dim is declared on the `vec_chunks` virtual table and recorded in the `index_meta` table; a mismatch at runtime is detected and rejected.
 - **Incremental indexing**: Files are tracked by SHA-256 content hash. Only changed files are re-embedded on subsequent `index` runs (unless `--force` is passed). Moving / renaming a file without modifying its content is detected via hash match and handled as a `documents.path` UPDATE — the existing chunks, embeddings, and FTS rows are reused instead of being rebuilt. The rebuild summary reports the number of renames as `renamed` next to `updated` / `deleted`.
 - **Hybrid search (FTS5 + vector)**: The `search` tool combines SQLite FTS5 full-text search (trigram tokenizer, works for Japanese/CJK too; `heading` column is weighted 2× `content` in bm25) with the vector search via Reciprocal Rank Fusion (k=60). The returned `score` is the RRF score (higher = better), not a distance. Queries shorter than 3 characters fall back to vector-only (below the trigram minimum).

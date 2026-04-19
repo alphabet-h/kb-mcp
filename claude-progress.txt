@@ -1368,3 +1368,19 @@ run_validate 冒頭の `kb_path.canonicalize()?` を削除し、walkdir + strip_
 - cargo test --test validate_cli: 5 passed (新規 integration)
 - cargo clippy --all-targets -- -D warnings: クリーン
 - cargo build --release: 成功
+
+## 2026-04-19: README.md を最新化
+
+ユーザ指摘「README.md は最新の状態でしょうか？」で洗い出し:
+- L3-5 intro が "Markdown knowledge base" / "stdio transport" で stale
+  → Markdown/plain-text、stdio + Streamable HTTP、watcher / validate の言及を追加
+- L110 "Starts the MCP server on stdio transport" → --transport http と
+  watcher 既定 on の注記を追加、アンカーリンクで HTTP / live-sync 節へ誘導
+- `kb-mcp validate` サブコマンドの独立節が Usage 無 → graph の後に追加
+  (exit code 0/1/2 と schema 不在時の非破壊性も明記)
+- Tools 表の rebuild_index description "Markdown files" → "source files
+  (Markdown plus any other extensions enabled via [parsers].enabled)"
+- Notes 節に feature 20 (Parser registry) / feature 12 (watcher) / feature 18
+  (HTTP transport) のハイライトを 3 行追記
+
+コミット前レビュー: feature 12/17/18/20 すべて言及されていることを grep で確認。
