@@ -26,7 +26,7 @@ struct DiskEntry {
     full: std::path::PathBuf,
 }
 
-/// [feature 11] disk と DB の (path, hash) から「移動ペア」を決定する純粋関数。
+/// disk と DB の (path, hash) から「移動ペア」を決定する純粋関数。
 ///
 /// - 「DB にあるが disk にない」path は「消えた」候補
 /// - 「disk にあるが DB にない」path は「新規出現」候補
@@ -81,7 +81,7 @@ fn detect_renames(
 pub struct IndexResult {
     pub total_documents: u32,
     pub updated: u32,
-    /// [feature 11] File-rename を検出した件数。embedding は再計算されず
+    /// File-rename を検出した件数。embedding は再計算されず
     /// `documents.path` だけが UPDATE された数。
     pub renamed: u32,
     pub deleted: u32,
@@ -89,7 +89,7 @@ pub struct IndexResult {
     pub duration_ms: u64,
 }
 
-/// [feature 12] 単一ファイルのインデックス結果。`rebuild_index` 内での
+/// 単一ファイルのインデックス結果。`rebuild_index` 内での
 /// per-file 処理と、watcher 経由の `reindex_single_file` で共通に使う。
 #[derive(Debug, PartialEq)]
 pub enum SingleResult {
@@ -130,21 +130,21 @@ pub fn rebuild_index(
         .canonicalize()
         .with_context(|| format!("failed to canonicalize kb_path: {}", kb_path.display()))?;
 
-    // pre-feature-9 DB を引き継いだケースで FTS が空のままにならないよう、
+    // legacy DB を引き継いだケースで FTS が空のままにならないよう、
     // まず既存 chunks のうち FTS 未登録のものを backfill する。
     let backfilled = db.backfill_fts()?;
     if backfilled > 0 {
         eprintln!("Backfilled {backfilled} chunks into FTS index");
     }
 
-    // pre-feature-13 DB (quality_score = 1.0 のまま) を一度だけ再評価する。
+    // legacy DB (quality_score = 1.0 のまま) を一度だけ再評価する。
     // 既にスコアが入っているチャンクは触らないため冪等。
     let quality_updated = db.backfill_quality()?;
     if quality_updated > 0 {
         eprintln!("Backfilled {quality_updated} chunks with quality scores");
     }
 
-    // [feature 20] Registry の対応拡張子リストで source files を収集する。
+    // Registry の対応拡張子リストで source files を収集する。
     // 旧 collect_md_files は .md 固定だったが、.txt 等にも対応。
     let source_files = collect_source_files(&kb_path, registry, exclude_dirs)?;
     eprintln!(
@@ -153,7 +153,7 @@ pub fn rebuild_index(
         registry.extensions()
     );
 
-    // [feature 11] ファイル移動検出の前段階として、disk 側の全ファイルの
+    // ファイル移動検出の前段階として、disk 側の全ファイルの
     // **hash だけ** を先に計算する。content は持ち回らない (evaluator 指摘
     // High #1: 大規模 KB の memory regression 回避)。embed/upsert 段階で
     // もう一度 read_to_string する — ファイル OS キャッシュで 2 度目の
@@ -178,7 +178,7 @@ pub fn rebuild_index(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // [feature 11] rename 検出 + atomically な rename 適用。
+    // rename 検出 + atomically な rename 適用。
     // force=true のときは skip (embedding 全件再計算の意図)。
     let renamed: u32 = if force {
         0
@@ -250,7 +250,7 @@ pub fn rebuild_index(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// [feature 12] 単一 DiskEntry を index する内部関数。
+/// 単一 DiskEntry を index する内部関数。
 /// rebuild_index 本体と、将来 watcher から呼ばれる `reindex_single_file` の
 /// 両方で共通利用される核の処理。embedder は `&mut` で要求する (fastembed は
 /// 同時呼び出し不可)。呼び出し側で Mutex 経由の相互排他を保証すること。
@@ -273,7 +273,7 @@ fn index_single_disk_entry(
     }
 
     // Read + parse only for files we actually need to embed.
-    // 拡張子で Registry から Parser を選択 (feature 20)。collect_source_files
+    // 拡張子で Registry から Parser を選択。collect_source_files
     // が Registry の extensions() のみを拾うため、通常は必ず見つかる。
     // 見つからなければ安全側に Skip 扱いで返し、crash せず次に進む。
     let ext = entry
@@ -302,7 +302,7 @@ fn index_single_disk_entry(
 
     let (category, topic) = extract_category_topic(&entry.rel);
 
-    // [feature 12 F12-8] frontmatter-only skip: 既存 DB のチャンクテキストと
+    // frontmatter-only skip: 既存 DB のチャンクテキストと
     // 新 parse 結果のチャンクテキストを比較し、完全一致ならチャンク本体は
     // 再 embedding せず documents 行のメタ (title/date/tags/topic/depth) と
     // content_hash のみ UPDATE する。BGE-M3 では数百 ms 〜秒規模の節約。
@@ -369,7 +369,7 @@ fn index_single_disk_entry(
 }
 
 // ---------------------------------------------------------------------------
-// [feature 12] 増分 index API (watcher から呼ぶ)
+// 増分 index API (watcher から呼ぶ)
 // ---------------------------------------------------------------------------
 
 /// 1 つの source file を index / 再 index する。
@@ -416,7 +416,7 @@ pub fn deindex_single_file(db: &Database, rel: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// [feature 12] Rename の結果。`rename_single_file` の戻り値。
+/// Rename の結果。`rename_single_file` の戻り値。
 #[derive(Debug, PartialEq)]
 pub enum RenameOutcome {
     /// DB 側の path だけ UPDATE した (内容は同一)
@@ -667,7 +667,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // [feature 20] collect_source_files
+    // collect_source_files
     // -----------------------------------------------------------------------
 
     struct TmpDir(std::path::PathBuf);
@@ -793,7 +793,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // [feature 12] 増分 index API
+    // 増分 index API
     // -----------------------------------------------------------------------
 
     fn test_db() -> Database {
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_update_document_meta_for_frontmatter_only_change() {
-        // F12-8 の前提となる DB API が期待通り動くことの回帰テスト。
+        // frontmatter-only skip の前提となる DB API が期待通り動くことの回帰テスト。
         let db = test_db();
         db.upsert_document(
             "notes/a.md",
@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn test_f12_8_frontmatter_only_skip_db_contract() {
-        // F12-8 (frontmatter-only skip) の DB 契約部分を end-to-end で検証:
+        // frontmatter-only skip (frontmatter-only skip) の DB 契約部分を end-to-end で検証:
         // 1. document + chunk を 1 件 index した状態を作る
         // 2. chunk_texts_for_path が期待通りのリストを返す
         // 3. frontmatter だけ変えた再 index 相当として update_document_meta を呼ぶ

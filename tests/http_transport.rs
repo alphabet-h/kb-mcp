@@ -1,4 +1,4 @@
-//! [feature 18] HTTP Streamable transport integration test.
+//! HTTP Streamable transport integration test.
 //!
 //! `#[ignore]` 前提: embedder のモデル DL (BGE-small ~130 MB 以上) が必要で
 //! 通常の `cargo test` には載せない。明示的に

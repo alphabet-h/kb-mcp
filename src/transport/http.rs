@@ -1,4 +1,4 @@
-//! [feature 18] Streamable HTTP transport runner.
+//! Streamable HTTP transport runner.
 //!
 //! rmcp 1.x の `StreamableHttpService` を axum でマウントし、複数クライアント
 //! 同時接続可能な MCP サーバを提供する。mount path は `/mcp` 固定 (MVP)。

@@ -1,4 +1,4 @@
-//! [feature 20] Parser plugin layer.
+//! Parser plugin layer.
 //!
 //! 各ファイル形式 (`.md` / `.txt` / 将来 `.rst` / `.adoc` / `.pdf` 等) に対して
 //! `trait Parser` の実装を 1 つ用意し、`Registry` が拡張子でルックアップする。
@@ -99,7 +99,7 @@ pub trait Parser: Send + Sync {
 /// [parsers] セクション (`kb-mcp.toml`)。
 ///
 /// - キー省略時 (`parsers: None`) は `Registry::defaults()` (= `["md"]` のみ、
-///   pre-feature-20 完全後方互換) を適用する。ユーザが `.txt` 等を index したい
+///   legacy 完全後方互換) を適用する。ユーザが `.txt` 等を index したい
 ///   場合は明示的に `enabled = ["md", "txt"]` と opt-in する。
 /// - `enabled = []` は誤設定として reject する (全拡張子が無効 = index 結果が
 ///   空になる silent failure を防ぐ)。

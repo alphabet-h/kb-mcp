@@ -1,7 +1,7 @@
 //! Connection Graph: 起点ドキュメントからベクトル類似度で BFS 展開する機能。
 //!
 //! `get_connection_graph` MCP ツールと `kb-mcp graph` CLI サブコマンドの
-//! バックエンド。grand plan は `docs/` 参照 (feature 15)。
+//! バックエンド。grand plan は `docs/` 参照。
 
 use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
@@ -46,7 +46,7 @@ pub struct GraphOptions {
     /// `true` のとき、同一 path からは 1 チャンクしか返さない (ドキュメント
     /// 単位で dedup)。`false` なら別チャンクは別ノードとして並ぶ (default)。
     pub dedup_by_path: bool,
-    /// 近傍 KNN 段階で適用する品質スコア (feature 13) のしきい値。
+    /// 近傍 KNN 段階で適用する品質スコア のしきい値。
     /// 0.0 ならフィルタ無効。seed ノードには適用しない (ユーザが明示指定した
     /// 起点なので低品質でも残す)。
     pub min_quality: f32,

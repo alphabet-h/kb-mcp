@@ -1,4 +1,4 @@
-//! [feature 17] `kb-mcp validate` CLI の integration test。
+//! `kb-mcp validate` CLI の integration test。
 //!
 //! schema 読込 + walkdir + format dispatch + exit code の end-to-end を
 //! 実バイナリで叩いて確認する。embedding DL 不要なので通常の `cargo test`

@@ -88,7 +88,7 @@ enum Commands {
         /// `rerank_by_default` value from `kb-mcp.toml`.
         #[arg(long, value_parser = clap::value_parser!(bool))]
         rerank_by_default: Option<bool>,
-        /// Disable the live-sync file watcher (feature 12).
+        /// Disable the live-sync file watcher.
         /// Default: watcher is ON unless disabled here or via
         /// `[watch].enabled = false` in kb-mcp.toml.
         #[arg(long = "no-watch", default_value_t = false)]
@@ -96,15 +96,15 @@ enum Commands {
         /// Override the watcher debounce in milliseconds. Default: 500ms.
         #[arg(long = "debounce-ms")]
         debounce_ms: Option<u64>,
-        /// [feature 18] Transport: stdio (default, 1 client) or http
+        /// Transport: stdio (default, 1 client) or http
         /// (Streamable HTTP, many clients). HTTP bind defaults to 127.0.0.1:3100.
         #[arg(long, value_enum)]
         transport: Option<transport::TransportKind>,
-        /// [feature 18] Full HTTP bind address when `--transport http`.
+        /// Full HTTP bind address when `--transport http`.
         /// Example: `--bind 0.0.0.0:3100`. Wins over `--port`.
         #[arg(long)]
         bind: Option<std::net::SocketAddr>,
-        /// [feature 18] HTTP port when `--transport http`, combined with
+        /// HTTP port when `--transport http`, combined with
         /// `127.0.0.1`. Default: 3100. Ignored if `--bind` is given.
         #[arg(long)]
         port: Option<u16>,
@@ -168,7 +168,7 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
         format: SearchFormat,
     },
-    /// [feature 17] Validate frontmatter against a TOML schema file.
+    /// Validate frontmatter against a TOML schema file.
     ///
     /// Scans `.md` files under --kb-path and reports frontmatter violations.
     /// Exit code: 0 (no violations), 1 (violations), 2 (schema load error).
@@ -293,7 +293,7 @@ fn main() -> anyhow::Result<()> {
                 .path_templates;
             let parser_registry = cfg.build_parser_registry()?;
 
-            // [feature 12] watch config の解決
+            // watch config の解決
             // 優先順位: --no-watch CLI > [watch].enabled config > default(true)
             let mut watch_config = cfg.watch.clone().unwrap_or_default();
             if no_watch {
@@ -303,7 +303,7 @@ fn main() -> anyhow::Result<()> {
                 watch_config.debounce_ms = d;
             }
 
-            // [feature 18] transport の解決: CLI > config > default (stdio)
+            // transport の解決: CLI > config > default (stdio)
             let resolved_transport = transport::Transport::resolve(
                 cli_transport,
                 bind,
@@ -398,7 +398,7 @@ fn main() -> anyhow::Result<()> {
             let total_chunks = db.chunk_count()?;
             eprintln!("Documents: {total_docs}");
             eprintln!("Chunks: {total_chunks}");
-            // feature 13: 設定済みの threshold で filter される件数を表示
+            // Quality filter: 設定済みの threshold で filter される件数を表示
             let qf = cfg.quality_filter.clone().unwrap_or_default();
             let threshold = qf.effective_threshold();
             if threshold > 0.0 {
@@ -531,7 +531,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// [feature 17] validate サブコマンド本体。exit code (0/1/2) を返す。
+/// validate サブコマンド本体。exit code (0/1/2) を返す。
 fn run_validate(
     kb_path: &Path,
     schema_path: &Path,
@@ -540,7 +540,7 @@ fn run_validate(
     fail_fast: bool,
     exclude_dirs: &[String],
 ) -> Result<i32> {
-    // スキーマ読み込み: 存在しなければ pre-feature-17 挙動 (exit 0)
+    // スキーマ読み込み: 存在しなければ legacy 挙動 (exit 0)
     let schema_obj = match schema::Schema::load_optional(schema_path) {
         Ok(Some(s)) => s,
         Ok(None) => {

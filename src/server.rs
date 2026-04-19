@@ -19,10 +19,10 @@ use crate::{indexer, markdown};
 // ---------------------------------------------------------------------------
 
 pub struct KbServer {
-    /// [feature 12] watcher と共有するため `Arc<Mutex<_>>` で保持。
+    /// watcher と共有するため `Arc<Mutex<_>>` で保持。
     db: Arc<Mutex<Database>>,
     embedder: Arc<Mutex<Embedder>>,
-    /// [feature 18] HTTP トランスポートの service factory でセッションごとに
+    /// HTTP トランスポートの service factory でセッションごとに
     /// `KbServer` を clone するため Arc 化。Option なのは reranker 無効のケース。
     reranker: Arc<Mutex<Option<Reranker>>>,
     rerank_by_default: bool,
@@ -32,18 +32,18 @@ pub struct KbServer {
     exclude_headings: Option<Vec<String>>,
     /// `rebuild_index` ツールで walkdir 時にスキップするディレクトリ basename。
     exclude_dirs: Vec<String>,
-    /// feature 13: 既定の品質フィルタしきい値。`search` / graph で適用。
+    /// Quality filter: 既定の品質フィルタしきい値。`search` / graph で適用。
     /// 0.0 ならフィルタ無効。
     quality_threshold: f32,
-    /// feature 16: `get_best_practice` のパス候補テンプレート。
+    /// Best-practice resolver: `get_best_practice` のパス候補テンプレート。
     /// 先頭から順に `{target}` を置換してファイルを探し、最初に存在した
     /// ものを読む。kb-mcp.toml 未指定時は legacy 既定
     /// `["best-practices/{target}/PERFECT.md"]`。
     best_practice_templates: Vec<String>,
-    /// feature 20: index 対象の拡張子レジストリ。`rebuild_index` MCP ツール
+    /// Parser registry: index 対象の拡張子レジストリ。`rebuild_index` MCP ツール
     /// から `indexer::rebuild_index` に渡す。`kb-mcp.toml` の
     /// `[parsers].enabled` が無ければ `Registry::defaults()` = `["md"]` のみ。
-    /// [feature 12] watcher とも共有するため Arc。
+    /// watcher とも共有するため Arc。
     parser_registry: Arc<Registry>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -158,7 +158,7 @@ struct BestPracticeResponse {
 struct IndexStats {
     total_documents: u32,
     updated: u32,
-    /// [feature 11] File-rename を検出して path だけ UPDATE した件数。
+    /// File-rename を検出して path だけ UPDATE した件数。
     #[serde(default)]
     renamed: u32,
     deleted: u32,
@@ -515,7 +515,7 @@ impl KbServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// [feature 20] `get_document` ツール用に、拡張子に対応する Parser で
+/// `get_document` ツール用に、拡張子に対応する Parser で
 /// frontmatter (title/date/topic/tags) を抽出し DocumentResponse を組む。
 /// 純粋関数化してテスト可能にしている。
 ///
@@ -551,7 +551,7 @@ enum ResolveOutcome {
     NotFound(Vec<String>),
 }
 
-/// feature 16: テンプレート列に `{target}` を置換してファイルを探す。
+/// Best-practice resolver: テンプレート列に `{target}` を置換してファイルを探す。
 /// 先頭から順に試し、`canonicalize` 成功 & `kb_path` 配下に収まる最初の
 /// 候補を返す。`kb_path` は呼び出し側で既に canonicalize されている前提
 /// (`run_server` / tests で事前処理)。
@@ -624,7 +624,7 @@ fn list_h2_sections(content: &str) -> Vec<String> {
 // Server bootstrap
 // ---------------------------------------------------------------------------
 
-/// [feature 18] `KbServer` を構成する共有リソース。HTTP トランスポートの
+/// `KbServer` を構成する共有リソース。HTTP トランスポートの
 /// service factory が session ごとに `KbServer` を生成するため、重いリソース
 /// (DB / embedder / reranker / registry) を 1 回だけロードして Arc で共有する。
 #[derive(Clone)]
@@ -642,7 +642,7 @@ pub struct KbServerShared {
 }
 
 impl KbServer {
-    /// [feature 18] Shared state から新しい `KbServer` を組み立てる。
+    /// Shared state から新しい `KbServer` を組み立てる。
     /// Arc::clone で軽量、embedder / reranker モデルの重複ロードは起きない。
     pub fn from_shared(shared: &KbServerShared) -> Self {
         Self {
@@ -686,8 +686,8 @@ pub async fn run_server(
 
     let kb_path = kb_path.canonicalize().unwrap_or_else(|_| kb_path.to_path_buf());
 
-    // [feature 12] watcher と共有するため Arc 化。
-    // [feature 18] HTTP service factory でも共有するため KbServerShared にまとめる。
+    // watcher と共有するため Arc 化。
+    // HTTP service factory でも共有するため KbServerShared にまとめる。
     let shared = KbServerShared {
         db: Arc::new(Mutex::new(db)),
         embedder: Arc::new(Mutex::new(embedder)),
@@ -701,7 +701,7 @@ pub async fn run_server(
         parser_registry: Arc::new(parser_registry),
     };
 
-    // [feature 12] watcher をバックグラウンドで並走。
+    // watcher をバックグラウンドで並走。
     let watcher_state = crate::watcher::WatcherState {
         kb_path: kb_path.clone(),
         db: Arc::clone(&shared.db),
@@ -857,7 +857,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // [feature 20] build_document_response の拡張子認識
+    // build_document_response の拡張子認識
     // evaluator 指摘 High #1: .txt で title が落ちる不整合を防ぐ回帰テスト。
     // -----------------------------------------------------------------------
 
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn test_build_document_response_unknown_ext_falls_back_to_markdown() {
-        // 登録外の拡張子は markdown::parse にフォールバック (pre-feature-20 相当)。
+        // 登録外の拡張子は markdown::parse にフォールバック (legacy 相当)。
         // 通常は collect_source_files が registry の extensions しか拾わないため
         // 到達しないが、外部からの直接 path 指定でも落ちないように。
         let reg = Registry::defaults(); // md only

@@ -62,7 +62,7 @@ impl Registry {
     }
 
     /// All enabled extensions, used by `walkdir` filtering and by the
-    /// (future) feature 12 watcher to limit fsnotify events.
+    /// (future) file watcher to limit fsnotify events.
     pub fn extensions(&self) -> Vec<&'static str> {
         self.parsers.iter().map(|p| p.extension()).collect()
     }

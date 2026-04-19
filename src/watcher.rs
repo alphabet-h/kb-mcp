@@ -1,4 +1,4 @@
-//! [feature 12] File watcher that debounces OS events and dispatches them to
+//! File watcher that debounces OS events and dispatches them to
 //! the incremental index API (`indexer::reindex_single_file` /
 //! `deindex_single_file` / `rename_single_file`).
 //!
@@ -45,7 +45,7 @@ use crate::parser::Registry;
 // Config
 // ---------------------------------------------------------------------------
 
-/// [feature 12] `[watch]` セクション (`kb-mcp.toml`)。
+/// `[watch]` セクション (`kb-mcp.toml`)。
 ///
 /// - `enabled` 省略時: `true` (kb-mcp の値提案 = "常に fresh" を守るため)
 /// - `debounce_ms` 省略時: 500ms。エディタの save が複数イベントを生む
@@ -126,7 +126,7 @@ pub async fn run_watch_loop(state: WatcherState) -> Result<()> {
     let kb_watch_path = state.kb_path.clone();
 
     // bridge thread: std::sync::mpsc → tokio::sync::mpsc
-    // [feature 12 F12-9] watch 初期化や watch() が失敗 (ディレクトリ削除等) した
+    // watch 初期化や watch() が失敗 (ディレクトリ削除等) した
     // 場合は指数バックオフで再試行する。30 秒以内に復帰できなければ次周で延期。
     let _bridge = std::thread::Builder::new()
         .name("kb-mcp-watcher".to_string())
@@ -179,7 +179,7 @@ pub async fn run_watch_loop(state: WatcherState) -> Result<()> {
                 }
                 // 成功: backoff をリセット
                 backoff = Duration::from_secs(1);
-                // [F12-9] periodic liveness probe: 30 秒ごとに kb_path の
+                // periodic liveness probe: 30 秒ごとに kb_path の
                 // 存在確認をして、ディレクトリが消えていたら debouncer を
                 // drop して再構築する。inotify は親ディレクトリ削除時に
                 // 無音で死ぬため明示的な polling が必要。

@@ -52,24 +52,24 @@ pub struct Config {
     /// 省略時は [`DEFAULT_EXCLUDE_DIRS`] が適用される。明示的な `[]` を
     /// 与えると「全ディレクトリを走査する」という意味になる。
     pub exclude_dirs: Option<Vec<String>>,
-    /// [feature 13] 検索時に適用するチャンク品質フィルタの設定。
+    /// 検索時に適用するチャンク品質フィルタの設定。
     /// 省略時は [`QualityFilterConfig::default()`] (enabled=true, threshold=0.3)。
     pub quality_filter: Option<QualityFilterConfig>,
     /// `get_best_practice` MCP ツールで使うパス候補テンプレート (opt-in)。
     /// 省略時 (`None`) または空リストの場合、`get_best_practice` ツールは
     /// "not configured" エラーを返す (ツール自体は MCP に登録されるが機能しない)。
     pub best_practice: Option<BestPracticeConfig>,
-    /// [feature 20] Indexing 対象の拡張子リスト。
-    /// 省略時 (`None`) は `["md"]` のみ (pre-feature-20 完全後方互換)。`.txt`
+    /// Indexing 対象の拡張子リスト。
+    /// 省略時 (`None`) は `["md"]` のみ (legacy 完全後方互換)。`.txt`
     /// 等を取り込みたい場合は明示的に `enabled = ["md", "txt"]` と opt-in する。
     /// 空配列 `enabled = []` は誤設定として reject する。
     pub parsers: Option<ParsersConfig>,
-    /// [feature 12] serve 中のファイルウォッチャー設定。
+    /// serve 中のファイルウォッチャー設定。
     /// 省略時 (`None`) は `WatchConfig::default()` (enabled=true, debounce=500ms)。
     /// CLI `--no-watch` で即座に無効化できる。
     pub watch: Option<WatchConfig>,
-    /// [feature 18] serve が listen するトランスポート。
-    /// 省略時 (`None`) は stdio (1 クライアント限定、pre-feature-18 後方互換)。
+    /// serve が listen するトランスポート。
+    /// 省略時 (`None`) は stdio (1 クライアント限定、legacy 後方互換)。
     /// CLI `--transport http` で HTTP 起動に切り替え。
     pub transport: Option<TransportConfig>,
 }
@@ -125,7 +125,7 @@ impl Config {
         // のいずれも "not configured" を意味する。ランタイムでツールが
         // "not configured" エラーを返すため、ここでは reject しない。
 
-        // feature 20: [parsers].enabled = [] は誤設定として reject。キー省略
+        // Parser registry: [parsers].enabled = [] は誤設定として reject。キー省略
         // (parsers: None) の場合は Registry::defaults() = ["md"] が適用される
         // ため silent failure の心配は無い。
         if let Some(p) = &cfg.parsers {
@@ -162,8 +162,8 @@ impl Config {
         }
     }
 
-    /// [feature 20] 設定から `parser::Registry` を構築する。キー省略時は
-    /// `Registry::defaults()` = `["md"]` のみ (pre-feature-20 後方互換)。
+    /// 設定から `parser::Registry` を構築する。キー省略時は
+    /// `Registry::defaults()` = `["md"]` のみ (legacy 後方互換)。
     pub fn build_parser_registry(&self) -> Result<crate::parser::Registry> {
         match &self.parsers {
             Some(p) => crate::parser::Registry::from_enabled(&p.enabled),

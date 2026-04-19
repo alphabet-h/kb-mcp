@@ -1,4 +1,4 @@
-//! Backwards-compatibility shim for pre-feature-20 code paths.
+//! Backwards-compatibility shim for legacy code paths.
 //!
 //! The real Markdown parser now lives in [`crate::parser::markdown`] as an
 //! implementation of [`crate::parser::Parser`]. This module re-exports the
@@ -15,7 +15,7 @@ use crate::parser::{MarkdownParser, Parser};
 
 /// Parse Markdown using the default exclude list.
 ///
-/// Retained for test fixtures written against the pre-feature-20 API. New
+/// Retained for test fixtures written against the legacy API. New
 /// callers should go through `Registry::by_extension("md").parse(...)`.
 pub fn parse(raw: &str) -> ParsedDocument {
     parse_with_excludes(raw, DEFAULT_EXCLUDED_HEADINGS)

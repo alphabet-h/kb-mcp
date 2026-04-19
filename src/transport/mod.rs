@@ -1,4 +1,4 @@
-//! [feature 18] Transport layer abstraction for the MCP server.
+//! Transport layer abstraction for the MCP server.
 //!
 //! The MCP server can listen on either stdio (one client at a time) or
 //! Streamable HTTP (many clients simultaneously). Transport selection is

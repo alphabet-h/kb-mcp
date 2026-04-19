@@ -1,4 +1,4 @@
-//! [feature 18] stdio transport runner. Previously inlined in
+//! stdio transport runner. Previously inlined in
 //! `server::run_server`. Extracted here so HTTP can coexist.
 
 use anyhow::Result;

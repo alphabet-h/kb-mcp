@@ -1,5 +1,5 @@
 //! Markdown (`.md`) parser. Moved from the old `src/markdown.rs` and adapted
-//! to the `Parser` trait. Behaviour is identical to pre-feature-20.
+//! to the `Parser` trait. Behaviour is identical to legacy.
 
 use serde::Deserialize;
 

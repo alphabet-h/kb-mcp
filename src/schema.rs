@@ -1,4 +1,4 @@
-//! [feature 17] YAML frontmatter の構造規約を定義する TOML スキーマと
+//! YAML frontmatter の構造規約を定義する TOML スキーマと
 //! それに対するバリデータ。
 //!
 //! スキーマ記述例 (`kb-mcp-schema.toml`):

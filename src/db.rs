@@ -203,7 +203,7 @@ impl Database {
                 quality_score REAL NOT NULL DEFAULT 1.0
             );
             -- quality_score のインデックスは `ensure_quality_score_column` で
-            -- 列存在保証の後にまとめて作成する (pre-feature-13 DB は ALTER が
+            -- 列存在保証の後にまとめて作成する (legacy DB は ALTER が
             -- 先に走る必要があるため、ここでは列だけ用意する)。
             ",
         )?;
@@ -228,7 +228,7 @@ impl Database {
             self.ensure_vec_chunks_table(dim)?;
         }
 
-        // pre-feature-13 DB 互換: chunks.quality_score 列が無ければ ALTER で
+        // legacy DB 互換: chunks.quality_score 列が無ければ ALTER で
         // 追加する (DEFAULT 1.0 で既存行は全件「通過」扱い)。
         self.ensure_quality_score_column()?;
 
@@ -236,7 +236,7 @@ impl Database {
     }
 
     /// `chunks.quality_score` 列が存在しなければ追加する (idempotent)。
-    /// feature 13 より前に作られた DB を開いても失敗しないよう init 経路から
+    /// legacy DB を開いても失敗しないよう init 経路から
     /// 呼ぶ。新規 DB では `CREATE TABLE` 時点で列があるので no-op。
     ///
     /// 2 プロセスが同時に open して race した場合、後着プロセスの ALTER が
@@ -259,7 +259,7 @@ impl Database {
                 Err(e) => return Err(e.into()),
             }
         }
-        // 新規 DB でも pre-feature-13 DB でも、列が確保された後に同じ
+        // 新規 DB でも legacy DB でも、列が確保された後に同じ
         // INDEX (IF NOT EXISTS) を必ず張る。
         //
         // KNN / FTS 経由の search は vec_chunks / fts_chunks 駆動で chunks を
@@ -381,7 +381,7 @@ impl Database {
     ///
     /// `embedding` の長さは現在の `vec_chunks` の宣言次元 (`ModelChoice` に連動、
     /// BGE-small-en-v1.5 で 384 / BGE-M3 で 1024) と一致する必要がある。
-    /// `quality_score` は feature 13 の品質フィルタで使われる (0.0-1.0、
+    /// `quality_score` は the quality filterで使われる (0.0-1.0、
     /// `crate::quality::chunk_quality_score` で算出)。
     /// Returns the chunk `id`.
     #[allow(clippy::too_many_arguments)]
@@ -435,7 +435,7 @@ impl Database {
         Ok(result)
     }
 
-    /// [feature 12 F12-8] 指定 path の chunk 本文 (heading, content) を
+    /// 指定 path の chunk 本文 (heading, content) を
     /// chunk_index 順に返す。frontmatter のみ変更かどうかを判定するために
     /// 既存 chunks のテキストだけを読む。embedding は取得しない (軽量)。
     pub fn chunk_texts_for_path(
@@ -463,7 +463,7 @@ impl Database {
         Ok(out)
     }
 
-    /// [feature 12 F12-8] frontmatter-only change 用の document meta 更新。
+    /// frontmatter-only change 用の document meta 更新。
     /// chunks は触らず、documents 行の title / date / topic / category /
     /// depth / tags / content_hash のみ UPDATE する。存在しなければ no-op で
     /// `Ok(false)`。
@@ -999,7 +999,7 @@ impl Database {
     /// `index_meta`.
     ///
     /// * Empty meta + empty DB → record current values (fresh DB).
-    /// * Empty meta + non-empty DB → migrate a pre-feature-8 DB by recording
+    /// * Empty meta + non-empty DB → migrate a legacy DB by recording
     ///   the current values, with a one-time log message.
     /// * Matching meta → no-op.
     /// * Mismatching meta → return an actionable error.
@@ -1029,7 +1029,7 @@ impl Database {
     }
 
     /// FTS に未登録の `chunks` を拾って `fts_chunks` に埋め直す。
-    /// 主に pre-feature-9 DB のマイグレーション経路で呼ばれる。
+    /// 主に legacy DB のマイグレーション経路で呼ばれる。
     /// 埋め込み再計算は行わないので高速 (既存 content を INSERT するだけ)。
     pub fn backfill_fts(&self) -> Result<u32> {
         let sql = "
@@ -1055,7 +1055,7 @@ impl Database {
         Ok(count)
     }
 
-    /// pre-feature-13 DB で `quality_score` が DEFAULT 1.0 のまま放置されて
+    /// legacy DB で `quality_score` が DEFAULT 1.0 のまま放置されて
     /// いるチャンクを検出し、[`quality::chunk_quality_score`] で再計算して
     /// UPDATE する (冪等)。既に default 以外のスコアが入っている行は更新
     /// しないため、2 回目以降の呼び出しは no-op。戻り値は更新件数。
@@ -1140,7 +1140,7 @@ impl Database {
     }
 
     /// `documents.path` と `content_hash` の全対応を取得する。
-    /// feature 11 (ファイル移動検出) で、disk 側 hash と突き合わせて
+    /// File rename detection で、disk 側 hash と突き合わせて
     /// 「embedding 再利用 + path だけ UPDATE」判定に使う。
     pub fn all_path_hashes(&self) -> Result<HashMap<String, String>> {
         let mut stmt = self
@@ -1157,7 +1157,7 @@ impl Database {
         Ok(out)
     }
 
-    /// [feature 11] 既存ドキュメントのパスを書き換える。
+    /// 既存ドキュメントのパスを書き換える。
     /// `chunks` / `vec_chunks` / `fts_chunks` は `document_id` 経由で紐付いて
     /// いるため、`documents.path` のみを UPDATE すれば embedding の再計算は
     /// 不要。移動先 path が既に使われている場合は UNIQUE 制約違反でエラー。
@@ -1181,7 +1181,7 @@ impl Database {
         Ok(())
     }
 
-    /// [feature 11] 複数の rename を **単一 transaction** で適用する (evaluator
+    /// 複数の rename を **単一 transaction** で適用する (evaluator
     /// 指摘 High #2)。途中失敗したらすべて rollback されるので「部分 rename
     /// 残留」が発生しない。`pairs` が空なら no-op。
     pub fn rename_documents_atomic(&self, pairs: &[(String, String)]) -> Result<()> {
@@ -1422,7 +1422,7 @@ mod tests {
 
     #[test]
     fn test_backfill_quality_is_idempotent() {
-        // pre-feature-13 DB を模倣: score=1.0 のまま低品質チャンクを挿入し、
+        // legacy DB を模倣: score=1.0 のまま低品質チャンクを挿入し、
         // backfill_quality が再評価するか、2 回目は no-op かを検証。
         let db = db_with_384();
         let doc_id = db
@@ -1442,7 +1442,7 @@ mod tests {
 
     #[test]
     fn test_rename_document_preserves_chunks() {
-        // feature 11: rename_document は path だけ変え、chunks/vec/fts は維持する
+        // File rename: rename_document は path だけ変え、chunks/vec/fts は維持する
         let db = db_with_384();
         let doc_id = db
             .upsert_document(
@@ -1486,7 +1486,7 @@ mod tests {
 
     #[test]
     fn test_rename_documents_atomic_rolls_back_on_failure() {
-        // feature 11: 途中で失敗したら rollback し、先行の rename も戻ること
+        // File rename: 途中で失敗したら rollback し、先行の rename も戻ること
         let db = db_with_384();
         db.upsert_document("a.md", None, None, None, None, &[], None, "h_a")
             .unwrap();
@@ -1937,7 +1937,7 @@ mod tests {
             .unwrap();
         assert_eq!(fts_count(&db), 2);
 
-        // pre-feature-9 DB を模擬: FTS だけ空にする
+        // legacy DB を模擬: FTS だけ空にする
         db.conn.execute("DELETE FROM fts_chunks", []).unwrap();
         assert_eq!(fts_count(&db), 0);
 
@@ -1993,8 +1993,8 @@ mod tests {
 
     #[test]
     fn test_verify_embedding_meta_migrates_preexisting_db() {
-        // Simulate a pre-feature-8 DB: chunks exist but meta is empty.
-        // In pre-feature-8 code `init()` always created vec_chunks with the
+        // Simulate a legacy DB: chunks exist but meta is empty.
+        // In legacy code `init()` always created vec_chunks with the
         // 384-dim literal. Reproduce that here by creating it manually.
         let db = Database::open_in_memory().unwrap();
         db.ensure_vec_chunks_table(384).unwrap();
