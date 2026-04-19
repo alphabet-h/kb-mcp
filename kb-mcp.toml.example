@@ -56,16 +56,14 @@
 enabled = true
 threshold = 0.3
 
-# `get_best_practice` MCP ツールのファイル解決テンプレート (feature 16)。
+# `get_best_practice` MCP ツール (opt-in)。`[best_practice]` セクションを
+# 省略、あるいは `path_templates = []` を明示すると、ツールは "not configured"
+# エラーを返し機能しない。利用するにはテンプレートを 1 つ以上列挙する。
 # 先頭から順に `{target}` を置換して kb_path 相対で探し、最初に見つかった
-# ファイルを返す。`target` 引数は安全のため canonicalize + kb_path 配下の
-# チェックが入る。省略時は ["best-practices/{target}/PERFECT.md"] (legacy)。
+# ファイルを返す。`target` 引数は canonicalize + kb_path 配下のチェックあり。
+# opt-out したい場合はこのセクションを丸ごと削除する。
 [best_practice]
-path_templates = [
-  "best-practices/{target}/PERFECT.md",  # ai_organization 既定構造
-  "docs/{target}.md",                    # docs/ 配置
-  "guides/{target}/README.md",           # guide 風
-]
+path_templates = ["best-practices/{target}/PERFECT.md", "docs/{target}.md"]
 
 # Indexing 対象の拡張子レジストリ (feature 20)。
 # 3 状態セマンティクス:

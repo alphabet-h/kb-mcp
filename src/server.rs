@@ -328,12 +328,18 @@ impl KbServer {
 
     #[tool(
         name = "get_best_practice",
-        description = "Get a best-practices document for the given target, optionally extracting a specific h2 section by category name. The file path is resolved via `[best_practice].path_templates` in kb-mcp.toml (default: best-practices/{target}/PERFECT.md)."
+        description = "Get a best-practices document for the given target, optionally extracting a specific h2 section by category name. Opt-in: requires `[best_practice].path_templates` to be configured in kb-mcp.toml (e.g. `path_templates = [\"best-practices/{target}/PERFECT.md\"]`); returns a 'not configured' error otherwise."
     )]
     async fn get_best_practice(
         &self,
         Parameters(params): Parameters<GetBestPracticeParams>,
     ) -> String {
+        if self.best_practice_templates.is_empty() {
+            return serde_json::to_string_pretty(&ErrorResponse {
+                error: "get_best_practice is not configured. Add `[best_practice].path_templates` to kb-mcp.toml (for example: `path_templates = [\"best-practices/{target}/PERFECT.md\"]`) to enable this tool.".to_string(),
+            })
+            .unwrap_or_default();
+        }
         let canonical = match resolve_best_practice_path(
             &self.kb_path,
             &self.best_practice_templates,

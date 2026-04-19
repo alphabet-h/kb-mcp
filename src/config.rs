@@ -55,8 +55,9 @@ pub struct Config {
     /// [feature 13] 検索時に適用するチャンク品質フィルタの設定。
     /// 省略時は [`QualityFilterConfig::default()`] (enabled=true, threshold=0.3)。
     pub quality_filter: Option<QualityFilterConfig>,
-    /// [feature 16] `get_best_practice` MCP ツールで使うパス候補テンプレート。
-    /// 省略時は `["best-practices/{target}/PERFECT.md"]` (後方互換)。
+    /// `get_best_practice` MCP ツールで使うパス候補テンプレート (opt-in)。
+    /// 省略時 (`None`) または空リストの場合、`get_best_practice` ツールは
+    /// "not configured" エラーを返す (ツール自体は MCP に登録されるが機能しない)。
     pub best_practice: Option<BestPracticeConfig>,
     /// [feature 20] Indexing 対象の拡張子リスト。
     /// 省略時 (`None`) は `["md"]` のみ (pre-feature-20 完全後方互換)。`.txt`
@@ -73,28 +74,19 @@ pub struct Config {
     pub transport: Option<TransportConfig>,
 }
 
-/// `get_best_practice` の汎用化設定 (feature 16)。
+/// `get_best_practice` の opt-in 設定。
 ///
 /// `path_templates` に列挙した順に `{target}` を置換してファイルを探し、
 /// 最初に存在したものを返す。テンプレート変数:
 ///   - `{target}` : ツールに渡された target パラメータ
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// セクションを設定しない (または空リストを明示する) と、ツールは
+/// "not configured" エラーで応答する。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BestPracticeConfig {
-    #[serde(default = "default_best_practice_templates")]
+    #[serde(default)]
     pub path_templates: Vec<String>,
-}
-
-fn default_best_practice_templates() -> Vec<String> {
-    vec!["best-practices/{target}/PERFECT.md".to_string()]
-}
-
-impl Default for BestPracticeConfig {
-    fn default() -> Self {
-        Self {
-            path_templates: default_best_practice_templates(),
-        }
-    }
 }
 
 impl Config {
@@ -128,18 +120,10 @@ impl Config {
                 .map(|p| resolve_relative(base, p));
         }
 
-        // feature 16: `[best_practice] path_templates = []` は誤設定として
-        // 早期に reject する (どのテンプレにもマッチせず毎回 not-found に
-        // なる silent failure を防ぐ)。未定義 or キー省略は legacy default
-        // が入るので問題にならない。
-        if let Some(bp) = &cfg.best_practice
-            && bp.path_templates.is_empty()
-        {
-            anyhow::bail!(
-                "{}: [best_practice].path_templates must contain at least one template (got empty array). Remove the key entirely to use the default [\"best-practices/{{target}}/PERFECT.md\"].",
-                path.display()
-            );
-        }
+        // Phase 2.3 で opt-in 化: `[best_practice]` セクション省略、
+        // `[best_practice]` のみ (path_templates 省略)、`path_templates = []`
+        // のいずれも "not configured" を意味する。ランタイムでツールが
+        // "not configured" エラーを返すため、ここでは reject しない。
 
         // feature 20: [parsers].enabled = [] は誤設定として reject。キー省略
         // (parsers: None) の場合は Registry::defaults() = ["md"] が適用される
@@ -267,13 +251,11 @@ mod tests {
     }
 
     #[test]
-    fn test_best_practice_default_templates() {
-        // 省略時はレガシーの PERFECT.md パス 1 件
+    fn test_best_practice_default_is_empty() {
+        // Phase 2.3 で opt-in 化: 既定は空リスト。ランタイムで
+        // "not configured" エラーを返す扱いになる。
         let cfg = BestPracticeConfig::default();
-        assert_eq!(
-            cfg.path_templates,
-            vec!["best-practices/{target}/PERFECT.md".to_string()]
-        );
+        assert!(cfg.path_templates.is_empty());
     }
 
     #[test]
@@ -293,23 +275,20 @@ mod tests {
     }
 
     #[test]
-    fn test_best_practice_empty_path_templates_uses_default() {
-        // path_templates 省略時は default_best_practice_templates() が入る
+    fn test_best_practice_section_only_yields_empty() {
+        // `[best_practice]` セクションを書くが path_templates を省略しても、
+        // opt-in 化後は空リスト = not configured となる。
         let mut file = tempfile("kb-mcp-config-bp2");
         writeln!(file, "[best_practice]").unwrap();
         let cfg = Config::load_from(file.path()).unwrap();
         let bp = cfg.best_practice.expect("best_practice must be Some");
-        assert_eq!(
-            bp.path_templates,
-            vec!["best-practices/{target}/PERFECT.md".to_string()]
-        );
+        assert!(bp.path_templates.is_empty());
     }
 
     #[test]
-    fn test_best_practice_explicit_empty_is_rejected() {
-        // `path_templates = []` を明示する場合は誤設定として reject する
-        // (毎回 not-found になる silent failure を防ぐため。キー省略なら
-        // default が適用されて問題ない)。
+    fn test_best_practice_explicit_empty_accepted() {
+        // `path_templates = []` を明示的に書くケースも opt-in 未完了と同じ
+        // 扱いで受理する。ランタイムで "not configured" を返す。
         let mut file = tempfile("kb-mcp-config-bp-empty");
         writeln!(
             file,
@@ -317,11 +296,9 @@ mod tests {
              path_templates = []\n"
         )
         .unwrap();
-        let err = Config::load_from(file.path()).expect_err("must reject empty array");
-        assert!(
-            err.to_string().contains("path_templates"),
-            "error should mention path_templates, got: {err}"
-        );
+        let cfg = Config::load_from(file.path()).unwrap();
+        let bp = cfg.best_practice.expect("best_practice must be Some");
+        assert!(bp.path_templates.is_empty());
     }
 
     #[test]
