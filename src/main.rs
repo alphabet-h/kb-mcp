@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod embedder;
+pub mod eval;
 pub mod graph;
 pub mod indexer;
 pub mod markdown;
