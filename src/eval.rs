@@ -285,7 +285,6 @@ impl History {
     }
 
     /// 直前の run (= front) を取得する。
-    #[allow(dead_code)]
     pub fn previous(&self) -> Option<&EvalRun> {
         self.runs.front()
     }
