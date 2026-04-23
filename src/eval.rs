@@ -141,6 +141,25 @@ pub fn ndcg_at_k(expected: &[ExpectedHit], top: &[HitRecord], k: usize) -> f64 {
     }
 }
 
+/// クエリ単位で recall@k / RR / nDCG@k をまとめて計算する。
+pub fn compute_query_metrics(
+    expected: &[ExpectedHit],
+    top: &[HitRecord],
+    k_values: &[usize],
+) -> QueryMetrics {
+    let mut recall_at_k_map = std::collections::BTreeMap::new();
+    let mut ndcg_at_k_map = std::collections::BTreeMap::new();
+    for &k in k_values {
+        recall_at_k_map.insert(k, recall_at_k(expected, top, k));
+        ndcg_at_k_map.insert(k, ndcg_at_k(expected, top, k));
+    }
+    QueryMetrics {
+        recall_at_k: recall_at_k_map,
+        reciprocal_rank: reciprocal_rank(expected, top),
+        ndcg_at_k: ndcg_at_k_map,
+    }
+}
+
 // ---------- Result ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,5 +445,21 @@ mod tests {
     fn test_ndcg_empty_expected() {
         let top = vec![hit(1, "a.md", None)];
         assert_eq!(ndcg_at_k(&[], &top, 5), 0.0);
+    }
+
+    #[test]
+    fn test_compute_query_metrics() {
+        let expected = vec![exp("a.md", None), exp("b.md", None)];
+        let top = vec![
+            hit(1, "a.md", None),
+            hit(2, "x.md", None),
+            hit(3, "b.md", None),
+        ];
+        let m = compute_query_metrics(&expected, &top, &[1, 3, 5]);
+        assert!((m.recall_at_k[&1] - 0.5).abs() < 1e-9);
+        assert!((m.recall_at_k[&3] - 1.0).abs() < 1e-9);
+        assert!((m.reciprocal_rank - 1.0).abs() < 1e-9);
+        let ndcg3 = m.ndcg_at_k[&3];
+        assert!(ndcg3 > 0.7 && ndcg3 < 1.0, "ndcg@3 = {ndcg3}");
     }
 }
