@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod embedder;
+pub mod eval;
 pub mod graph;
 pub mod indexer;
 pub mod markdown;
@@ -49,6 +50,14 @@ enum ValidateFormat {
     /// GitHub Actions annotations (`::error file=...::message`). Prints to
     /// stdout so `$GITHUB_OUTPUT` / `$GITHUB_STEP_SUMMARY` can capture it.
     Github,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum EvalFormat {
+    /// Human-readable (default, ANSI color when TTY).
+    Text,
+    /// Structured JSON (single object).
+    Json,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -231,6 +240,41 @@ enum Commands {
         /// `--min-quality 0.0`).
         #[arg(long = "include-low-quality", default_value_t = false)]
         include_low_quality: bool,
+    },
+    /// Evaluate retrieval quality against a golden query set (optional, power-user feature).
+    /// Reports recall@k / MRR / nDCG@k and diffs against the previous run.
+    /// Details: docs/eval.md
+    Eval {
+        /// Path to the knowledge-base directory
+        #[arg(long)]
+        kb_path: Option<PathBuf>,
+        /// Override golden file path. Default: <kb_path>/.kb-mcp-eval.yml or [eval].golden.
+        #[arg(long)]
+        golden: Option<PathBuf>,
+        /// Embedding model (must match the index)
+        #[arg(long, value_enum)]
+        model: Option<ModelChoice>,
+        /// Optional cross-encoder reranker for this run.
+        #[arg(long, value_enum)]
+        reranker: Option<RerankerChoice>,
+        /// Comma-separated k list (default: [eval].k_values or 1,5,10)
+        #[arg(long, value_delimiter = ',')]
+        k: Option<Vec<usize>>,
+        /// Max hits to fetch per query (default: max of k list)
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = EvalFormat::Text)]
+        format: EvalFormat,
+        /// Disable reading/writing the history file (one-off run, no diff)
+        #[arg(long = "no-history", default_value_t = false)]
+        no_history: bool,
+        /// Skip diff display even if history exists
+        #[arg(long = "no-diff", default_value_t = false)]
+        no_diff: bool,
+        /// Disable ANSI color (auto-disabled when stdout is not a TTY)
+        #[arg(long = "no-color", default_value_t = false)]
+        no_color: bool,
     },
 }
 
@@ -537,6 +581,80 @@ fn main() -> anyhow::Result<()> {
                 &exclude_dirs,
             )?;
             std::process::exit(exit);
+        }
+        Commands::Eval {
+            kb_path,
+            golden,
+            model,
+            reranker,
+            k,
+            limit,
+            format,
+            no_history,
+            no_diff,
+            no_color,
+        } => {
+            let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
+            let model_choice = model.or(cfg.model).unwrap_or_default();
+            let reranker_choice = reranker.or(cfg.reranker).unwrap_or_default();
+
+            let eval_cfg = cfg.eval.clone().unwrap_or_default();
+            let golden_path = golden
+                .or(eval_cfg.golden.clone())
+                .unwrap_or_else(|| kb_path.join(".kb-mcp-eval.yml"));
+            let k_values = k
+                .or(eval_cfg.k_values.clone())
+                .unwrap_or_else(|| vec![1, 5, 10]);
+            let limit_val = limit.unwrap_or_else(|| *k_values.iter().max().unwrap_or(&10) as u32);
+            let history_size = eval_cfg.history_size.unwrap_or(10);
+            let regression_threshold = eval_cfg.regression_threshold.unwrap_or(0.05);
+
+            let opts = eval::RunOpts {
+                kb_path: kb_path.clone(),
+                golden_path,
+                model_choice,
+                reranker_choice,
+                k_values,
+                limit: limit_val,
+                write_history: !no_history,
+                history_size,
+                regression_threshold,
+            };
+
+            let run = eval::run(&opts)?;
+
+            let history_path = eval::default_history_path(&kb_path);
+            let history = if no_history {
+                eval::History::default()
+            } else {
+                eval::History::load(&history_path)?
+            };
+            // Clone the previous run so the `history` binding can be moved later
+            // to push the new run. `EvalRun: Clone`, so this is cheap enough.
+            let previous = if no_diff {
+                None
+            } else {
+                history.previous().cloned()
+            };
+
+            match format {
+                EvalFormat::Text => {
+                    use std::io::IsTerminal;
+                    let tty = std::io::stdout().is_terminal() && !no_color;
+                    let out = eval::format_text(&run, previous.as_ref(), tty, regression_threshold);
+                    print!("{}", out);
+                }
+                EvalFormat::Json => {
+                    let v = eval::format_json(&run, previous.as_ref());
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+            }
+
+            if !no_history {
+                let mut h = history;
+                h.push_front(run, history_size);
+                h.save(&history_path)?;
+            }
         }
     }
 

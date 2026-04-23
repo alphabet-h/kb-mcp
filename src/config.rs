@@ -72,6 +72,9 @@ pub struct Config {
     /// 省略時 (`None`) は stdio (1 クライアント限定、legacy 後方互換)。
     /// CLI `--transport http` で HTTP 起動に切り替え。
     pub transport: Option<TransportConfig>,
+    /// `kb-mcp eval` (retrieval quality evaluation) の opt-in 設定。
+    /// 省略時 (`None`) は全デフォルト値で走る。詳細は `docs/eval.md`。
+    pub eval: Option<EvalConfig>,
 }
 
 /// `get_best_practice` の opt-in 設定。
@@ -87,6 +90,22 @@ pub struct Config {
 pub struct BestPracticeConfig {
     #[serde(default)]
     pub path_templates: Vec<String>,
+}
+
+/// `kb-mcp eval` (retrieval quality evaluation) の設定。省略時は全デフォルトで走る。
+/// 一般ユーザには不要。詳細は `docs/eval.md`。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvalConfig {
+    /// Golden YAML ファイルへのパス (kb-path 基準の相対 or 絶対)。省略時は
+    /// `<kb_path>/.kb-mcp-eval.yml`。
+    pub golden: Option<PathBuf>,
+    /// 保持する過去実行の件数。省略時は 10。
+    pub history_size: Option<usize>,
+    /// 報告する k のリスト。省略時は `[1, 5, 10]`。
+    pub k_values: Option<Vec<usize>>,
+    /// diff 表示で recall が劣化して赤く出す閾値。省略時は 0.05。
+    pub regression_threshold: Option<f64>,
 }
 
 impl Config {
@@ -116,6 +135,9 @@ impl Config {
         if let Some(base) = path.parent() {
             cfg.kb_path = cfg.kb_path.map(|p| resolve_relative(base, p));
             cfg.fastembed_cache_dir = cfg.fastembed_cache_dir.map(|p| resolve_relative(base, p));
+            if let Some(e) = cfg.eval.as_mut() {
+                e.golden = e.golden.take().map(|p| resolve_relative(base, p));
+            }
         }
 
         // Phase 2.3 で opt-in 化: `[best_practice]` セクション省略、
@@ -149,6 +171,7 @@ impl Config {
             && self.parsers.is_none()
             && self.watch.is_none()
             && self.transport.is_none()
+            && self.eval.is_none()
     }
 
     /// `exclude_dirs` の実効値を返す。設定省略時は [`DEFAULT_EXCLUDE_DIRS`]
@@ -379,6 +402,52 @@ mod tests {
         assert!(t.kind.is_none(), "kind is omitted");
         let http = t.http.expect("http section must be Some");
         assert_eq!(http.bind.as_deref(), Some("127.0.0.1:4567"));
+    }
+
+    #[test]
+    fn test_eval_config_parses_from_toml() {
+        let mut file = tempfile("kb-mcp-config-eval");
+        writeln!(
+            file,
+            "[eval]\n\
+             golden = \".kb-mcp-eval.yml\"\n\
+             history_size = 5\n\
+             k_values = [1, 3, 10]\n\
+             regression_threshold = 0.1\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let e = cfg.eval.expect("eval must be Some");
+        // `golden` is a relative path so it gets rebased against the config dir.
+        let golden = e.golden.as_deref().expect("golden must be Some");
+        assert!(
+            golden.ends_with(".kb-mcp-eval.yml"),
+            "golden should end with .kb-mcp-eval.yml, got {golden:?}"
+        );
+        assert_eq!(e.history_size, Some(5));
+        assert_eq!(e.k_values.as_deref(), Some(&[1, 3, 10][..]));
+        assert_eq!(e.regression_threshold, Some(0.1));
+    }
+
+    #[test]
+    fn test_eval_config_omitted_is_none() {
+        let mut file = tempfile("kb-mcp-config-eval-omit");
+        writeln!(file, r#"model = "bge-small-en-v1.5""#).unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        assert!(cfg.eval.is_none());
+    }
+
+    #[test]
+    fn test_eval_config_rejects_unknown_field() {
+        let mut file = tempfile("kb-mcp-config-eval-bad");
+        writeln!(
+            file,
+            "[eval]\n\
+             bogus = 1\n"
+        )
+        .unwrap();
+        let err = Config::load_from(file.path()).expect_err("unknown [eval] field must reject");
+        assert!(err.to_string().contains("failed to parse config"));
     }
 
     #[test]

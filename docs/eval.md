@@ -1,0 +1,178 @@
+# `kb-mcp eval` — Retrieval quality evaluation
+
+> **日本語版**: [eval.ja.md](./eval.ja.md)
+
+## Who this is for
+
+You only need this subcommand if you want to **compare retrieval quality across
+model/config changes** or **guard against regressions when tuning**.
+
+Regular users running `kb-mcp index` + `kb-mcp serve` **never need to touch this**.
+`eval` is an independent, opt-in subcommand. Without a golden file, it does
+nothing but print an error with a hint.
+
+## What it does
+
+Given a small file of "questions with known answers" (*golden queries*),
+`kb-mcp eval` runs each question through the same hybrid search used by the
+MCP `search` tool, then computes how well the returned chunks match what you
+expected. On the second run onwards it diffs against the previous run, so you
+can see whether a config change improved or regressed quality.
+
+## Quick start
+
+### 1. Write a golden file
+
+Place it at `<kb>/.kb-mcp-eval.yml`:
+
+```yaml
+queries:
+  - id: rrf-basics            # optional, used as the diff row key
+    query: "What does the k parameter in RRF do?"
+    expected:
+      - path: "docs/ARCHITECTURE.md"
+        heading: "Data flow"   # optional; omit for file-level hit
+      - path: "src/db.rs"      # heading omitted → any hit in this file counts
+
+  - query: "How are chunks deduplicated?"
+    expected:
+      - path: "src/indexer.rs"
+```
+
+### 2. Run
+
+```bash
+kb-mcp eval --kb-path ./knowledge-base
+```
+
+Output:
+
+```
+kb-mcp eval — 2026-04-24T14:32:01+09:00
+  model: bge-m3    reranker: none    limit: 10    queries: 2
+
+Aggregate
+  recall@1   0.500
+  recall@5   1.000
+  recall@10  1.000
+  MRR        0.750
+  nDCG@10    0.821
+
+Per-query (regressions and misses, 1 of 2)
+  ✗ 32-char-truncated-query  recall@10: 0.00    expected src/indexer.rs missing
+```
+
+On the next run it will automatically show a diff against this one.
+
+## Golden YAML reference
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `queries` | list | yes | Queries to evaluate |
+| `queries[].query` | string | yes | The search query text |
+| `queries[].expected` | list | yes | Ground-truth hits (at least one entry) |
+| `queries[].expected[].path` | string | yes | KB-relative path, e.g. `docs/foo.md` |
+| `queries[].expected[].heading` | string | no | If given, the returned chunk must match this heading (case- and whitespace-insensitive) |
+| `queries[].id` | string | no | Stable identifier for diff row keys (default: first 32 chars of `query`) |
+| `queries[].tags` | list | no | Reserved for future drill-down filtering |
+| `defaults.limit` | int | no | Reserved; currently ignored — use CLI `--limit` |
+| `defaults.rerank` | bool | no | Reserved; currently ignored — use CLI `--reranker` |
+
+**Hit rule**: an expected entry counts as a hit if a returned chunk has the
+same `path`, and (if `heading` is given) the same normalized heading
+(`.trim().to_lowercase()`). No `heading` = any chunk in that file counts.
+
+## Metrics explained
+
+Each query has some number of *expected* hits. After running the query, we
+look at the top-*k* returned chunks and compare.
+
+### recall@k
+
+> "Of all expected hits, what fraction appeared in the top *k*?"
+
+Formula: `|expected ∩ top_k| / |expected|`. Range: 0.0 – 1.0.
+
+Read this as *coverage*. `recall@10 = 0.8` means 80 % of what you expected
+was in the top 10. It doesn't care about the order within top-*k*.
+
+### MRR (Mean Reciprocal Rank)
+
+> "How quickly did we find the first correct answer?"
+
+For each query, MRR = `1 / rank` of the first expected hit (0 if none).
+A value of 1.0 means "first result was correct", 0.5 means "second result
+was first correct", etc. The report shows the mean across all queries.
+
+Use this when you care more about the *top* result than the whole set.
+
+### nDCG@k (Normalized Discounted Cumulative Gain)
+
+> "Are the expected hits concentrated at the top?"
+
+Rewards expected hits that appear early in the ranking more than those near
+the bottom. Normalized so 1.0 means "all expected hits at the very top"
+(ideal ordering). Range: 0.0 – 1.0.
+
+Use this to detect improvements in *ordering*, not just presence. If
+`recall@10` is unchanged but `nDCG@10` improved, you moved correct answers
+higher.
+
+## Understanding the diff output
+
+Arrows annotate the change since the previous run:
+
+- **↑ 0.056** (green): improved by more than `regression_threshold` (default 0.05)
+- **↓ 0.056** (red): regressed by more than `regression_threshold`
+- **↑ / ↓ 0.010** (gray): moved, but within noise
+- **—**: unchanged
+
+The per-query section only lists queries that **regressed** or **missed**
+(current `recall@max_k = 0`). For the full list, use `--format json`.
+
+### Golden changed between runs
+
+If you edit the golden file between runs, the fingerprints differ and the
+diff is disabled:
+
+```
+⚠️ golden changed since last run, diff disabled
+```
+
+The current numbers still print. The next run will diff against this one.
+
+## Configuration
+
+All knobs are optional in `kb-mcp.toml`:
+
+```toml
+[eval]
+golden = ".kb-mcp-eval.yml"    # default: <kb_path>/.kb-mcp-eval.yml
+history_size = 10              # default: 10
+k_values = [1, 5, 10]          # default: [1, 5, 10]
+regression_threshold = 0.05    # default: 0.05
+```
+
+CLI flags override config values. `--golden`, `--k 1,5,10`,
+`--model`, `--reranker`, `--format text|json`, `--no-history`, `--no-diff`,
+`--no-color`.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `no golden file at ...` | Missing golden YAML | Create `.kb-mcp-eval.yml` or pass `--golden <path>` |
+| `No index found at ...` | KB not indexed | Run `kb-mcp index --kb-path <kb>` first |
+| `expected path not in index` (per-query) | The path in `expected` does not exist in the index | Check spelling / re-index |
+| `golden changed since last run, diff disabled` | Golden file edited | Expected; the next run will diff normally |
+| Model mismatch error | `--model` does not match the indexed model | Pass the model used for indexing, or re-index |
+
+## Non-goals (intentional)
+
+- **CI integration / failure exit codes**: `eval` only prints numbers. If you
+  want `--fail-on-regression`, that's a future feature
+- **Graded relevance (0 / 1 / 2)**: parsed tolerantly but ignored today
+- **Sweeps / matrices**: to compare models, run `eval` twice against two
+  different indexed databases
+- **Mandatory adoption**: running `eval` does not change anything about
+  `index` / `serve` / `search`. It is a purely auxiliary tool

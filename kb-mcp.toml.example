@@ -99,3 +99,13 @@ kind = "http"
 
 [transport.http]
 bind = "127.0.0.1:3100"
+
+# --- eval (retrieval quality evaluation, optional power-user feature) ---
+# 詳細は docs/eval.md / docs/eval.ja.md を参照。省略時は全デフォルトで動作する。
+# セクション自体を丸ごと削除してよい。残す場合、各フィールドはすべて optional
+# (以下の値はビルトイン既定値と同じ)。
+[eval]
+#golden = ".kb-mcp-eval.yml"            # Golden YAML パス (default: <kb_path>/.kb-mcp-eval.yml)
+#history_size = 10                      # 履歴保持件数 (default: 10)
+#k_values = [1, 5, 10]                  # 報告する k (default: [1, 5, 10])
+#regression_threshold = 0.05            # diff 色付けの閾値 (default: 0.05)

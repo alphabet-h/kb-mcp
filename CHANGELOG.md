@@ -8,6 +8,9 @@ First public release preparation.
 
 ### Added
 
+- `kb-mcp eval` subcommand for retrieval quality evaluation (opt-in power-user feature).
+  Runs a golden query set through `search_hybrid` and reports recall@k / MRR / nDCG@k.
+  Shows diffs against the previous run. Details: `docs/eval.md`.
 - Dual-licensed under **MIT OR Apache-2.0** ([`LICENSE-MIT`](./LICENSE-MIT), [`LICENSE-APACHE`](./LICENSE-APACHE))
 - `docs/ARCHITECTURE.md` / `docs/ARCHITECTURE.ja.md` describing source layout, data flow, embedding cache resolution, and key dependencies
 - `CONTRIBUTING.md` / `CONTRIBUTING.ja.md` with build / test / code-style instructions
