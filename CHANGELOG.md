@@ -6,15 +6,24 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 _(nothing yet)_
 
-## [0.1.0] - 2026-04-24
-
-First public release. An MCP server providing semantic hybrid search (sqlite-vec + FTS5 via Reciprocal Rank Fusion, with optional cross-encoder reranking) over a Markdown / plain-text knowledge base. Supports stdio and Streamable HTTP transports, includes a live-sync file watcher, and ships with optional frontmatter schema validation via the `kb-mcp validate` CLI.
+## [0.2.0] - 2026-04-24
 
 ### Added
 
 - `kb-mcp eval` subcommand for retrieval quality evaluation (opt-in power-user feature).
   Runs a golden query set through `search_hybrid` and reports recall@k / MRR / nDCG@k.
-  Shows diffs against the previous run. Details: `docs/eval.md`.
+  Shows diffs against the previous run. Details: `docs/eval.md` / `docs/eval.ja.md`.
+
+### Internal
+
+- CI (GitHub Actions) upgraded to `actions/checkout@v5` to clear Node.js 20 deprecation warnings
+
+## [0.1.0] - 2026-04-20
+
+First public release. An MCP server providing semantic hybrid search (sqlite-vec + FTS5 via Reciprocal Rank Fusion, with optional cross-encoder reranking) over a Markdown / plain-text knowledge base. Supports stdio and Streamable HTTP transports, includes a live-sync file watcher, and ships with optional frontmatter schema validation via the `kb-mcp validate` CLI.
+
+### Added
+
 - Dual-licensed under **MIT OR Apache-2.0** ([`LICENSE-MIT`](./LICENSE-MIT), [`LICENSE-APACHE`](./LICENSE-APACHE))
 - `docs/ARCHITECTURE.md` / `docs/ARCHITECTURE.ja.md` describing source layout, data flow, embedding cache resolution, and key dependencies
 - `CONTRIBUTING.md` / `CONTRIBUTING.ja.md` with build / test / code-style instructions
@@ -37,10 +46,10 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 
 ### Internal
 
-- 246 unit / integration tests pass (incl. 5 validate-CLI tests). `#[ignore]`-tagged tests covering embedding / reranker / eval download models on demand.
-- `cargo fmt` / `cargo clippy --all-targets -- -D warnings` clean
-- CI (GitHub Actions) matrix: test / clippy / rustfmt on Ubuntu / macOS / Windows
+- 207 unit / integration tests + 5 validate-CLI tests pass
+- `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alphabet-h/kb-mcp/releases/tag/v0.1.0
