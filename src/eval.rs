@@ -361,6 +361,173 @@ pub fn format_json(run: &EvalRun, previous: Option<&EvalRun>) -> serde_json::Val
     })
 }
 
+/// Text 形式の出力。`use_color=true` のとき ANSI で色付けする。
+/// TTY 検出は呼び出し側 (main.rs) で行う。
+pub fn format_text(
+    run: &EvalRun,
+    previous: Option<&EvalRun>,
+    use_color: bool,
+    regression_threshold: f64,
+) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    writeln!(s, "kb-mcp eval — {}", run.timestamp.to_rfc3339()).unwrap();
+    let rr = run.fingerprint.reranker.as_deref().unwrap_or("none");
+    writeln!(
+        s,
+        "  model: {}    reranker: {}    limit: {}    queries: {}",
+        run.fingerprint.model, rr, run.fingerprint.limit, run.aggregate.query_count
+    )
+    .unwrap();
+    writeln!(s).unwrap();
+
+    // Fingerprint mismatch は diff を無効化
+    let diff_enabled = match previous {
+        Some(p) => p.fingerprint.golden_hash == run.fingerprint.golden_hash,
+        None => false,
+    };
+
+    match previous {
+        Some(p) if diff_enabled => {
+            writeln!(
+                s,
+                "Aggregate (previous run: {})",
+                p.timestamp.to_rfc3339()
+            )
+            .unwrap();
+        }
+        Some(_) => {
+            writeln!(s, "⚠️ golden changed since last run, diff disabled").unwrap();
+            writeln!(s, "Aggregate").unwrap();
+        }
+        None => {
+            writeln!(s, "Aggregate").unwrap();
+        }
+    }
+
+    // recall@k
+    for k in &run.fingerprint.k_values {
+        let v = run.aggregate.recall_at_k.get(k).copied().unwrap_or(0.0);
+        let label = format!("recall@{k}");
+        let diff = if diff_enabled {
+            previous.map(|p| v - p.aggregate.recall_at_k.get(k).copied().unwrap_or(0.0))
+        } else {
+            None
+        };
+        writeln!(
+            s,
+            "  {:<11}{:.3}{}",
+            label,
+            v,
+            render_diff(diff, regression_threshold, use_color)
+        )
+        .unwrap();
+    }
+    // MRR
+    let mrr = run.aggregate.mrr;
+    let mrr_diff = if diff_enabled {
+        previous.map(|p| mrr - p.aggregate.mrr)
+    } else {
+        None
+    };
+    writeln!(
+        s,
+        "  {:<11}{:.3}{}",
+        "MRR",
+        mrr,
+        render_diff(mrr_diff, regression_threshold, use_color)
+    )
+    .unwrap();
+    // nDCG@k (最大 k のみ表示)
+    if let Some(&kmax) = run.fingerprint.k_values.iter().max() {
+        let v = run.aggregate.ndcg_at_k.get(&kmax).copied().unwrap_or(0.0);
+        let label = format!("nDCG@{kmax}");
+        let diff = if diff_enabled {
+            previous.map(|p| v - p.aggregate.ndcg_at_k.get(&kmax).copied().unwrap_or(0.0))
+        } else {
+            None
+        };
+        writeln!(
+            s,
+            "  {:<11}{:.3}{}",
+            label,
+            v,
+            render_diff(diff, regression_threshold, use_color)
+        )
+        .unwrap();
+    }
+
+    // Per-query: regression / miss のみ表示
+    let mut rows: Vec<String> = Vec::new();
+    let kmax = run.fingerprint.k_values.iter().max().copied().unwrap_or(10);
+    for q in &run.per_query {
+        let now_r = q.metrics.recall_at_k.get(&kmax).copied().unwrap_or(0.0);
+        let prev_r = if diff_enabled {
+            previous
+                .and_then(|p| p.per_query.iter().find(|pq| pq.id == q.id))
+                .map(|pq| pq.metrics.recall_at_k.get(&kmax).copied().unwrap_or(0.0))
+        } else {
+            None
+        };
+        let is_miss = q.expected.is_empty() || now_r == 0.0;
+        let regressed = prev_r.is_some_and(|pr| pr - now_r > regression_threshold);
+        if is_miss || regressed {
+            let arrow = if is_miss && now_r == 0.0 {
+                "✗"
+            } else if regressed {
+                "↓"
+            } else {
+                "·"
+            };
+            let prefix = if let Some(pr) = prev_r {
+                format!("{:.2} → {:.2}", pr, now_r)
+            } else {
+                format!("{:.2}", now_r)
+            };
+            rows.push(format!(
+                "  {} {:<24} recall@{kmax}: {}",
+                arrow, q.id, prefix
+            ));
+        }
+    }
+    if !rows.is_empty() {
+        writeln!(s).unwrap();
+        writeln!(
+            s,
+            "Per-query (regressions and misses, {} of {})",
+            rows.len(),
+            run.per_query.len()
+        )
+        .unwrap();
+        for r in rows {
+            writeln!(s, "{}", r).unwrap();
+        }
+    }
+
+    s
+}
+
+fn render_diff(diff: Option<f64>, threshold: f64, use_color: bool) -> String {
+    match diff {
+        None => String::new(),
+        Some(d) if d.abs() < 1e-9 => format!("  (— {:>6})", ""),
+        Some(d) => {
+            let arrow = if d > 0.0 { "↑" } else { "↓" };
+            let color = if !use_color {
+                ""
+            } else if d < -threshold {
+                "\x1b[31m" // red
+            } else if d > threshold {
+                "\x1b[32m" // green
+            } else {
+                "\x1b[90m" // gray
+            };
+            let reset = if use_color { "\x1b[0m" } else { "" };
+            format!("  ({}{} {:.3}{})", color, arrow, d.abs(), reset)
+        }
+    }
+}
+
 // ---------- Orchestration ----------
 
 /// Default path for the history file: `<kb_path>/.kb-mcp-eval-history.json`.
@@ -788,6 +955,103 @@ mod tests {
         }
         assert_eq!(h.runs.len(), 10);
         assert_eq!(h.runs.front().unwrap().timestamp.timestamp(), 14);
+    }
+
+    #[test]
+    fn test_format_text_single_run_has_aggregate_header() {
+        let mut agg = AggregateMetrics::default();
+        agg.recall_at_k.insert(1, 0.5);
+        agg.recall_at_k.insert(5, 0.8);
+        agg.ndcg_at_k.insert(5, 0.7);
+        agg.mrr = 0.6;
+        agg.query_count = 2;
+        let run = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: ConfigFingerprint {
+                model: "bge-m3".into(),
+                reranker: None,
+                limit: 10,
+                k_values: vec![1, 5],
+                golden_hash: "h".into(),
+            },
+            per_query: vec![],
+            aggregate: agg,
+        };
+        let out = format_text(&run, None, false, 0.05);
+        assert!(out.contains("model: bge-m3"));
+        assert!(out.contains("queries: 2"));
+        assert!(out.contains("recall@1"));
+        assert!(out.contains("recall@5"));
+        assert!(out.contains("MRR"));
+        assert!(out.contains("nDCG@5"));
+        assert!(!out.contains("previous run"));
+    }
+
+    #[test]
+    fn test_format_text_diff_arrows() {
+        let fp = ConfigFingerprint {
+            model: "m".into(),
+            reranker: None,
+            limit: 10,
+            k_values: vec![5],
+            golden_hash: "h".into(),
+        };
+        let mut a_now = AggregateMetrics::default();
+        a_now.recall_at_k.insert(5, 0.8);
+        a_now.ndcg_at_k.insert(5, 0.7);
+        a_now.query_count = 1;
+        let mut a_prev = AggregateMetrics::default();
+        a_prev.recall_at_k.insert(5, 0.6);
+        a_prev.ndcg_at_k.insert(5, 0.7);
+        a_prev.query_count = 1;
+        let now = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: fp.clone(),
+            per_query: vec![],
+            aggregate: a_now,
+        };
+        let prev = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: fp,
+            per_query: vec![],
+            aggregate: a_prev,
+        };
+        let out = format_text(&now, Some(&prev), false, 0.05);
+        // 改善矢印 (↑) があるか、または絶対値の形で diff が含まれるか
+        assert!(out.contains("↑") || out.contains("0.200"));
+        assert!(out.contains("previous run"));
+    }
+
+    #[test]
+    fn test_format_text_fingerprint_mismatch_shows_warning() {
+        let fp_now = ConfigFingerprint {
+            model: "m".into(),
+            reranker: None,
+            limit: 10,
+            k_values: vec![5],
+            golden_hash: "AAA".into(),
+        };
+        let fp_prev = ConfigFingerprint {
+            golden_hash: "BBB".into(),
+            ..fp_now.clone()
+        };
+        let mut agg = AggregateMetrics::default();
+        agg.recall_at_k.insert(5, 0.8);
+        agg.query_count = 1;
+        let now = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: fp_now,
+            per_query: vec![],
+            aggregate: agg.clone(),
+        };
+        let prev = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: fp_prev,
+            per_query: vec![],
+            aggregate: agg,
+        };
+        let out = format_text(&now, Some(&prev), false, 0.05);
+        assert!(out.contains("golden changed"));
     }
 
     #[test]
