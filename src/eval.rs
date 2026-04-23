@@ -134,11 +134,7 @@ pub fn ndcg_at_k(expected: &[ExpectedHit], top: &[HitRecord], k: usize) -> f64 {
     let idcg: f64 = (1..=ideal_count)
         .map(|i| 1.0 / ((i as f64 + 1.0).log2()))
         .sum();
-    if idcg == 0.0 {
-        0.0
-    } else {
-        dcg / idcg
-    }
+    if idcg == 0.0 { 0.0 } else { dcg / idcg }
 }
 
 /// クエリ単位で recall@k / RR / nDCG@k をまとめて計算する。
@@ -184,8 +180,7 @@ pub fn aggregate_metrics(per_query: &[QueryResult], k_values: &[usize]) -> Aggre
         recall_at_k_map.insert(k, sum_r / n as f64);
         ndcg_at_k_map.insert(k, sum_n / n as f64);
     }
-    let mrr: f64 =
-        valid.iter().map(|q| q.metrics.reciprocal_rank).sum::<f64>() / n as f64;
+    let mrr: f64 = valid.iter().map(|q| q.metrics.reciprocal_rank).sum::<f64>() / n as f64;
     AggregateMetrics {
         recall_at_k: recall_at_k_map,
         mrr,
@@ -291,8 +286,7 @@ impl History {
 
     /// atomic rename で書き出す。
     pub fn save(&self, path: &Path) -> Result<()> {
-        let bytes =
-            serde_json::to_vec_pretty(self).context("failed to serialize eval history")?;
+        let bytes = serde_json::to_vec_pretty(self).context("failed to serialize eval history")?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -388,12 +382,7 @@ pub fn format_text(
 
     match previous {
         Some(p) if diff_enabled => {
-            writeln!(
-                s,
-                "Aggregate (previous run: {})",
-                p.timestamp.to_rfc3339()
-            )
-            .unwrap();
+            writeln!(s, "Aggregate (previous run: {})", p.timestamp.to_rfc3339()).unwrap();
         }
         Some(_) => {
             writeln!(s, "⚠️ golden changed since last run, diff disabled").unwrap();
@@ -536,12 +525,8 @@ pub fn default_history_path(kb_path: &Path) -> PathBuf {
 
 /// Golden を読み、search_hybrid で評価し、EvalRun を返す。履歴書き込みは呼び出し側責務。
 pub fn run(opts: &RunOpts) -> Result<EvalRun> {
-    let golden_bytes = std::fs::read(&opts.golden_path).with_context(|| {
-        format!(
-            "failed to read golden file: {}",
-            opts.golden_path.display()
-        )
-    })?;
+    let golden_bytes = std::fs::read(&opts.golden_path)
+        .with_context(|| format!("failed to read golden file: {}", opts.golden_path.display()))?;
     let gs: GoldenSet = serde_yaml::from_slice(&golden_bytes).with_context(|| {
         format!(
             "failed to parse golden file: {}",
@@ -579,10 +564,9 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
         .max(opts.limit as usize);
     let mut per_query = Vec::with_capacity(gs.queries.len());
     for q in &gs.queries {
-        let qid = q
-            .id
-            .clone()
-            .unwrap_or_else(|| q.query.chars().take(32).collect());
+        let qid =
+            q.id.clone()
+                .unwrap_or_else(|| q.query.chars().take(32).collect());
         let qe = embedder.embed_single(&q.query)?;
         let results = if let Some(r) = reranker.as_mut() {
             let cands = db.search_hybrid_candidates(
@@ -747,10 +731,7 @@ mod tests {
 
     #[test]
     fn test_is_hit_heading_mismatch() {
-        assert!(!is_hit(
-            &exp("a.md", Some("X")),
-            &hit(1, "a.md", Some("Y"))
-        ));
+        assert!(!is_hit(&exp("a.md", Some("X")), &hit(1, "a.md", Some("Y"))));
     }
 
     #[test]
@@ -872,22 +853,14 @@ mod tests {
             query: "q1".into(),
             expected: vec![exp("a.md", None)],
             top_k: vec![hit(1, "a.md", None)],
-            metrics: compute_query_metrics(
-                &[exp("a.md", None)],
-                &[hit(1, "a.md", None)],
-                &[1, 5],
-            ),
+            metrics: compute_query_metrics(&[exp("a.md", None)], &[hit(1, "a.md", None)], &[1, 5]),
         };
         let q2 = QueryResult {
             id: "2".into(),
             query: "q2".into(),
             expected: vec![exp("b.md", None)],
             top_k: vec![hit(1, "x.md", None)],
-            metrics: compute_query_metrics(
-                &[exp("b.md", None)],
-                &[hit(1, "x.md", None)],
-                &[1, 5],
-            ),
+            metrics: compute_query_metrics(&[exp("b.md", None)], &[hit(1, "x.md", None)], &[1, 5]),
         };
         let agg = aggregate_metrics(&[q1, q2], &[1, 5]);
         assert!((agg.recall_at_k[&1] - 0.5).abs() < 1e-9);
