@@ -4,7 +4,11 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
-First public release preparation.
+_(nothing yet)_
+
+## [0.1.0] - 2026-04-24
+
+First public release. An MCP server providing semantic hybrid search (sqlite-vec + FTS5 via Reciprocal Rank Fusion, with optional cross-encoder reranking) over a Markdown / plain-text knowledge base. Supports stdio and Streamable HTTP transports, includes a live-sync file watcher, and ships with optional frontmatter schema validation via the `kb-mcp validate` CLI.
 
 ### Added
 
@@ -33,13 +37,10 @@ First public release preparation.
 
 ### Internal
 
-- All 207 unit / integration tests + 5 validate-CLI tests pass
-- `cargo fmt` / `cargo clippy --all-targets` clean
+- 246 unit / integration tests pass (incl. 5 validate-CLI tests). `#[ignore]`-tagged tests covering embedding / reranker / eval download models on demand.
+- `cargo fmt` / `cargo clippy --all-targets -- -D warnings` clean
+- CI (GitHub Actions) matrix: test / clippy / rustfmt on Ubuntu / macOS / Windows
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
-
-## [0.1.0] — unreleased
-
-First public release. An MCP server providing semantic hybrid search (sqlite-vec + FTS5 via Reciprocal Rank Fusion, with optional cross-encoder reranking) over a Markdown / plain-text knowledge base. Supports stdio and Streamable HTTP transports, includes a live-sync file watcher, and ships with optional frontmatter schema validation via the `kb-mcp validate` CLI.
 
 [Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/alphabet-h/kb-mcp/releases/tag/v0.1.0
