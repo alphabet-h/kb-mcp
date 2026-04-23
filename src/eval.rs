@@ -69,6 +69,41 @@ impl GoldenSet {
     }
 }
 
+// ---------- Metrics ----------
+
+/// Heading 比較用の正規化: 前後空白 trim + 小文字化。
+fn normalize_heading(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+/// ヒット判定: path は完全一致、heading は指定があれば正規化後一致。
+pub fn is_hit(expected: &ExpectedHit, hit: &HitRecord) -> bool {
+    if expected.path != hit.path {
+        return false;
+    }
+    match (&expected.heading, &hit.heading) {
+        (Some(e), Some(h)) => normalize_heading(e) == normalize_heading(h),
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+/// recall@k = |expected ∩ top[..k]| / |expected|。
+/// expected 0 件または top 0 件では 0.0。
+pub fn recall_at_k(expected: &[ExpectedHit], top: &[HitRecord], k: usize) -> f64 {
+    if expected.is_empty() || top.is_empty() {
+        return 0.0;
+    }
+    let window = top.iter().take(k);
+    let mut matched = 0usize;
+    for e in expected {
+        if window.clone().any(|h| is_hit(e, h)) {
+            matched += 1;
+        }
+    }
+    matched as f64 / expected.len() as f64
+}
+
 // ---------- Result ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,5 +256,76 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let err = GoldenSet::load(&path).expect_err("missing file must error");
         assert!(err.to_string().contains("no golden file"));
+    }
+
+    fn hit(rank: usize, path: &str, heading: Option<&str>) -> HitRecord {
+        HitRecord {
+            rank,
+            path: path.into(),
+            heading: heading.map(|s| s.into()),
+            score: 1.0,
+        }
+    }
+    fn exp(path: &str, heading: Option<&str>) -> ExpectedHit {
+        ExpectedHit {
+            path: path.into(),
+            heading: heading.map(|s| s.into()),
+        }
+    }
+
+    #[test]
+    fn test_is_hit_path_only() {
+        assert!(is_hit(&exp("a.md", None), &hit(1, "a.md", Some("H1"))));
+        assert!(!is_hit(&exp("a.md", None), &hit(1, "b.md", Some("H1"))));
+    }
+
+    #[test]
+    fn test_is_hit_heading_match_case_and_whitespace() {
+        assert!(is_hit(
+            &exp("a.md", Some("Data Flow")),
+            &hit(1, "a.md", Some("  data flow "))
+        ));
+    }
+
+    #[test]
+    fn test_is_hit_heading_mismatch() {
+        assert!(!is_hit(
+            &exp("a.md", Some("X")),
+            &hit(1, "a.md", Some("Y"))
+        ));
+    }
+
+    #[test]
+    fn test_recall_at_k_all_hit() {
+        let expected = vec![exp("a.md", None), exp("b.md", None)];
+        let top = vec![
+            hit(1, "a.md", None),
+            hit(2, "b.md", None),
+            hit(3, "c.md", None),
+        ];
+        assert!((recall_at_k(&expected, &top, 5) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_recall_at_k_partial_within_k() {
+        let expected = vec![exp("a.md", None), exp("b.md", None)];
+        let top = vec![
+            hit(1, "a.md", None),
+            hit(2, "x.md", None),
+            hit(3, "b.md", None),
+        ];
+        assert!((recall_at_k(&expected, &top, 2) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_recall_at_k_no_expected_is_nan_sentinel() {
+        let top = vec![hit(1, "a.md", None)];
+        assert_eq!(recall_at_k(&[], &top, 5), 0.0);
+    }
+
+    #[test]
+    fn test_recall_at_k_empty_top() {
+        let expected = vec![exp("a.md", None)];
+        assert_eq!(recall_at_k(&expected, &[], 5), 0.0);
     }
 }
