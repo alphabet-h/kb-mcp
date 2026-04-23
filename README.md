@@ -70,6 +70,15 @@ kind = "http"
 
 [transport.http]
 bind = "127.0.0.1:3100"
+
+# Optional: `kb-mcp eval` (retrieval quality evaluation, power-user feature).
+# You only need this section if you run `kb-mcp eval` for tuning or
+# regression tracking. Omit the section entirely for built-in defaults.
+# [eval]
+# golden = ".kb-mcp-eval.yml"             # default: <kb_path>/.kb-mcp-eval.yml
+# history_size = 10                       # default: 10
+# k_values = [1, 5, 10]                   # default: [1, 5, 10]
+# regression_threshold = 0.05             # default: 0.05
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
@@ -209,9 +218,30 @@ Exit codes: `0` (no violations), `1` (violations), `2` (schema load error). When
 
 ### Evaluate retrieval quality against a golden query set
 
-| Command | Description |
-|---|---|
-| `eval` | Evaluate retrieval quality against a golden query set. Reports recall@k / MRR / nDCG@k with diffs against the previous run. Optional, for retrieval tuning. See [docs/eval.md](docs/eval.md). |
+**Optional power-user feature.** `kb-mcp eval` takes a small file of questions with known answers, runs them through the same hybrid search the `search` tool uses, and reports **recall@k / MRR / nDCG@k** with diffs against the previous run. Useful when comparing models or tuning `[quality_filter]` / RRF parameters.
+
+Regular users running `kb-mcp index` + `kb-mcp serve` do not need this — without a golden file, `eval` just errors with a hint and exits.
+
+```bash
+# 1) Write a golden YAML at <kb_path>/.kb-mcp-eval.yml
+cat > knowledge-base/.kb-mcp-eval.yml <<'EOF'
+queries:
+  - query: "What does the k parameter in RRF do?"
+    expected:
+      - { path: "docs/ARCHITECTURE.md", heading: "Data flow" }
+      - { path: "src/db.rs" }   # heading omitted = file-level hit
+EOF
+
+# 2) Run against the indexed DB
+kb-mcp eval --kb-path knowledge-base
+
+# 3) Re-run after tweaking config / model to see the diff
+kb-mcp eval --kb-path knowledge-base --reranker bge-v2-m3
+```
+
+Output: aggregate metrics + per-query rows for regressions / misses only. JSON (`--format json`) exposes the full per-query detail. History lives at `<kb_path>/.kb-mcp-eval-history.json` and keeps the last 10 runs for diff display.
+
+See [docs/eval.md](docs/eval.md) for the golden YAML reference, metric definitions, diff output guide, and troubleshooting.
 
 ## Connecting to Claude Code / Cursor
 

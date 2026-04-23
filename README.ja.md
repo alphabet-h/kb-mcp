@@ -71,6 +71,15 @@ kind = "http"
 
 [transport.http]
 bind = "127.0.0.1:3100"
+
+# 任意: `kb-mcp eval` (retrieval 品質評価、パワーユーザ機能)。
+# モデル比較や回帰追跡のために `kb-mcp eval` を使うときだけ必要。
+# セクション全体を省略するとすべて既定値で動作する。
+# [eval]
+# golden = ".kb-mcp-eval.yml"             # 既定: <kb_path>/.kb-mcp-eval.yml
+# history_size = 10                       # 既定: 10
+# k_values = [1, 5, 10]                   # 既定: [1, 5, 10]
+# regression_threshold = 0.05             # 既定: 0.05
 ```
 
 この設定ファイルを置けば `kb-mcp serve` / `index` / `status` / `graph` / `search` のどれも対応フラグを省略して動かせる。未知のキーはタイポ対策のため拒否される。`FASTEMBED_CACHE_DIR` の実環境変数は設定ファイルの同項目より優先される。
@@ -210,9 +219,30 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 
 ### Golden query セットに対する retrieval 品質評価
 
-| Command | Description |
-|---|---|
-| `eval` | Golden query セットに対する retrieval 品質の評価 (recall@k / MRR / nDCG@k + 前回との差分)。任意、retrieval チューニング用。詳細は [docs/eval.ja.md](docs/eval.ja.md)。 |
+**任意のパワーユーザ機能**。`kb-mcp eval` は「想定される正解がわかっている質問」の小さなファイルを、`search` ツールと同じハイブリッド検索にかけ、**recall@k / MRR / nDCG@k** + 前回実行との差分を出す。モデル比較や `[quality_filter]` / RRF パラメータのチューニング時に便利。
+
+`kb-mcp index` + `kb-mcp serve` で普通に使う一般ユーザは触る必要なし — golden ファイルが無ければ `eval` は hint 付きエラーで終了するだけで他の挙動には影響しない。
+
+```bash
+# 1) Golden YAML を <kb_path>/.kb-mcp-eval.yml に配置
+cat > knowledge-base/.kb-mcp-eval.yml <<'EOF'
+queries:
+  - query: "RRF の k パラメータの意味は？"
+    expected:
+      - { path: "docs/ARCHITECTURE.md", heading: "Data flow" }
+      - { path: "src/db.rs" }   # heading 省略 = ファイル一致で正解
+EOF
+
+# 2) index 済み DB に対して実行
+kb-mcp eval --kb-path knowledge-base
+
+# 3) 設定やモデルを変えて再実行、diff で変化を見る
+kb-mcp eval --kb-path knowledge-base --reranker bge-v2-m3
+```
+
+出力: 集計指標 + 劣化 / ミスのあるクエリ行のみ。`--format json` で全クエリの詳細を取得可能。履歴は `<kb_path>/.kb-mcp-eval-history.json` に保存され、直近 10 件を diff 表示用に保持する。
+
+Golden YAML のリファレンス、指標の詳細説明、diff 出力の読み方、トラブルシューティングは [docs/eval.ja.md](docs/eval.ja.md) 参照。
 
 ## Claude Code / Cursor への接続
 
