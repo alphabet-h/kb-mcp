@@ -324,6 +324,115 @@ pub struct RunOpts {
     pub regression_threshold: f64,
 }
 
+// ---------- Orchestration ----------
+
+/// Default path for the history file: `<kb_path>/.kb-mcp-eval-history.json`.
+pub fn default_history_path(kb_path: &Path) -> PathBuf {
+    kb_path.join(".kb-mcp-eval-history.json")
+}
+
+/// Golden を読み、search_hybrid で評価し、EvalRun を返す。履歴書き込みは呼び出し側責務。
+pub fn run(opts: &RunOpts) -> Result<EvalRun> {
+    let golden_bytes = std::fs::read(&opts.golden_path).with_context(|| {
+        format!(
+            "failed to read golden file: {}",
+            opts.golden_path.display()
+        )
+    })?;
+    let gs: GoldenSet = serde_yaml::from_slice(&golden_bytes).with_context(|| {
+        format!(
+            "failed to parse golden file: {}",
+            opts.golden_path.display()
+        )
+    })?;
+    let golden_hash = GoldenSet::hash_bytes(&golden_bytes);
+
+    let db_path = crate::resolve_db_path(&opts.kb_path);
+    if !db_path.exists() {
+        anyhow::bail!(
+            "No index found at {}. Run `kb-mcp index --kb-path {}` first.",
+            db_path.display(),
+            opts.kb_path.display()
+        );
+    }
+    let db = crate::db::Database::open(&db_path.to_string_lossy())?;
+    db.verify_embedding_meta(
+        opts.model_choice.model_id(),
+        opts.model_choice.dimension() as u32,
+    )?;
+    let mut embedder = crate::embedder::Embedder::with_model(opts.model_choice)?;
+    let mut reranker = if opts.reranker_choice.is_enabled() {
+        crate::embedder::Reranker::try_new(opts.reranker_choice)?
+    } else {
+        None
+    };
+
+    let max_k = opts
+        .k_values
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(10)
+        .max(opts.limit as usize);
+    let mut per_query = Vec::with_capacity(gs.queries.len());
+    for q in &gs.queries {
+        let qid = q
+            .id
+            .clone()
+            .unwrap_or_else(|| q.query.chars().take(32).collect());
+        let qe = embedder.embed_single(&q.query)?;
+        let results = if let Some(r) = reranker.as_mut() {
+            let cands = db.search_hybrid_candidates(
+                &q.query,
+                &qe,
+                (max_k as u32).saturating_mul(5).max(50),
+                None,
+                None,
+                0.0,
+            )?;
+            r.rerank_candidates(&q.query, cands, max_k as u32)?
+        } else {
+            db.search_hybrid(&q.query, &qe, max_k as u32, None, None, 0.0)?
+        };
+        let top_k: Vec<HitRecord> = results
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| HitRecord {
+                rank: i + 1,
+                path: r.path,
+                heading: r.heading,
+                score: r.score,
+            })
+            .collect();
+        let metrics = compute_query_metrics(&q.expected, &top_k, &opts.k_values);
+        per_query.push(QueryResult {
+            id: qid,
+            query: q.query.clone(),
+            expected: q.expected.clone(),
+            top_k,
+            metrics,
+        });
+    }
+
+    let aggregate = aggregate_metrics(&per_query, &opts.k_values);
+    Ok(EvalRun {
+        timestamp: Utc::now(),
+        fingerprint: ConfigFingerprint {
+            model: opts.model_choice.model_id().to_string(),
+            reranker: if opts.reranker_choice.is_enabled() {
+                Some(opts.reranker_choice.model_id().to_string())
+            } else {
+                None
+            },
+            limit: opts.limit,
+            k_values: opts.k_values.clone(),
+            golden_hash,
+        },
+        per_query,
+        aggregate,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
