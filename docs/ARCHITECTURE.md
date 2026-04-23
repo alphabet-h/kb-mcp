@@ -8,7 +8,7 @@ Source-level structure and data flow of kb-mcp, for contributors extending or mo
 
 | File | Responsibility |
 |---|---|
-| `src/main.rs` | clap CLI entry. Dispatches `index` / `status` / `serve` / `search` / `graph` / `validate` subcommands. Loads `kb-mcp.toml` and merges with CLI args. JSON / text output formatting. |
+| `src/main.rs` | clap CLI entry. Dispatches `index` / `status` / `serve` / `search` / `graph` / `validate` / `eval` subcommands. Loads `kb-mcp.toml` and merges with CLI args. JSON / text output formatting. |
 | `src/config.rs` | Loads the binary-adjacent `kb-mcp.toml`. Resolves `CLI > config > default` precedence. Injects `FASTEMBED_CACHE_DIR` env when the config sets it and the env is unset. |
 | `src/server.rs` | `rmcp::ServerHandler` impl. Dispatches six MCP tools. `search` routes to `db.search_hybrid`. |
 | `src/indexer.rs` | `walkdir`-based file scan using `Registry::extensions()`. Parses via the Parser trait, embeds, stores. SHA-256 content-hash diff detection. Incremental APIs (`reindex_single_file` / `deindex_single_file` / `rename_single_file`) shared with the file watcher. |
@@ -21,6 +21,7 @@ Source-level structure and data flow of kb-mcp, for contributors extending or mo
 | `src/db.rs` | `rusqlite` + `sqlite-vec` + FTS5 (trigram). Manages the `chunks` / `vec_chunks` / `fts_chunks` schemas and CRUD. Exposes `search_hybrid` (Reciprocal Rank Fusion, `k = 60`). |
 | `src/quality.rs` | Per-chunk quality scoring (length / boilerplate / structure signals). |
 | `src/graph.rs` | Connection graph BFS over the vector index, for the `get_connection_graph` MCP tool and the `kb-mcp graph` CLI. |
+| `src/eval.rs` | Optional retrieval-quality evaluation for the `kb-mcp eval` CLI. Parses a golden YAML, runs each query through `db.search_hybrid`, and computes recall@k / MRR / nDCG@k. Loads / saves `<kb_path>/.kb-mcp-eval-history.json` for diff display. Opt-in; does not affect `serve` / `search` / `index`. |
 
 ## Data flow
 
