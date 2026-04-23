@@ -207,6 +207,12 @@ kb-mcp validate --kb-path ... --format github         # ::error annotations for 
 
 Exit codes: `0` (no violations), `1` (violations), `2` (schema load error). When `kb-mcp-schema.toml` is absent under `--kb-path`, the command exits 0 with a short "no schema found" note, so adding `kb-mcp validate` to an existing workflow is non-disruptive until you actually write a schema.
 
+### Evaluate retrieval quality against a golden query set
+
+| Command | Description |
+|---|---|
+| `eval` | Evaluate retrieval quality against a golden query set. Reports recall@k / MRR / nDCG@k with diffs against the previous run. Optional, for retrieval tuning. See [docs/eval.md](docs/eval.md). |
+
 ## Connecting to Claude Code / Cursor
 
 Add the following to `.mcp.json` in your project root (or the equivalent MCP config for your client):

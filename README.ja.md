@@ -208,6 +208,12 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 
 終了コード: `0` (違反なし) / `1` (違反あり) / `2` (スキーマロードエラー)。`--kb-path` 直下に `kb-mcp-schema.toml` が無いときは短い "no schema found" メッセージと共に exit 0 となるため、既存ワークフローへの `kb-mcp validate` 追加は実際にスキーマを書くまで非破壊。
 
+### Golden query セットに対する retrieval 品質評価
+
+| Command | Description |
+|---|---|
+| `eval` | Golden query セットに対する retrieval 品質の評価 (recall@k / MRR / nDCG@k + 前回との差分)。任意、retrieval チューニング用。詳細は [docs/eval.ja.md](docs/eval.ja.md)。 |
+
 ## Claude Code / Cursor への接続
 
 プロジェクトルート (またはクライアント対応の MCP 設定場所) の `.mcp.json` に以下を追加:
