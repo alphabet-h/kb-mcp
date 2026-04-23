@@ -104,6 +104,43 @@ pub fn recall_at_k(expected: &[ExpectedHit], top: &[HitRecord], k: usize) -> f64
     matched as f64 / expected.len() as f64
 }
 
+/// MRR 用: 最初にヒットした expected の rank の逆数。無ければ 0.0。
+pub fn reciprocal_rank(expected: &[ExpectedHit], top: &[HitRecord]) -> f64 {
+    if expected.is_empty() || top.is_empty() {
+        return 0.0;
+    }
+    for h in top {
+        if expected.iter().any(|e| is_hit(e, h)) {
+            return 1.0 / h.rank as f64;
+        }
+    }
+    0.0
+}
+
+/// nDCG@k (binary relevance)。
+/// DCG = Σ_{rank ≤ k, hit} 1 / log2(rank + 1)
+/// IDCG = Σ_{i=1..=min(|expected|, k)} 1 / log2(i + 1)
+pub fn ndcg_at_k(expected: &[ExpectedHit], top: &[HitRecord], k: usize) -> f64 {
+    if expected.is_empty() || top.is_empty() || k == 0 {
+        return 0.0;
+    }
+    let window = top.iter().take(k);
+    let dcg: f64 = window
+        .clone()
+        .filter(|h| expected.iter().any(|e| is_hit(e, h)))
+        .map(|h| 1.0 / ((h.rank as f64 + 1.0).log2()))
+        .sum();
+    let ideal_count = expected.len().min(k);
+    let idcg: f64 = (1..=ideal_count)
+        .map(|i| 1.0 / ((i as f64 + 1.0).log2()))
+        .sum();
+    if idcg == 0.0 {
+        0.0
+    } else {
+        dcg / idcg
+    }
+}
+
 // ---------- Result ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,5 +364,67 @@ mod tests {
     fn test_recall_at_k_empty_top() {
         let expected = vec![exp("a.md", None)];
         assert_eq!(recall_at_k(&expected, &[], 5), 0.0);
+    }
+
+    #[test]
+    fn test_reciprocal_rank_first_hit() {
+        let expected = vec![exp("a.md", None)];
+        let top = vec![
+            hit(1, "x.md", None),
+            hit(2, "a.md", None),
+            hit(3, "b.md", None),
+        ];
+        assert!((reciprocal_rank(&expected, &top) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_reciprocal_rank_no_hit() {
+        let expected = vec![exp("a.md", None)];
+        let top = vec![hit(1, "x.md", None)];
+        assert_eq!(reciprocal_rank(&expected, &top), 0.0);
+    }
+
+    #[test]
+    fn test_reciprocal_rank_empty() {
+        assert_eq!(reciprocal_rank(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn test_ndcg_ideal_order() {
+        let expected = vec![exp("a.md", None), exp("b.md", None)];
+        let top = vec![
+            hit(1, "a.md", None),
+            hit(2, "b.md", None),
+            hit(3, "x.md", None),
+        ];
+        assert!((ndcg_at_k(&expected, &top, 5) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_ndcg_reversed() {
+        let expected = vec![exp("a.md", None), exp("b.md", None)];
+        let top = vec![
+            hit(1, "x.md", None),
+            hit(2, "a.md", None),
+            hit(3, "b.md", None),
+        ];
+        let score = ndcg_at_k(&expected, &top, 5);
+        assert!(
+            score > 0.0 && score < 1.0,
+            "expected 0<score<1, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_ndcg_no_hit() {
+        let expected = vec![exp("a.md", None)];
+        let top = vec![hit(1, "x.md", None), hit(2, "y.md", None)];
+        assert_eq!(ndcg_at_k(&expected, &top, 5), 0.0);
+    }
+
+    #[test]
+    fn test_ndcg_empty_expected() {
+        let top = vec![hit(1, "a.md", None)];
+        assert_eq!(ndcg_at_k(&[], &top, 5), 0.0);
     }
 }
