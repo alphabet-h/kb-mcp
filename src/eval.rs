@@ -254,6 +254,62 @@ pub struct History {
     pub runs: VecDeque<EvalRun>,
 }
 
+impl History {
+    /// JSON ファイルから履歴を読む。不在・破損時は warn を出して空 History を返す。
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("failed to read eval history {}: {}", path.display(), e);
+                return Ok(Self::default());
+            }
+        };
+        match serde_json::from_slice::<Self>(&bytes) {
+            Ok(h) => Ok(h),
+            Err(e) => {
+                tracing::warn!("eval history corrupted ({}), starting fresh", e);
+                Ok(Self::default())
+            }
+        }
+    }
+
+    /// 最新の run を front に積み、`size` 件を超えたら末尾を切り落とす。
+    pub fn push_front(&mut self, run: EvalRun, size: usize) {
+        self.runs.push_front(run);
+        while self.runs.len() > size {
+            self.runs.pop_back();
+        }
+    }
+
+    /// 直前の run (= front) を取得する。
+    #[allow(dead_code)]
+    pub fn previous(&self) -> Option<&EvalRun> {
+        self.runs.front()
+    }
+
+    /// atomic rename で書き出す。
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let bytes =
+            serde_json::to_vec_pretty(self).context("failed to serialize eval history")?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)
+            .with_context(|| format!("failed to write temp history: {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| {
+            format!(
+                "failed to rename temp history into place: {}",
+                path.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
 // ---------- Options ----------
 
 pub struct RunOpts {
@@ -525,6 +581,67 @@ mod tests {
         assert!((agg.recall_at_k[&1] - 0.5).abs() < 1e-9);
         assert!((agg.mrr - 0.5).abs() < 1e-9);
         assert_eq!(agg.query_count, 2);
+    }
+
+    fn sample_run(ts_secs: i64, recall10: f64) -> EvalRun {
+        use chrono::TimeZone;
+        let mut agg = AggregateMetrics::default();
+        agg.recall_at_k.insert(10, recall10);
+        agg.query_count = 1;
+        EvalRun {
+            timestamp: Utc.timestamp_opt(ts_secs, 0).unwrap(),
+            fingerprint: ConfigFingerprint {
+                model: "bge-m3".into(),
+                reranker: None,
+                limit: 10,
+                k_values: vec![1, 5, 10],
+                golden_hash: "deadbeef".into(),
+            },
+            per_query: vec![],
+            aggregate: agg,
+        }
+    }
+
+    #[test]
+    fn test_history_load_missing_returns_empty() {
+        let path = std::env::temp_dir().join("kb-mcp-hist-missing.json");
+        let _ = std::fs::remove_file(&path);
+        let h = History::load(&path).unwrap();
+        assert!(h.runs.is_empty());
+    }
+
+    #[test]
+    fn test_history_load_corrupt_returns_empty_with_warn() {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("kb-mcp-hist-corrupt-{pid}.json"));
+        std::fs::write(&path, "{not json").unwrap();
+        let h = History::load(&path).unwrap();
+        assert!(h.runs.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_history_save_and_reload_round_trip() {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("kb-mcp-hist-rt-{pid}.json"));
+        let _ = std::fs::remove_file(&path);
+        let mut h = History::default();
+        h.push_front(sample_run(100, 0.5), 10);
+        h.save(&path).unwrap();
+        let reloaded = History::load(&path).unwrap();
+        assert_eq!(reloaded.runs.len(), 1);
+        assert!((reloaded.runs[0].aggregate.recall_at_k[&10] - 0.5).abs() < 1e-9);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_history_push_front_truncates_to_size() {
+        let mut h = History::default();
+        for i in 0..15 {
+            h.push_front(sample_run(i as i64, 0.0), 10);
+        }
+        assert_eq!(h.runs.len(), 10);
+        assert_eq!(h.runs.front().unwrap().timestamp.timestamp(), 14);
     }
 
     #[test]
