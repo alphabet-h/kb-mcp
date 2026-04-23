@@ -160,6 +160,40 @@ pub fn compute_query_metrics(
     }
 }
 
+/// 全クエリにわたる平均を取る。expected 0 件のクエリはスキップする。
+pub fn aggregate_metrics(per_query: &[QueryResult], k_values: &[usize]) -> AggregateMetrics {
+    let valid: Vec<&QueryResult> = per_query
+        .iter()
+        .filter(|q| !q.expected.is_empty())
+        .collect();
+    let n = valid.len();
+    if n == 0 {
+        return AggregateMetrics::default();
+    }
+    let mut recall_at_k_map = std::collections::BTreeMap::new();
+    let mut ndcg_at_k_map = std::collections::BTreeMap::new();
+    for &k in k_values {
+        let sum_r: f64 = valid
+            .iter()
+            .map(|q| q.metrics.recall_at_k.get(&k).copied().unwrap_or(0.0))
+            .sum();
+        let sum_n: f64 = valid
+            .iter()
+            .map(|q| q.metrics.ndcg_at_k.get(&k).copied().unwrap_or(0.0))
+            .sum();
+        recall_at_k_map.insert(k, sum_r / n as f64);
+        ndcg_at_k_map.insert(k, sum_n / n as f64);
+    }
+    let mrr: f64 =
+        valid.iter().map(|q| q.metrics.reciprocal_rank).sum::<f64>() / n as f64;
+    AggregateMetrics {
+        recall_at_k: recall_at_k_map,
+        mrr,
+        ndcg_at_k: ndcg_at_k_map,
+        query_count: n,
+    }
+}
+
 // ---------- Result ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,5 +495,56 @@ mod tests {
         assert!((m.reciprocal_rank - 1.0).abs() < 1e-9);
         let ndcg3 = m.ndcg_at_k[&3];
         assert!(ndcg3 > 0.7 && ndcg3 < 1.0, "ndcg@3 = {ndcg3}");
+    }
+
+    #[test]
+    fn test_aggregate_metrics_mean() {
+        let q1 = QueryResult {
+            id: "1".into(),
+            query: "q1".into(),
+            expected: vec![exp("a.md", None)],
+            top_k: vec![hit(1, "a.md", None)],
+            metrics: compute_query_metrics(
+                &[exp("a.md", None)],
+                &[hit(1, "a.md", None)],
+                &[1, 5],
+            ),
+        };
+        let q2 = QueryResult {
+            id: "2".into(),
+            query: "q2".into(),
+            expected: vec![exp("b.md", None)],
+            top_k: vec![hit(1, "x.md", None)],
+            metrics: compute_query_metrics(
+                &[exp("b.md", None)],
+                &[hit(1, "x.md", None)],
+                &[1, 5],
+            ),
+        };
+        let agg = aggregate_metrics(&[q1, q2], &[1, 5]);
+        assert!((agg.recall_at_k[&1] - 0.5).abs() < 1e-9);
+        assert!((agg.mrr - 0.5).abs() < 1e-9);
+        assert_eq!(agg.query_count, 2);
+    }
+
+    #[test]
+    fn test_aggregate_metrics_skips_empty_expected() {
+        let q_empty = QueryResult {
+            id: "e".into(),
+            query: "q".into(),
+            expected: vec![],
+            top_k: vec![hit(1, "a.md", None)],
+            metrics: compute_query_metrics(&[], &[hit(1, "a.md", None)], &[1]),
+        };
+        let q_ok = QueryResult {
+            id: "o".into(),
+            query: "q".into(),
+            expected: vec![exp("a.md", None)],
+            top_k: vec![hit(1, "a.md", None)],
+            metrics: compute_query_metrics(&[exp("a.md", None)], &[hit(1, "a.md", None)], &[1]),
+        };
+        let agg = aggregate_metrics(&[q_empty, q_ok], &[1]);
+        assert_eq!(agg.query_count, 1);
+        assert!((agg.recall_at_k[&1] - 1.0).abs() < 1e-9);
     }
 }
