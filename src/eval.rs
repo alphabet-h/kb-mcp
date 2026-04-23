@@ -324,6 +324,43 @@ pub struct RunOpts {
     pub regression_threshold: f64,
 }
 
+// ---------- Formatters ----------
+
+/// JSON 形式で 1 run を整形する。`previous` が渡され fingerprint 互換なら `diff` を付ける。
+pub fn format_json(run: &EvalRun, previous: Option<&EvalRun>) -> serde_json::Value {
+    let prev_val = previous
+        .map(|p| serde_json::to_value(p).unwrap())
+        .unwrap_or(serde_json::Value::Null);
+    let diff_val = match previous {
+        Some(p) if p.fingerprint.golden_hash == run.fingerprint.golden_hash => {
+            let mut recall_diff = serde_json::Map::new();
+            for (k, v) in &run.aggregate.recall_at_k {
+                let prev_v = p.aggregate.recall_at_k.get(k).copied().unwrap_or(0.0);
+                recall_diff.insert(k.to_string(), serde_json::json!(v - prev_v));
+            }
+            let mut ndcg_diff = serde_json::Map::new();
+            for (k, v) in &run.aggregate.ndcg_at_k {
+                let prev_v = p.aggregate.ndcg_at_k.get(k).copied().unwrap_or(0.0);
+                ndcg_diff.insert(k.to_string(), serde_json::json!(v - prev_v));
+            }
+            serde_json::json!({
+                "recall_at_k": recall_diff,
+                "ndcg_at_k": ndcg_diff,
+                "mrr": run.aggregate.mrr - p.aggregate.mrr,
+            })
+        }
+        _ => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "timestamp": run.timestamp,
+        "fingerprint": run.fingerprint,
+        "aggregate": run.aggregate,
+        "per_query": run.per_query,
+        "previous": prev_val,
+        "diff": diff_val,
+    })
+}
+
 // ---------- Orchestration ----------
 
 /// Default path for the history file: `<kb_path>/.kb-mcp-eval-history.json`.
@@ -751,6 +788,65 @@ mod tests {
         }
         assert_eq!(h.runs.len(), 10);
         assert_eq!(h.runs.front().unwrap().timestamp.timestamp(), 14);
+    }
+
+    #[test]
+    fn test_format_json_shape() {
+        let mut agg = AggregateMetrics::default();
+        agg.recall_at_k.insert(1, 0.5);
+        agg.recall_at_k.insert(5, 0.8);
+        agg.mrr = 0.75;
+        agg.ndcg_at_k.insert(5, 0.7);
+        agg.query_count = 2;
+        let run = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: ConfigFingerprint {
+                model: "bge-m3".into(),
+                reranker: None,
+                limit: 10,
+                k_values: vec![1, 5],
+                golden_hash: "abc".into(),
+            },
+            per_query: vec![],
+            aggregate: agg,
+        };
+        let v = format_json(&run, None);
+        assert_eq!(v["aggregate"]["mrr"].as_f64().unwrap(), 0.75);
+        assert_eq!(v["aggregate"]["recall_at_k"]["5"].as_f64().unwrap(), 0.8);
+        assert_eq!(v["fingerprint"]["model"].as_str().unwrap(), "bge-m3");
+        assert!(v["previous"].is_null());
+        assert!(v["diff"].is_null());
+    }
+
+    #[test]
+    fn test_format_json_with_previous() {
+        let mut a1 = AggregateMetrics::default();
+        a1.recall_at_k.insert(5, 0.8);
+        let mut a0 = AggregateMetrics::default();
+        a0.recall_at_k.insert(5, 0.6);
+        let fp = ConfigFingerprint {
+            model: "m".into(),
+            reranker: None,
+            limit: 10,
+            k_values: vec![5],
+            golden_hash: "h".into(),
+        };
+        let now = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: fp.clone(),
+            per_query: vec![],
+            aggregate: a1,
+        };
+        let prev = EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: fp,
+            per_query: vec![],
+            aggregate: a0,
+        };
+        let v = format_json(&now, Some(&prev));
+        assert!(!v["previous"].is_null());
+        let diff5 = v["diff"]["recall_at_k"]["5"].as_f64().unwrap();
+        assert!((diff5 - 0.2).abs() < 1e-9);
     }
 
     #[test]
