@@ -346,6 +346,14 @@ fn main() -> anyhow::Result<()> {
             let resolved_transport =
                 transport::Transport::resolve(cli_transport, bind, port, cfg.transport.as_ref())?;
 
+            // [search].min_confidence_ratio: 省略時 1.5、0.0 は判定無効。
+            // CLI override (`--min-confidence-ratio`) は Task 8 で追加。
+            let min_confidence_ratio = cfg
+                .search
+                .as_ref()
+                .and_then(|s| s.min_confidence_ratio)
+                .unwrap_or(1.5);
+
             // evaluator 指摘 High #2: `--bind` / `--port` が指定されているのに
             // 実効 transport が Stdio なら silent ignore は footgun なので reject。
             if matches!(resolved_transport, transport::Transport::Stdio)
@@ -371,6 +379,7 @@ fn main() -> anyhow::Result<()> {
                     parser_registry,
                     watch_config,
                     resolved_transport,
+                    min_confidence_ratio,
                 )
                 .await
             })?;

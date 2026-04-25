@@ -894,6 +894,7 @@ pub async fn run_server(
     parser_registry: Registry,
     watch_config: crate::watcher::WatchConfig,
     transport: crate::transport::Transport,
+    min_confidence_ratio: f32,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -920,9 +921,7 @@ pub async fn run_server(
         quality_threshold,
         best_practice_templates,
         parser_registry: Arc::new(parser_registry),
-        // Task 7 で run_server signature 経由で config から流し込む。
-        // Task 6 では既定 0.0 (判定無効) で配線のみ。
-        min_confidence_ratio: 0.0,
+        min_confidence_ratio,
     };
 
     // watcher をバックグラウンドで並走。
