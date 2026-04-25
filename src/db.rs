@@ -2578,17 +2578,22 @@ mod tests {
     #[test]
     fn test_filter_has_any_triggers_overfetch_for_path_globs() {
         let db = db_with_384();
-        // 同じ embedding を 20 件登録、path_globs で 1 件しか通さない
+        // 19 件は query embedding (0.5) と完全一致する位置に置き、KNN 距離 0 で
+        // 上位を独占する。`docs/keep.md` だけ query から離れた embedding (0.99)
+        // にする。`limit=5` の素朴な KNN では `docs/keep.md` は決して上位 5 件に
+        // 入らない (距離が常に他より大きい)。over-fetch (10x = 50 件) が効いて
+        // ようやく拾える。over-fetch が効かなくなれば 0 件返るので、確定的に
+        // この機構の動作を検証できる。
         for i in 0..20 {
-            let p = if i == 0 {
-                "docs/keep.md".to_string()
+            let (path, emb_seed) = if i == 0 {
+                ("docs/keep.md".to_string(), 0.99_f32)
             } else {
-                format!("other/{i}.md")
+                (format!("other/{i}.md"), 0.5_f32)
             };
             let id = db
-                .upsert_document(&p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .upsert_document(&path, Some("t"), None, None, None, &[], None, &format!("h{i}"))
                 .unwrap();
-            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.5), 1.0)
+            db.insert_chunk(id, 0, None, "body", &dummy_embedding(emb_seed), 1.0)
                 .unwrap();
         }
         let include = globset::GlobSetBuilder::new()
@@ -2603,12 +2608,112 @@ mod tests {
             path_globs: Some(&cpg),
             ..Default::default()
         };
-        // limit=5 だが path_globs で 1 件しか通らない。over-fetch が効いていれば 1 件返る、
-        // 効いていなければ 0 件 (KNN top-5 が docs/ 以外を全部拾うため)。
+        // limit=5。素朴な KNN では `docs/keep.md` は他 19 件 (距離 0) より遠い
+        // ので top-5 に入らず 0 件返るはず。over-fetch (50 件) で全件取り、
+        // path_globs で他 19 件を弾いて `docs/keep.md` を 1 件返すのが正解。
         let hits = db
             .search_similar(&dummy_embedding(0.5), 5, &filters)
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "docs/keep.md");
+    }
+
+    #[test]
+    fn test_filter_path_globs_applies_to_fts_branch() {
+        // search_vec_candidates と search_fts_candidates は同じフィルタブロックを
+        // 重複実装している。`search_similar` 経由のテスト 4 つは vec branch しか
+        // 通らない。string query を search_hybrid に通すと FTS branch が発火し、
+        // FTS 側の path_globs 適用が確認できる。
+        let db = db_with_384();
+        for (i, p) in [
+            "docs/a.md",
+            "docs/b.md",
+            "notes/c.md",
+            "notes/d.md",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .unwrap();
+            // FTS にヒットさせる固有のキーワードを各 chunk に含める
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "kibarashi_unique_keyword body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: None,
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+
+        // search_hybrid は FTS と vec を融合する。FTS 側にも path_globs フィルタが
+        // 効いていれば notes/ は返らない。
+        let hits = db
+            .search_hybrid(
+                "kibarashi_unique_keyword",
+                &dummy_embedding(0.1),
+                10,
+                &filters,
+            )
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.iter().all(|p| p.starts_with("docs/")));
+        assert_eq!(paths.len(), 2, "docs/a.md と docs/b.md のみ通る");
+    }
+
+    #[test]
+    fn test_filter_tags_applies_to_fts_branch() {
+        // 同じく FTS branch の tags フィルタを直接検証。
+        let db = db_with_384();
+        let cases: &[(&str, &[&str])] = &[
+            ("doc_with_rust.md", &["rust"]),
+            ("doc_with_other.md", &["python"]),
+        ];
+        for (i, (p, tags)) in cases.iter().enumerate() {
+            let tags_owned: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &tags_owned, None, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "kibarashi_unique_keyword body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+        let any_pool: Vec<String> = vec!["rust".into()];
+        let filters = SearchFilters {
+            tags_any: &any_pool,
+            ..Default::default()
+        };
+        let hits = db
+            .search_hybrid(
+                "kibarashi_unique_keyword",
+                &dummy_embedding(0.1),
+                10,
+                &filters,
+            )
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["doc_with_rust.md"]);
     }
 }
