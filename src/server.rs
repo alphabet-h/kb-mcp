@@ -47,7 +47,7 @@ pub struct KbServer {
     parser_registry: Arc<Registry>,
     /// `search` ツール既定の rank-based low_confidence ratio 閾値。
     /// 0.0 = 判定無効。SearchParams.min_confidence_ratio が指定されたら override。
-    pub min_confidence_ratio: f32,
+    min_confidence_ratio: f32,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -280,16 +280,16 @@ impl KbServer {
             self.quality_threshold,
         );
 
-        let tags_any: Vec<String> = params.tags_any.clone().unwrap_or_default();
-        let tags_all: Vec<String> = params.tags_all.clone().unwrap_or_default();
+        let tags_any: &[String] = params.tags_any.as_deref().unwrap_or(&[]);
+        let tags_all: &[String] = params.tags_all.as_deref().unwrap_or(&[]);
 
         let filters = crate::db::SearchFilters {
             category:    params.category.as_deref(),
             topic:       params.topic.as_deref(),
             min_quality: effective_min_quality,
             path_globs:  cpg.as_ref(),
-            tags_any:    &tags_any,
-            tags_all:    &tags_all,
+            tags_any,
+            tags_all,
             date_from:   params.date_from.as_deref(),
             date_to:     params.date_to.as_deref(),
         };
