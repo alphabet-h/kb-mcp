@@ -4,6 +4,8 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-26
+
 ### Added
 
 - `search` tool now returns `match_spans` (byte offsets) for ASCII queries,
@@ -77,6 +79,7 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alphabet-h/kb-mcp/releases/tag/v0.1.0
