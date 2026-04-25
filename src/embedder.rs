@@ -344,6 +344,7 @@ mod tests {
             title: None,
             topic: None,
             date: None,
+            tags: Vec::new(),
         };
         let candidates = vec![
             (1i64, mk("天気予報の話題です")),

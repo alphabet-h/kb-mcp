@@ -30,13 +30,24 @@ pub struct SearchResult {
     pub title: Option<String>,
     pub topic: Option<String>,
     pub date: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// `SearchHit.content` (UTF-8) 内の byte offset 範囲。
+/// `start` / `end` は **必ず char (UTF-8 codepoint) 境界に一致**することを
+/// 計算側が保証する。クライアントは `content.get(start..end).unwrap_or("")`
+/// で安全に slice すべき。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MatchSpan {
+    pub start: usize,
+    pub end: usize,
 }
 
 /// JSON-serializable view of [`SearchResult`]. DB 層 (rusqlite) は `serde` 非依存
 /// のままにしておき、API / CLI への露出はこの型を経由する。
 ///
 /// フィールドは `SearchResult` と同形。`From<SearchResult>` で移し替えるだけ。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchHit {
     pub score: f32,
     pub path: String,
@@ -44,7 +55,15 @@ pub struct SearchHit {
     pub heading: Option<String>,
     pub topic: Option<String>,
     pub date: Option<String>,
+    pub tags: Vec<String>,
     pub content: String,
+
+    /// `null` (省略) = 未計算 (機能非対応 — non-ASCII term を含む query) /
+    /// `[]` = 計算済みだが一致なし / `[{...}]` = 計算済みでマッチあり。
+    /// **Serialize 時は `None` で key 不在になる** (`null` ではない)。
+    /// Deserialize 側は `null` と key 不在を区別しない (どちらも None)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_spans: Option<Vec<MatchSpan>>,
 }
 
 impl From<SearchResult> for SearchHit {
@@ -56,8 +75,70 @@ impl From<SearchResult> for SearchHit {
             heading: r.heading,
             topic: r.topic,
             date: r.date,
+            tags: r.tags,
             content: r.content,
+            match_spans: None,
         }
+    }
+}
+
+/// Search 系 API に渡す filter 引数の集約。
+///
+/// 既存の category / topic / min_quality に加え、feature-26 で path_globs /
+/// tags_any / tags_all / date_from / date_to を追加した。引数が増えすぎて
+/// `clippy::too_many_arguments` 連発と可読性悪化を招くため、構造体 1 個に統合。
+///
+/// `Default` 実装で「すべてフィルタ無効」を表現する。
+#[derive(Debug, Default, Clone)]
+pub struct SearchFilters<'a> {
+    pub category: Option<&'a str>,
+    pub topic: Option<&'a str>,
+    pub min_quality: f32,
+    pub path_globs: Option<&'a CompiledPathGlobs>,
+    pub tags_any: &'a [String],
+    pub tags_all: &'a [String],
+    pub date_from: Option<&'a str>,
+    pub date_to: Option<&'a str>,
+}
+
+impl<'a> SearchFilters<'a> {
+    /// いずれかのフィルタが指定されているか。over-fetch 判定で使う。
+    ///
+    /// 注: `min_quality > 0.0` も含める。feature-25 以前は category/topic
+    /// だけで判定していたが、feature-26 で新フィルタ (path_globs/tags/date)
+    /// と一緒に扱う形に統合した。`min_quality` 単体指定でも over-fetch
+    /// が発動する (`FILTER_OVERFETCH_CAP` で頭打ち、害は低い)。
+    pub fn has_any(&self) -> bool {
+        self.category.is_some()
+            || self.topic.is_some()
+            || self.min_quality > 0.0
+            || self.path_globs.is_some()
+            || !self.tags_any.is_empty()
+            || !self.tags_all.is_empty()
+            || self.date_from.is_some()
+            || self.date_to.is_some()
+    }
+}
+
+/// `path_globs` の include / exclude を 2 本の GlobSet に分けてコンパイル
+/// したもの。Task 3 で実体化される。Task 1 では空のスタブ。
+#[derive(Debug, Default, Clone)]
+pub struct CompiledPathGlobs {
+    pub include: Option<globset::GlobSet>,
+    pub exclude: Option<globset::GlobSet>,
+}
+
+impl CompiledPathGlobs {
+    pub fn matches(&self, path: &str) -> bool {
+        let included = match &self.include {
+            Some(set) => set.is_match(path),
+            None => true,
+        };
+        let excluded = match &self.exclude {
+            Some(set) => set.is_match(path),
+            None => false,
+        };
+        included && !excluded
     }
 }
 
@@ -93,6 +174,62 @@ fn parse_dim_from_create_sql(sql: &str) -> Option<u32> {
     let rest = &sql[start..];
     let end = rest.find(']')?;
     rest[..end].trim().parse().ok()
+}
+
+/// `documents.tags` 列 (JSON 文字列) を `Vec<String>` に展開する。
+/// NULL / 空文字 / 不正 JSON は空 Vec として扱う (検索フィルタでヒット 0 件に
+/// なるだけで、エラーで検索を中断させない)。
+fn parse_tags_json(json: Option<String>) -> Vec<String> {
+    match json {
+        Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "malformed documents.tags JSON, treating as empty");
+                Vec::new()
+            }
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// `tags_any` フィルタ: hit の tags のいずれかが `any_pool` に含まれていれば pass。
+/// `any_pool` が空なら常に pass (= フィルタ無効)。
+fn matches_tags_any(hit_tags: &[String], any_pool: &[String]) -> bool {
+    if any_pool.is_empty() {
+        return true;
+    }
+    any_pool.iter().any(|t| hit_tags.contains(t))
+}
+
+/// `tags_all` フィルタ: `all_pool` に含まれるすべての tag を hit が持っていれば pass。
+/// `all_pool` が空なら常に pass。
+fn matches_tags_all(hit_tags: &[String], all_pool: &[String]) -> bool {
+    if all_pool.is_empty() {
+        return true;
+    }
+    all_pool.iter().all(|t| hit_tags.contains(t))
+}
+
+/// date filter: hit の date 文字列が `[from, to]` の範囲内 (lex 比較)。
+/// from / to が両方 None なら常に pass。date 欠損 (None) は strict に reject。
+fn matches_date_range(hit_date: Option<&str>, from: Option<&str>, to: Option<&str>) -> bool {
+    if from.is_none() && to.is_none() {
+        return true;
+    }
+    let Some(d) = hit_date else {
+        return false; // 欠損は strict 排除
+    };
+    if let Some(f) = from
+        && d < f
+    {
+        return false;
+    }
+    if let Some(t) = to
+        && d > t
+    {
+        return false;
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +655,7 @@ impl Database {
         let sql = "
             SELECT c.id, vec_to_json(v.embedding),
                    c.content, c.heading,
-                   d.path, d.title, d.topic, d.date
+                   d.path, d.title, d.topic, d.date, d.tags
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             JOIN vec_chunks v ON v.chunk_id = c.id
@@ -536,11 +673,12 @@ impl Database {
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, embedding_json, content, heading, path, title, topic, date) = r?;
+            let (id, embedding_json, content, heading, path, title, topic, date, tags_json) = r?;
             let embedding: Vec<f32> = serde_json::from_str(&embedding_json)
                 .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
             out.push((
@@ -554,6 +692,7 @@ impl Database {
                     title,
                     topic,
                     date,
+                    tags: parse_tags_json(tags_json),
                 },
             ));
         }
@@ -616,12 +755,9 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<SearchResult>> {
-        let hits =
-            self.search_vec_candidates(query_embedding, limit, category, topic, min_quality)?;
+        let hits = self.search_vec_candidates(query_embedding, limit, filters)?;
         Ok(hits.into_iter().map(|(_, r)| r).collect())
     }
 
@@ -634,17 +770,14 @@ impl Database {
         &self,
         query_text: &str,
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
         let Some(fts_query) = sanitize_fts_query(query_text) else {
             return Ok(Vec::new());
         };
 
-        // min_quality による選択率低下は無視 (Med #5 と同じ理由)。
-        let has_filters = category.is_some() || topic.is_some();
-        let fetch_limit = if has_filters {
+        // filter 指定があれば over-fetch する (詳細は SearchFilters::has_any)。
+        let fetch_limit = if filters.has_any() {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)
                 .min(FILTER_OVERFETCH_CAP)
@@ -658,7 +791,7 @@ impl Database {
             "
             SELECT c.id, bm25(fts_chunks, {h}, {c}) AS score,
                    c.content, c.heading, c.quality_score,
-                   d.path, d.title, d.topic, d.date, d.category
+                   d.path, d.title, d.topic, d.date, d.category, d.tags
             FROM fts_chunks f
             JOIN chunks c ON c.id = f.rowid
             JOIN documents d ON d.id = c.document_id
@@ -676,14 +809,15 @@ impl Database {
             Ok((
                 chunk_id,
                 score,
-                row.get::<_, String>(2)?,         // content
-                row.get::<_, Option<String>>(3)?, // heading
-                row.get::<_, f32>(4)?,            // quality_score
-                row.get::<_, String>(5)?,         // path
-                row.get::<_, Option<String>>(6)?, // title
-                row.get::<_, Option<String>>(7)?, // topic
-                row.get::<_, Option<String>>(8)?, // date
-                row.get::<_, Option<String>>(9)?, // category
+                row.get::<_, String>(2)?,          // content
+                row.get::<_, Option<String>>(3)?,  // heading
+                row.get::<_, f32>(4)?,             // quality_score
+                row.get::<_, String>(5)?,          // path
+                row.get::<_, Option<String>>(6)?,  // title
+                row.get::<_, Option<String>>(7)?,  // topic
+                row.get::<_, Option<String>>(8)?,  // date
+                row.get::<_, Option<String>>(9)?,  // category
+                row.get::<_, Option<String>>(10)?, // tags (JSON)
             ))
         })?;
 
@@ -700,18 +834,37 @@ impl Database {
                 r_topic,
                 date,
                 r_category,
+                tags_json,
             ) = row?;
-            if min_quality > 0.0 && quality_score < min_quality {
+            if filters.min_quality > 0.0 && quality_score < filters.min_quality {
                 continue;
             }
-            if let Some(cat) = category
+            if let Some(cat) = filters.category
                 && r_category.as_deref() != Some(cat)
             {
                 continue;
             }
-            if let Some(t) = topic
+            if let Some(t) = filters.topic
                 && r_topic.as_deref() != Some(t)
             {
+                continue;
+            }
+            // path_globs filter (Task 3 追加)
+            if let Some(cpg) = filters.path_globs
+                && !cpg.matches(&path)
+            {
+                continue;
+            }
+            // tags_any / tags_all filter (Task 3 追加)
+            let hit_tags = parse_tags_json(tags_json);
+            if !matches_tags_any(&hit_tags, filters.tags_any) {
+                continue;
+            }
+            if !matches_tags_all(&hit_tags, filters.tags_all) {
+                continue;
+            }
+            // date_from / date_to filter (Task 3 追加)
+            if !matches_date_range(date.as_deref(), filters.date_from, filters.date_to) {
                 continue;
             }
             results.push((
@@ -724,6 +877,7 @@ impl Database {
                     title,
                     topic: r_topic,
                     date,
+                    tags: hit_tags,
                 },
             ));
             if results.len() >= limit as usize {
@@ -743,18 +897,9 @@ impl Database {
         query_text: &str,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<SearchResult>> {
-        let hits = self.search_hybrid_candidates(
-            query_text,
-            query_embedding,
-            limit,
-            category,
-            topic,
-            min_quality,
-        )?;
+        let hits = self.search_hybrid_candidates(query_text, query_embedding, limit, filters)?;
         Ok(hits.into_iter().map(|(_, r)| r).collect())
     }
 
@@ -766,16 +911,12 @@ impl Database {
         query_text: &str,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
         let candidates = limit.saturating_mul(5).max(50);
 
-        let vec_hits =
-            self.search_vec_candidates(query_embedding, candidates, category, topic, min_quality)?;
-        let fts_hits =
-            self.search_fts_candidates(query_text, candidates, category, topic, min_quality)?;
+        let vec_hits = self.search_vec_candidates(query_embedding, candidates, filters)?;
+        let fts_hits = self.search_fts_candidates(query_text, candidates, filters)?;
 
         // RRF: chunk_id ごとに 1/(K + rank + 1) を加算
         let mut scores: HashMap<i64, f32> = HashMap::new();
@@ -819,15 +960,12 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
-        // category / topic は Rust 側フィルタなので over-fetch する。
-        // min_quality は SQL 側で選択率が変わるが、実運用で低品質チャンクは
-        // ごく一部のため常時 over-fetch は無駄 (evaluator 指摘 Med #5)。
-        let has_filters = category.is_some() || topic.is_some();
-        let fetch_k = if has_filters {
+        // filter 指定があれば over-fetch する (詳細は SearchFilters::has_any)。
+        // category/topic/path_globs/tags/date は Rust 側フィルタなので
+        // 必ず over-fetch が必要、min_quality 単独でも fail-safe で広げる。
+        let fetch_k = if filters.has_any() {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)
                 .min(FILTER_OVERFETCH_CAP)
@@ -838,7 +976,7 @@ impl Database {
         let sql = "
             SELECT v.chunk_id, v.distance,
                    c.content, c.heading, c.quality_score,
-                   d.path, d.title, d.topic, d.date, d.category
+                   d.path, d.title, d.topic, d.date, d.category, d.tags
             FROM vec_chunks v
             JOIN chunks c ON c.id = v.chunk_id
             JOIN documents d ON d.id = c.document_id
@@ -852,14 +990,15 @@ impl Database {
             Ok((
                 chunk_id,
                 distance,
-                row.get::<_, String>(2)?,         // content
-                row.get::<_, Option<String>>(3)?, // heading
-                row.get::<_, f32>(4)?,            // quality_score
-                row.get::<_, String>(5)?,         // path
-                row.get::<_, Option<String>>(6)?, // title
-                row.get::<_, Option<String>>(7)?, // topic
-                row.get::<_, Option<String>>(8)?, // date
-                row.get::<_, Option<String>>(9)?, // category
+                row.get::<_, String>(2)?,          // content
+                row.get::<_, Option<String>>(3)?,  // heading
+                row.get::<_, f32>(4)?,             // quality_score
+                row.get::<_, String>(5)?,          // path
+                row.get::<_, Option<String>>(6)?,  // title
+                row.get::<_, Option<String>>(7)?,  // topic
+                row.get::<_, Option<String>>(8)?,  // date
+                row.get::<_, Option<String>>(9)?,  // category
+                row.get::<_, Option<String>>(10)?, // tags (JSON)
             ))
         })?;
 
@@ -876,18 +1015,37 @@ impl Database {
                 r_topic,
                 date,
                 r_category,
+                tags_json,
             ) = row?;
-            if min_quality > 0.0 && quality_score < min_quality {
+            if filters.min_quality > 0.0 && quality_score < filters.min_quality {
                 continue;
             }
-            if let Some(cat) = category
+            if let Some(cat) = filters.category
                 && r_category.as_deref() != Some(cat)
             {
                 continue;
             }
-            if let Some(t) = topic
+            if let Some(t) = filters.topic
                 && r_topic.as_deref() != Some(t)
             {
+                continue;
+            }
+            // path_globs filter (Task 3 追加)
+            if let Some(cpg) = filters.path_globs
+                && !cpg.matches(&path)
+            {
+                continue;
+            }
+            // tags_any / tags_all filter (Task 3 追加)
+            let hit_tags = parse_tags_json(tags_json);
+            if !matches_tags_any(&hit_tags, filters.tags_any) {
+                continue;
+            }
+            if !matches_tags_all(&hit_tags, filters.tags_all) {
+                continue;
+            }
+            // date_from / date_to filter (Task 3 追加)
+            if !matches_date_range(date.as_deref(), filters.date_from, filters.date_to) {
                 continue;
             }
             out.push((
@@ -900,6 +1058,7 @@ impl Database {
                     title,
                     topic: r_topic,
                     date,
+                    tags: hit_tags,
                 },
             ));
             if out.len() >= limit as usize {
@@ -1394,19 +1553,33 @@ mod tests {
 
         // No filter path
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_similar(&dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2, "both chunks should be returned");
 
         // Filter path (category match)
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, Some("deep-dive"), None, 0.0)
+            .search_similar(
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    category: Some("deep-dive"),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 2);
 
         // Filter path (non-matching topic → empty)
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, Some("no-such-topic"), 0.0)
+            .search_similar(
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    topic: Some("no-such-topic"),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(hits.is_empty());
     }
@@ -1432,20 +1605,35 @@ mod tests {
 
         // threshold=0.0: 両方返る (既存挙動)
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_similar(&dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2);
 
         // threshold=0.5: 高品質のみ
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, None, 0.5)
+            .search_similar(
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    min_quality: 0.5,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].heading.as_deref(), Some("high"));
 
         // hybrid でも同じ挙動
         let hits = db
-            .search_hybrid("rich", &dummy_embedding(0.1), 5, None, None, 0.5)
+            .search_hybrid(
+                "rich",
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    min_quality: 0.5,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(hits.iter().all(|h| h.heading.as_deref() != Some("low")));
     }
@@ -1843,7 +2031,7 @@ mod tests {
             .unwrap();
 
         let hits = db
-            .search_hybrid("E0382", &dummy_embedding(0.5), 5, None, None, 0.0)
+            .search_hybrid("E0382", &dummy_embedding(0.5), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2);
         // FTS でヒットするのは A だけ → A が上位
@@ -1866,7 +2054,7 @@ mod tests {
 
         // 2 文字クエリ → sanitize が None → vec-only
         let hits = db
-            .search_hybrid("ab", &dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_hybrid("ab", &dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].score > 0.0, "RRF スコアは正の有限値");
@@ -1900,7 +2088,7 @@ mod tests {
             .unwrap();
 
         let hits = db
-            .search_hybrid_candidates("E0382", &dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_hybrid_candidates("E0382", &dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert!(!hits.is_empty());
         // 返ってきた chunk_id は insert 時の id と一致
@@ -1939,7 +2127,7 @@ mod tests {
 
         // 直接 FTS 候補を取り、B が A より上位 (低 bm25) になることを確認
         let hits = db
-            .search_fts_candidates("kibarashi_unique_keyword", 10, None, None, 0.0)
+            .search_fts_candidates("kibarashi_unique_keyword", 10, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2);
         let (top_id, _) = hits[0];
@@ -1972,9 +2160,10 @@ mod tests {
                 "noexistent_query",
                 &dummy_embedding(0.5),
                 5,
-                Some("target"),
-                None,
-                0.0,
+                &SearchFilters {
+                    category: Some("target"),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(hits.len(), 1, "target カテゴリの 1 件を取りこぼさない");
@@ -2000,7 +2189,12 @@ mod tests {
 
         // 日本語 3 文字 "エラー" が trigram でヒットする
         let hits = db
-            .search_hybrid("エラー", &dummy_embedding(0.7), 5, None, None, 0.0)
+            .search_hybrid(
+                "エラー",
+                &dummy_embedding(0.7),
+                5,
+                &SearchFilters::default(),
+            )
             .unwrap();
         assert!(!hits.is_empty());
         assert!(
@@ -2217,5 +2411,377 @@ mod tests {
         assert!(mcp.titles.contains(&"MCP Features".to_string()));
 
         println!("test_list_topics: OK");
+    }
+
+    #[test]
+    fn test_search_result_includes_tags() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document(
+                "tagged.md",
+                Some("Tagged"),
+                None,
+                None,
+                None,
+                &["rust".into(), "async".into()],
+                None,
+                "h1",
+            )
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "body", &dummy_embedding(0.1), 1.0)
+            .unwrap();
+
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 5, &SearchFilters::default())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].tags, vec!["rust".to_string(), "async".to_string()]);
+    }
+
+    #[test]
+    fn test_filter_path_globs_include_only() {
+        let db = db_with_384();
+        for (i, p) in ["docs/a.md", "docs/b.md", "notes/c.md"].iter().enumerate() {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: None,
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.iter().all(|p| p.starts_with("docs/")));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_path_globs_with_exclude() {
+        let db = db_with_384();
+        for (i, p) in ["docs/a.md", "docs/draft/b.md", "docs/c.md"]
+            .iter()
+            .enumerate()
+        {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let exclude = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/draft/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: Some(exclude),
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(!paths.iter().any(|p| p.starts_with("docs/draft/")));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_tags_all_and_tags_any_combined() {
+        let db = db_with_384();
+        let cases: &[(&str, &[&str])] = &[
+            ("doc_a.md", &["x", "b"]), // tags_all=[x] OK, tags_any=[b,c] OK -> pass
+            ("doc_b.md", &["x", "z"]), // tags_all=[x] OK, tags_any=[b,c] NG -> fail
+            ("doc_c.md", &["b", "c"]), // tags_all=[x] NG -> fail
+            ("doc_d.md", &["x", "c", "b"]), // both OK -> pass
+        ];
+        for (i, (p, tags)) in cases.iter().enumerate() {
+            let tags_owned: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+            let id = db
+                .upsert_document(
+                    p,
+                    Some("t"),
+                    None,
+                    None,
+                    None,
+                    &tags_owned,
+                    None,
+                    &format!("h{i}"),
+                )
+                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+        let any_pool: Vec<String> = vec!["b".into(), "c".into()];
+        let all_pool: Vec<String> = vec!["x".into()];
+        let filters = SearchFilters {
+            tags_any: &any_pool,
+            tags_all: &all_pool,
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"doc_a.md"));
+        assert!(paths.contains(&"doc_d.md"));
+        assert!(!paths.contains(&"doc_b.md"));
+        assert!(!paths.contains(&"doc_c.md"));
+    }
+
+    #[test]
+    fn test_filter_date_range_strict_excludes_missing() {
+        let db = db_with_384();
+        let dates = &[
+            ("a.md", Some("2026-01-15")),
+            ("b.md", Some("2026-04-01")),
+            ("c.md", Some("2025-12-31")),
+            ("d.md", None),
+        ];
+        for (i, (p, d)) in dates.iter().enumerate() {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], *d, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+        let filters = SearchFilters {
+            date_from: Some("2026-01-01"),
+            date_to: Some("2026-12-31"),
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"a.md"));
+        assert!(paths.contains(&"b.md"));
+        assert!(!paths.contains(&"c.md"));
+        assert!(
+            !paths.contains(&"d.md"),
+            "missing date is excluded (strict)"
+        );
+    }
+
+    #[test]
+    fn test_filter_has_any_triggers_overfetch_for_path_globs() {
+        let db = db_with_384();
+        // 19 件は query embedding (0.5) と完全一致する位置に置き、KNN 距離 0 で
+        // 上位を独占する。`docs/keep.md` だけ query から離れた embedding (0.99)
+        // にする。`limit=5` の素朴な KNN では `docs/keep.md` は決して上位 5 件に
+        // 入らない (距離が常に他より大きい)。over-fetch (10x = 50 件) が効いて
+        // ようやく拾える。over-fetch が効かなくなれば 0 件返るので、確定的に
+        // この機構の動作を検証できる。
+        for i in 0..20 {
+            let (path, emb_seed) = if i == 0 {
+                ("docs/keep.md".to_string(), 0.99_f32)
+            } else {
+                (format!("other/{i}.md"), 0.5_f32)
+            };
+            let id = db
+                .upsert_document(
+                    &path,
+                    Some("t"),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    &format!("h{i}"),
+                )
+                .unwrap();
+            db.insert_chunk(id, 0, None, "body", &dummy_embedding(emb_seed), 1.0)
+                .unwrap();
+        }
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: None,
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+        // limit=5。素朴な KNN では `docs/keep.md` は他 19 件 (距離 0) より遠い
+        // ので top-5 に入らず 0 件返るはず。over-fetch (50 件) で全件取り、
+        // path_globs で他 19 件を弾いて `docs/keep.md` を 1 件返すのが正解。
+        let hits = db
+            .search_similar(&dummy_embedding(0.5), 5, &filters)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "docs/keep.md");
+    }
+
+    #[test]
+    fn test_filter_path_globs_applies_to_fts_branch() {
+        // search_vec_candidates と search_fts_candidates は同じフィルタブロックを
+        // 重複実装している。`search_similar` 経由のテスト 4 つは vec branch しか
+        // 通らない。string query を search_hybrid に通すと FTS branch が発火し、
+        // FTS 側の path_globs 適用が確認できる。
+        let db = db_with_384();
+        for (i, p) in ["docs/a.md", "docs/b.md", "notes/c.md", "notes/d.md"]
+            .iter()
+            .enumerate()
+        {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .unwrap();
+            // FTS にヒットさせる固有のキーワードを各 chunk に含める
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "kibarashi_unique_keyword body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: None,
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+
+        // search_hybrid は FTS と vec を融合する。FTS 側にも path_globs フィルタが
+        // 効いていれば notes/ は返らない。
+        let hits = db
+            .search_hybrid(
+                "kibarashi_unique_keyword",
+                &dummy_embedding(0.1),
+                10,
+                &filters,
+            )
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.iter().all(|p| p.starts_with("docs/")));
+        assert_eq!(paths.len(), 2, "docs/a.md と docs/b.md のみ通る");
+    }
+
+    #[test]
+    fn test_filter_tags_applies_to_fts_branch() {
+        // 同じく FTS branch の tags フィルタを直接検証。
+        let db = db_with_384();
+        let cases: &[(&str, &[&str])] = &[
+            ("doc_with_rust.md", &["rust"]),
+            ("doc_with_other.md", &["python"]),
+        ];
+        for (i, (p, tags)) in cases.iter().enumerate() {
+            let tags_owned: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+            let id = db
+                .upsert_document(
+                    p,
+                    Some("t"),
+                    None,
+                    None,
+                    None,
+                    &tags_owned,
+                    None,
+                    &format!("h{i}"),
+                )
+                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "kibarashi_unique_keyword body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
+        }
+        let any_pool: Vec<String> = vec!["rust".into()];
+        let filters = SearchFilters {
+            tags_any: &any_pool,
+            ..Default::default()
+        };
+        let hits = db
+            .search_hybrid(
+                "kibarashi_unique_keyword",
+                &dummy_embedding(0.1),
+                10,
+                &filters,
+            )
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["doc_with_rust.md"]);
+    }
+
+    #[test]
+    fn test_search_hit_has_match_spans_field_default_none() {
+        // SearchResult から SearchHit に変換した直後は match_spans は None。
+        // (具体的な計算は server レイヤで行う)
+        let r = SearchResult {
+            score: 0.1,
+            content: "abc".into(),
+            heading: None,
+            path: "x.md".into(),
+            title: None,
+            topic: None,
+            date: None,
+            tags: vec![],
+        };
+        let h: SearchHit = r.into();
+        assert!(h.match_spans.is_none());
     }
 }

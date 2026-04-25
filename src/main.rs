@@ -240,6 +240,24 @@ enum Commands {
         /// `--min-quality 0.0`).
         #[arg(long = "include-low-quality", default_value_t = false)]
         include_low_quality: bool,
+        /// path glob (`!`-prefix で除外)。複数指定可。例: `--path-glob "docs/**"`
+        #[arg(long = "path-glob", value_delimiter = ',')]
+        path_globs: Vec<String>,
+        /// tags_any (OR)。複数指定可。例: `--tag-any rust,async`
+        #[arg(long = "tag-any", value_delimiter = ',')]
+        tags_any: Vec<String>,
+        /// tags_all (AND)。複数指定可。
+        #[arg(long = "tag-all", value_delimiter = ',')]
+        tags_all: Vec<String>,
+        /// date filter 下限 (YYYY-MM-DD or RFC3339, lex 比較)
+        #[arg(long = "date-from")]
+        date_from: Option<String>,
+        /// date filter 上限 (両端含む)
+        #[arg(long = "date-to")]
+        date_to: Option<String>,
+        /// rank-based low_confidence ratio (default: 1.5、0.0 で判定無効)
+        #[arg(long = "min-confidence-ratio")]
+        min_confidence_ratio: Option<f32>,
     },
     /// Evaluate retrieval quality against a golden query set (optional, power-user feature).
     /// Reports recall@k / MRR / nDCG@k and diffs against the previous run.
@@ -346,6 +364,14 @@ fn main() -> anyhow::Result<()> {
             let resolved_transport =
                 transport::Transport::resolve(cli_transport, bind, port, cfg.transport.as_ref())?;
 
+            // [search].min_confidence_ratio: 省略時 1.5、0.0 は判定無効。
+            // CLI override (`--min-confidence-ratio`) は Task 8 で追加。
+            let min_confidence_ratio = cfg
+                .search
+                .as_ref()
+                .and_then(|s| s.min_confidence_ratio)
+                .unwrap_or(1.5);
+
             // evaluator 指摘 High #2: `--bind` / `--port` が指定されているのに
             // 実効 transport が Stdio なら silent ignore は footgun なので reject。
             if matches!(resolved_transport, transport::Transport::Stdio)
@@ -371,6 +397,7 @@ fn main() -> anyhow::Result<()> {
                     parser_registry,
                     watch_config,
                     resolved_transport,
+                    min_confidence_ratio,
                 )
                 .await
             })?;
@@ -454,6 +481,12 @@ fn main() -> anyhow::Result<()> {
             format,
             min_quality,
             include_low_quality,
+            path_globs,
+            tags_any,
+            tags_all,
+            date_from,
+            date_to,
+            min_confidence_ratio,
         } => {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
@@ -478,39 +511,58 @@ fn main() -> anyhow::Result<()> {
                 server_default,
             );
 
+            // path_globs を compile (空 Vec は filter 無効、`[]` 入力をエラーにしないのは CLI 仕様)
+            let cpg = if path_globs.is_empty() {
+                None
+            } else {
+                Some(server::compile_path_globs(&path_globs)?)
+            };
+
+            let filters = db::SearchFilters {
+                category: category.as_deref(),
+                topic: topic.as_deref(),
+                min_quality: effective_min_quality,
+                path_globs: cpg.as_ref(),
+                tags_any: &tags_any,
+                tags_all: &tags_all,
+                date_from: date_from.as_deref(),
+                date_to: date_to.as_deref(),
+            };
+
             let results = if reranker_choice.is_enabled() {
                 let candidates = db.search_hybrid_candidates(
                     &query,
                     &query_embedding,
                     limit.saturating_mul(5).max(50),
-                    category.as_deref(),
-                    topic.as_deref(),
-                    effective_min_quality,
+                    &filters,
                 )?;
                 if let Some(mut r) = embedder::Reranker::try_new(reranker_choice)? {
                     r.rerank_candidates(&query, candidates, limit)?
                 } else {
-                    db.search_hybrid(
-                        &query,
-                        &query_embedding,
-                        limit,
-                        category.as_deref(),
-                        topic.as_deref(),
-                        effective_min_quality,
-                    )?
+                    db.search_hybrid(&query, &query_embedding, limit, &filters)?
                 }
             } else {
-                db.search_hybrid(
-                    &query,
-                    &query_embedding,
-                    limit,
-                    category.as_deref(),
-                    topic.as_deref(),
-                    effective_min_quality,
-                )?
+                db.search_hybrid(&query, &query_embedding, limit, &filters)?
             };
 
-            print_search_results(results, format);
+            let effective_ratio = min_confidence_ratio
+                .or_else(|| cfg.search.as_ref().and_then(|s| s.min_confidence_ratio))
+                .unwrap_or(1.5);
+
+            print_search_results(
+                &query,
+                results,
+                effective_ratio,
+                &path_globs,
+                &tags_any,
+                &tags_all,
+                date_from.as_deref(),
+                date_to.as_deref(),
+                category.as_deref(),
+                topic.as_deref(),
+                min_confidence_ratio,
+                format,
+            );
         }
         Commands::Graph {
             start,
@@ -898,17 +950,57 @@ fn print_graph(g: graph::ConnectionGraph, format: SearchFormat) {
     }
 }
 
-fn print_search_results(results: Vec<db::SearchResult>, format: SearchFormat) {
-    // db::SearchHit への移し替えで MCP `search` ツール出力と shape が一致する。
-    let hits: Vec<db::SearchHit> = results.into_iter().map(Into::into).collect();
+#[allow(clippy::too_many_arguments)]
+fn print_search_results(
+    query: &str,
+    results: Vec<db::SearchResult>,
+    min_confidence_ratio: f32,
+    path_globs: &[String],
+    tags_any: &[String],
+    tags_all: &[String],
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+    category: Option<&str>,
+    topic: Option<&str>,
+    explicit_ratio: Option<f32>,
+    format: SearchFormat,
+) {
+    let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+    let low_confidence = server::compute_low_confidence(&scores, min_confidence_ratio);
+    let mut hits: Vec<db::SearchHit> = results.into_iter().map(Into::into).collect();
+    for h in &mut hits {
+        h.match_spans = server::compute_match_spans(query, &h.content);
+    }
+
     match format {
         SearchFormat::Json => {
+            let echo = serde_json::json!({
+                "category":              category,
+                "topic":                 topic,
+                "path_globs":            (if path_globs.is_empty() { None::<&[String]> } else { Some(path_globs) }),
+                "tags_any":              (if tags_any.is_empty()   { None::<&[String]> } else { Some(tags_any)   }),
+                "tags_all":              (if tags_all.is_empty()   { None::<&[String]> } else { Some(tags_all)   }),
+                "date_from":             date_from,
+                "date_to":               date_to,
+                "min_confidence_ratio":  explicit_ratio,
+            });
+            // 値が None のキーは JSON 上 null になるので、null は剥がす。
+            let echo = strip_null_keys(echo);
+
+            let wrapper = serde_json::json!({
+                "results":         hits,
+                "low_confidence":  low_confidence,
+                "filter_applied":  echo,
+            });
             println!(
                 "{}",
-                serde_json::to_string_pretty(&hits).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string_pretty(&wrapper).unwrap_or_else(|_| "{}".into())
             );
         }
         SearchFormat::Text => {
+            if low_confidence {
+                println!("[low_confidence: top1 / mean ratio < {min_confidence_ratio}]\n");
+            }
             for (i, h) in hits.iter().enumerate() {
                 if i > 0 {
                     println!("\n---\n");
@@ -922,9 +1014,37 @@ fn print_search_results(results: Vec<db::SearchResult>, format: SearchFormat) {
                     println!("{}#{heading}", h.path);
                 }
                 println!("score: {:.4}", h.score);
+                if !h.tags.is_empty() {
+                    println!("tags: {}", h.tags.join(", "));
+                }
+                if let Some(spans) = &h.match_spans
+                    && !spans.is_empty()
+                {
+                    let snippets: Vec<String> = spans
+                        .iter()
+                        .take(3)
+                        .filter_map(|s| h.content.get(s.start..s.end).map(|t| format!("\"{t}\"")))
+                        .collect();
+                    println!("match_spans: {}", snippets.join(", "));
+                }
                 println!();
                 println!("{}", h.content);
             }
         }
+    }
+}
+
+/// JSON object から null 値の key を再帰的に剥がす (filter_applied の non-default echo 用)。
+fn strip_null_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let cleaned: serde_json::Map<String, serde_json::Value> = map
+                .into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k, strip_null_keys(v)))
+                .collect();
+            serde_json::Value::Object(cleaned)
+        }
+        other => other,
     }
 }

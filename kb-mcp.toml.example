@@ -109,3 +109,11 @@ bind = "127.0.0.1:3100"
 #history_size = 10                      # 履歴保持件数 (default: 10)
 #k_values = [1, 5, 10]                  # 報告する k (default: [1, 5, 10])
 #regression_threshold = 0.05            # diff 色付けの閾値 (default: 0.05)
+
+# --- search (search ツールの追加設定、feature 26) ---
+# rank-based low_confidence 判定の閾値。top1.score / mean(top-N.score) <
+# ratio で flag が立つ。0.0 で判定無効。CLI `--min-confidence-ratio` /
+# MCP param `min_confidence_ratio` で per-query 上書き可。省略時は 1.5。
+# セクション自体を丸ごと削除してよい (既定値で動作する)。
+[search]
+#min_confidence_ratio = 1.5             # default: 1.5

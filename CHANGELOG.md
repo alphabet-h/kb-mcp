@@ -4,7 +4,36 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
-_(nothing yet)_
+## [0.3.0] - 2026-04-26
+
+### Added
+
+- `search` tool now returns `match_spans` (byte offsets) for ASCII queries,
+  helping clients quote source text accurately. See `docs/citations.md`.
+- `search` tool gained new filters: `path_globs` (glob with `!`-prefixed
+  excludes), `tags_any` (OR), `tags_all` (AND), `date_from` / `date_to`
+  (lex comparison; date-missing chunks excluded strictly). See `docs/filters.md`.
+- `search` response includes a `low_confidence` flag based on a rank-based
+  ratio (`top1.score / mean(top-N.score) < min_confidence_ratio`). The threshold
+  defaults to `1.5` and can be configured via `[search].min_confidence_ratio`
+  in `kb-mcp.toml` or via `--min-confidence-ratio` / `min_confidence_ratio` per
+  query.
+- `tags` field is now included in each `SearchHit`.
+- CLI `kb-mcp search` accepts `--path-glob`, `--tag-any`, `--tag-all`,
+  `--date-from`, `--date-to`, `--min-confidence-ratio`.
+- `[search]` section in `kb-mcp.toml`.
+
+### Changed (BREAKING)
+
+- The `search` MCP tool now returns a wrapper object
+  `{ results, low_confidence, filter_applied }` instead of a raw array of hits.
+  Clients that parse the response as `Vec<SearchHit>` directly must be updated.
+  CLI `kb-mcp search --format json` follows the same wrapper format.
+- Internal `db::search_hybrid` / `db::search_hybrid_candidates` /
+  `db::search_vec_candidates` / `db::search_fts_candidates` /
+  `db::search_similar` now take a `&SearchFilters<'_>` instead of separate
+  `category` / `topic` / `min_quality` arguments. Library consumers (rare
+  outside this repo) must migrate.
 
 ## [0.2.0] - 2026-04-24
 
@@ -50,6 +79,7 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alphabet-h/kb-mcp/releases/tag/v0.1.0

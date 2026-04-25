@@ -45,6 +45,9 @@ pub struct KbServer {
     /// `[parsers].enabled` が無ければ `Registry::defaults()` = `["md"]` のみ。
     /// watcher とも共有するため Arc。
     parser_registry: Arc<Registry>,
+    /// `search` ツール既定の rank-based low_confidence ratio 閾値。
+    /// 0.0 = 判定無効。SearchParams.min_confidence_ratio が指定されたら override。
+    min_confidence_ratio: f32,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -59,9 +62,12 @@ struct SearchParams {
     query: String,
     /// Maximum number of results to return (default: 5)
     limit: Option<u32>,
-    /// Filter by category (e.g. "deep-dive", "ai-news", "tech-watch")
+    /// Filter by category (legacy, single value; e.g. "deep-dive",
+    /// "ai-news", "tech-watch"). Prefer `path_globs` / `tags_any` /
+    /// `tags_all` for new clients.
     category: Option<String>,
-    /// Filter by topic (e.g. "mcp", "chromadb")
+    /// Filter by topic (legacy, single value; e.g. "mcp", "chromadb").
+    /// Prefer `path_globs` / `tags_any` / `tags_all` for new clients.
     topic: Option<String>,
     /// Override the server default for reranking. Requires the server to have
     /// been started with `--reranker <model>` (otherwise ignored).
@@ -72,6 +78,27 @@ struct SearchParams {
     /// If true, disable the quality filter for this query (equivalent to
     /// `min_quality: 0.0`, but more explicit).
     include_low_quality: Option<bool>,
+
+    // ----- structured filter set (path / tags / date) -----
+    /// Path glob patterns. `!` prefix marks an exclude pattern,
+    /// e.g. `["docs/**", "!docs/draft/**"]`. An empty array `[]`
+    /// is rejected — pass `null` (omit the field) to disable, or
+    /// `["**", "!a/**"]` to express exclude-only intent.
+    path_globs: Option<Vec<String>>,
+    /// Hit passes if it carries any of these tags (OR semantics).
+    tags_any: Option<Vec<String>>,
+    /// Hit passes only if it carries every one of these tags (AND).
+    tags_all: Option<Vec<String>>,
+    /// Inclusive lower bound on `frontmatter.date` (lexicographic, ISO-8601 friendly).
+    date_from: Option<String>,
+    /// Inclusive upper bound on `frontmatter.date` (lexicographic, ISO-8601 friendly).
+    date_to: Option<String>,
+
+    // ----- low-confidence cutoff -----
+    /// Rank-based ratio threshold for trimming low-confidence tail results.
+    /// `null` falls back to the server default (`kb-mcp.toml` / CLI);
+    /// `0.0` disables the cutoff for this query.
+    min_confidence_ratio: Option<f32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -171,6 +198,37 @@ struct ErrorResponse {
     error: String,
 }
 
+/// `search` MCP ツールの新出力 (feature-26、wrapper 形)。
+#[derive(Serialize)]
+struct SearchResponse {
+    results: Vec<crate::db::SearchHit>,
+    low_confidence: bool,
+    /// 入力 filter のうち non-default のものだけ正規化後の値で echo back。
+    filter_applied: SearchFilterEcho,
+}
+
+/// 入力 filter のうち non-default のものだけ echo。`null`/空配列の項目は
+/// `skip_serializing_if` で JSON から省略される。
+#[derive(Serialize, Default)]
+struct SearchFilterEcho {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_globs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags_any: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags_all: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_confidence_ratio: Option<f32>,
+}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
@@ -179,12 +237,26 @@ struct ErrorResponse {
 impl KbServer {
     #[tool(
         name = "search",
-        description = "Hybrid search (vector + FTS5 full-text, merged via Reciprocal Rank Fusion) over the knowledge base. The `score` field is the RRF score (higher = better)."
+        description = "Hybrid search (vector + FTS5 full-text, merged via Reciprocal Rank Fusion) over the knowledge base. Returns a wrapper with results, low_confidence flag, and filter_applied echo. The `score` field is the RRF score (or cross-encoder score when reranker is enabled). `match_spans` field (when present) gives byte offsets into `content` for ASCII query terms."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(5);
 
-        // Embed the query
+        // path_globs を事前 compile。エラー時は ErrorResponse を返却。
+        let cpg = match params.path_globs.as_ref() {
+            Some(globs) => match compile_path_globs(globs) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    return serde_json::to_string_pretty(&ErrorResponse {
+                        error: format!("invalid path_globs: {e}"),
+                    })
+                    .unwrap_or_default();
+                }
+            },
+            None => None,
+        };
+
+        // query embedding
         let query_embedding = {
             let mut embedder = self.embedder.lock().unwrap();
             match embedder.embed_single(&params.query) {
@@ -198,7 +270,6 @@ impl KbServer {
             }
         };
 
-        // Search the DB (optionally followed by reranking)
         let mut reranker_guard = self.reranker.lock().unwrap();
         let use_rerank =
             params.rerank.unwrap_or(self.rerank_by_default) && reranker_guard.is_some();
@@ -209,16 +280,27 @@ impl KbServer {
             self.quality_threshold,
         );
 
+        let tags_any: &[String] = params.tags_any.as_deref().unwrap_or(&[]);
+        let tags_all: &[String] = params.tags_all.as_deref().unwrap_or(&[]);
+
+        let filters = crate::db::SearchFilters {
+            category: params.category.as_deref(),
+            topic: params.topic.as_deref(),
+            min_quality: effective_min_quality,
+            path_globs: cpg.as_ref(),
+            tags_any,
+            tags_all,
+            date_from: params.date_from.as_deref(),
+            date_to: params.date_to.as_deref(),
+        };
+
         let db = self.db.lock().unwrap();
         let search_outcome: anyhow::Result<Vec<crate::db::SearchResult>> = if use_rerank {
-            // rerank 入力用に candidates を取得、score は cross-encoder で上書き
             match db.search_hybrid_candidates(
                 &params.query,
                 &query_embedding,
                 limit.saturating_mul(5).max(50),
-                params.category.as_deref(),
-                params.topic.as_deref(),
-                effective_min_quality,
+                &filters,
             ) {
                 Ok(cands) => {
                     let r = reranker_guard
@@ -229,26 +311,48 @@ impl KbServer {
                 Err(e) => Err(e),
             }
         } else {
-            db.search_hybrid(
-                &params.query,
-                &query_embedding,
-                limit,
-                params.category.as_deref(),
-                params.topic.as_deref(),
-                effective_min_quality,
-            )
+            db.search_hybrid(&params.query, &query_embedding, limit, &filters)
         };
 
-        match search_outcome {
-            Ok(results) => {
-                let hits: Vec<SearchHit> = results.into_iter().map(Into::into).collect();
-                serde_json::to_string_pretty(&hits).unwrap_or_default()
+        let results = match search_outcome {
+            Ok(rs) => rs,
+            Err(e) => {
+                return serde_json::to_string_pretty(&ErrorResponse {
+                    error: format!("Search failed: {e}. Try running rebuild_index first."),
+                })
+                .unwrap_or_default();
             }
-            Err(e) => serde_json::to_string_pretty(&ErrorResponse {
-                error: format!("Search failed: {e}. Try running rebuild_index first."),
-            })
-            .unwrap_or_default(),
+        };
+
+        let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+
+        let effective_ratio = params
+            .min_confidence_ratio
+            .unwrap_or(self.min_confidence_ratio);
+        let low_confidence = compute_low_confidence(&scores, effective_ratio);
+
+        let mut hits: Vec<SearchHit> = results.into_iter().map(Into::into).collect();
+        for h in &mut hits {
+            h.match_spans = compute_match_spans(&params.query, &h.content);
         }
+
+        let echo = SearchFilterEcho {
+            category: params.category.clone(),
+            topic: params.topic.clone(),
+            path_globs: params.path_globs.clone().filter(|v| !v.is_empty()),
+            tags_any: params.tags_any.clone().filter(|v| !v.is_empty()),
+            tags_all: params.tags_all.clone().filter(|v| !v.is_empty()),
+            date_from: params.date_from.clone(),
+            date_to: params.date_to.clone(),
+            min_confidence_ratio: params.min_confidence_ratio,
+        };
+
+        let resp = SearchResponse {
+            results: hits,
+            low_confidence,
+            filter_applied: echo,
+        };
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
     }
 
     #[tool(
@@ -504,6 +608,127 @@ impl KbServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Convert the user-facing `path_globs` input
+/// (e.g. `["docs/**", "!docs/draft/**"]`) into a [`crate::db::CompiledPathGlobs`].
+///
+/// Patterns prefixed with `!` are routed into the exclude `GlobSet`; the rest
+/// build the include set. An empty input array is an explicit error — callers
+/// should pass `None` to disable filtering, or `["**", "!a/**"]` to express
+/// exclude-only intent. Inputs consisting entirely of `!`-prefixed patterns
+/// are accepted: `include` stays `None` (interpreted as "match everything")
+/// and the excludes apply on top.
+///
+/// Visible to the crate so the CLI (`src/main.rs`) can reuse the same
+/// validation path.
+pub(crate) fn compile_path_globs(
+    patterns: &[String],
+) -> anyhow::Result<crate::db::CompiledPathGlobs> {
+    use anyhow::Context;
+    if patterns.is_empty() {
+        anyhow::bail!(
+            "path_globs cannot be empty. Use null to disable, or [\"**\", \"!a/**\"] for exclude-only."
+        );
+    }
+    let mut include_b = globset::GlobSetBuilder::new();
+    let mut exclude_b = globset::GlobSetBuilder::new();
+    let mut has_include = false;
+    let mut has_exclude = false;
+    for raw in patterns {
+        let (target, pat, is_exclude) = if let Some(rest) = raw.strip_prefix('!') {
+            (&mut exclude_b, rest, true)
+        } else {
+            (&mut include_b, raw.as_str(), false)
+        };
+        let glob = globset::Glob::new(pat)
+            .with_context(|| format!("invalid path_glob pattern: {raw:?}"))?;
+        target.add(glob);
+        if is_exclude {
+            has_exclude = true;
+        } else {
+            has_include = true;
+        }
+    }
+    let include = if has_include {
+        Some(include_b.build()?)
+    } else {
+        None
+    };
+    let exclude = if has_exclude {
+        Some(exclude_b.build()?)
+    } else {
+        None
+    };
+    Ok(crate::db::CompiledPathGlobs { include, exclude })
+}
+
+/// rank-based low_confidence 判定。
+///
+/// - `scores.len() < 2` のとき false (比較対象なし)
+/// - `mean(scores) <= 0.0` のとき false (フォールバック)
+/// - `min_ratio == 0.0` のとき false (判定無効)
+/// - `top1 / mean(scores) < min_ratio` のとき true
+///
+/// `scores` は score 降順を前提 (`scores[0]` が top1)。
+/// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
+pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
+    if scores.len() < 2 || min_ratio == 0.0 {
+        return false;
+    }
+    let sum: f32 = scores.iter().sum();
+    let mean = sum / scores.len() as f32;
+    if mean <= 0.0 {
+        return false;
+    }
+    let top1 = scores[0]; // results は score 降順を前提
+    (top1 / mean) < min_ratio
+}
+
+/// query を whitespace で分割し、全 term が ASCII の場合のみ chunk 内で
+/// case-insensitive な substring 検索を行う。byte offset (UTF-8 char boundary 保証) を返す。
+///
+/// 戻り値:
+/// - `None` — query 全体に non-ASCII を 1 つでも含む / 空 query (= 計算しない)
+/// - `Some(vec![])` — 計算したが一致なし
+/// - `Some(spans)` — 計算済みでマッチあり (start byte 順にソート + 重複除去)
+///
+/// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
+pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crate::db::MatchSpan>> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let terms: Vec<&str> = trimmed.split_whitespace().collect();
+    if terms.is_empty() {
+        return None;
+    }
+    if terms.iter().any(|t| !t.is_ascii()) {
+        return None;
+    }
+    let content_lower = content.to_ascii_lowercase();
+    let mut spans: Vec<crate::db::MatchSpan> = Vec::new();
+    for term in &terms {
+        let term_lower = term.to_ascii_lowercase();
+        if term_lower.is_empty() {
+            continue;
+        }
+        for (start, _) in content_lower.match_indices(&term_lower) {
+            let end = start + term_lower.len();
+            // ASCII-only term + ASCII lowercasing なので byte 長は変わらず、
+            // content 側の byte offset も自動的に char boundary に揃う。
+            // debug_assert で不変条件を担保 (リリースでは noop、テストで logic
+            // regression を panic 検出)。
+            debug_assert!(
+                content.is_char_boundary(start) && content.is_char_boundary(end),
+                "ASCII-only invariant broke: span ({start}, {end}) not on char boundary in content"
+            );
+            spans.push(crate::db::MatchSpan { start, end });
+        }
+    }
+    spans.sort_by_key(|s| (s.start, s.end));
+    spans.dedup_by(|a, b| a.start == b.start && a.end == b.end);
+    Some(spans)
+}
+
 /// `get_document` ツール用に、拡張子に対応する Parser で
 /// frontmatter (title/date/topic/tags) を抽出し DocumentResponse を組む。
 /// 純粋関数化してテスト可能にしている。
@@ -628,6 +853,7 @@ pub struct KbServerShared {
     pub quality_threshold: f32,
     pub best_practice_templates: Vec<String>,
     pub parser_registry: Arc<Registry>,
+    pub min_confidence_ratio: f32,
 }
 
 impl KbServer {
@@ -645,6 +871,7 @@ impl KbServer {
             quality_threshold: shared.quality_threshold,
             best_practice_templates: shared.best_practice_templates.clone(),
             parser_registry: Arc::clone(&shared.parser_registry),
+            min_confidence_ratio: shared.min_confidence_ratio,
             tool_router: KbServer::tool_router(),
         }
     }
@@ -664,6 +891,7 @@ pub async fn run_server(
     parser_registry: Registry,
     watch_config: crate::watcher::WatchConfig,
     transport: crate::transport::Transport,
+    min_confidence_ratio: f32,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -690,6 +918,7 @@ pub async fn run_server(
         quality_threshold,
         best_practice_templates,
         parser_registry: Arc::new(parser_registry),
+        min_confidence_ratio,
     };
 
     // watcher をバックグラウンドで並走。
@@ -895,5 +1124,137 @@ mod tests {
         let resp = build_document_response(&reg, "a.unknown", "unknown", raw.to_string());
         // markdown::parse が frontmatter を拾う
         assert_eq!(resp.title.as_deref(), Some("x"));
+    }
+
+    // -----------------------------------------------------------------------
+    // compile_path_globs: SearchParams.path_globs -> CompiledPathGlobs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compile_path_globs_include_only() {
+        let cpg = compile_path_globs(&["docs/**".into()]).unwrap();
+        assert!(cpg.matches("docs/a.md"));
+        assert!(!cpg.matches("notes/a.md"));
+    }
+
+    #[test]
+    fn test_compile_path_globs_with_exclude() {
+        let cpg = compile_path_globs(&["docs/**".into(), "!docs/draft/**".into()]).unwrap();
+        assert!(cpg.matches("docs/a.md"));
+        assert!(!cpg.matches("docs/draft/b.md"));
+        assert!(!cpg.matches("notes/c.md"));
+    }
+
+    #[test]
+    fn test_compile_path_globs_empty_array_is_error() {
+        let err = compile_path_globs(&[]).unwrap_err();
+        assert!(err.to_string().contains("path_globs cannot be empty"));
+    }
+
+    #[test]
+    fn test_compile_path_globs_only_excludes_warns() {
+        // include なし (全部 `!` prefix) は実装としてはエラーにしない、
+        // 「全件 include + これらを exclude」と解釈する。
+        let cpg = compile_path_globs(&["!docs/draft/**".into()]).unwrap();
+        assert!(cpg.matches("docs/a.md")); // include 無 = 全 include
+        assert!(!cpg.matches("docs/draft/b.md")); // exclude 効く
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_match_spans: ASCII-only highlight offset computation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_match_spans_ascii_basic() {
+        let spans = compute_match_spans("tokio spawn", "use tokio::spawn for async");
+        let s = spans.expect("ASCII query -> Some");
+        assert_eq!(s.len(), 2);
+        assert_eq!(&"use tokio::spawn for async"[s[0].start..s[0].end], "tokio");
+        assert_eq!(&"use tokio::spawn for async"[s[1].start..s[1].end], "spawn");
+    }
+
+    #[test]
+    fn test_compute_match_spans_case_insensitive_ascii() {
+        let spans = compute_match_spans("Rust", "RUST is rusty").unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&"RUST is rusty"[spans[0].start..spans[0].end], "RUST");
+        assert_eq!(&"RUST is rusty"[spans[1].start..spans[1].end], "rust");
+    }
+
+    #[test]
+    fn test_compute_match_spans_non_ascii_query_returns_none() {
+        // 日本語 (non-ASCII) を含む query は計算しない。
+        let spans = compute_match_spans("rust 日本語", "rust と日本語");
+        assert!(spans.is_none());
+    }
+
+    #[test]
+    fn test_compute_match_spans_ascii_query_in_utf8_chunk() {
+        // 日本語混じり chunk に ASCII term。byte offset が char boundary を満たすこと。
+        let chunk = "前置 tokio 後ろ";
+        let spans = compute_match_spans("tokio", chunk).unwrap();
+        assert_eq!(spans.len(), 1);
+        let s = &spans[0];
+        assert!(chunk.is_char_boundary(s.start));
+        assert!(chunk.is_char_boundary(s.end));
+        assert_eq!(&chunk[s.start..s.end], "tokio");
+    }
+
+    #[test]
+    fn test_compute_match_spans_empty_query_returns_none() {
+        // 空クエリは Some(vec![]) でも None でもよいが、None を採用 (計算未実施扱い)
+        let spans = compute_match_spans("", "anything");
+        assert!(spans.is_none());
+    }
+
+    #[test]
+    fn test_compute_match_spans_no_match_returns_empty_vec() {
+        let spans = compute_match_spans("nonexistent", "rust").unwrap();
+        assert_eq!(spans.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_low_confidence: rank-based ratio judgment
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_low_confidence_top1_dominant_is_false() {
+        // top1=0.6, others=0.1 -> mean=0.225 -> ratio=2.66... > 1.5 -> false
+        let scores = [0.6_f32, 0.1, 0.1, 0.1];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_flat_distribution_is_true() {
+        // 全部同じ -> ratio=1.0 < 1.5 -> true
+        let scores = [0.3_f32, 0.3, 0.3, 0.3];
+        assert!(compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_single_hit_is_false() {
+        // results.len() < 2 -> 判定 skip -> false
+        let scores = [0.001_f32];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_zero_results_is_false() {
+        let scores: [f32; 0] = [];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_mean_zero_is_false() {
+        // mean <= 0.0 -> フォールバック skip
+        let scores = [0.0_f32, 0.0];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_ratio_zero_disables_judgment() {
+        // ratio=0.0 -> 常に false
+        let scores = [0.3_f32, 0.3, 0.3];
+        assert!(!compute_low_confidence(&scores, 0.0));
     }
 }

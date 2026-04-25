@@ -573,13 +573,16 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
                 &q.query,
                 &qe,
                 (max_k as u32).saturating_mul(5).max(50),
-                None,
-                None,
-                0.0,
+                &crate::db::SearchFilters::default(),
             )?;
             r.rerank_candidates(&q.query, cands, max_k as u32)?
         } else {
-            db.search_hybrid(&q.query, &qe, max_k as u32, None, None, 0.0)?
+            db.search_hybrid(
+                &q.query,
+                &qe,
+                max_k as u32,
+                &crate::db::SearchFilters::default(),
+            )?
         };
         let top_k: Vec<HitRecord> = results
             .into_iter()

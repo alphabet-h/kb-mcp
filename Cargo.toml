@@ -1,6 +1,6 @@
 [package]
 name = "kb-mcp"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "MCP server providing semantic hybrid search (sqlite-vec + FTS5 with optional cross-encoder reranking) over a Markdown / plain-text knowledge base."
 authors = ["koshian"]
@@ -37,3 +37,5 @@ regex = "1"
 # notify-debouncer-full を採用。notify 本体は transitive で取り込まれる。
 notify = "8"
 notify-debouncer-full = "0.6"
+# [feature 26] path_globs filter 用
+globset = "0.4"

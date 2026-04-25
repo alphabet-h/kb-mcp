@@ -75,6 +75,8 @@ pub struct Config {
     /// `kb-mcp eval` (retrieval quality evaluation) の opt-in 設定。
     /// 省略時 (`None`) は全デフォルト値で走る。詳細は `docs/eval.md`。
     pub eval: Option<EvalConfig>,
+    /// `kb-mcp search` / MCP `search` ツールの設定。
+    pub search: Option<SearchConfig>,
 }
 
 /// `get_best_practice` の opt-in 設定。
@@ -90,6 +92,15 @@ pub struct Config {
 pub struct BestPracticeConfig {
     #[serde(default)]
     pub path_templates: Vec<String>,
+}
+
+/// `[search]` セクション。feature-26 で追加。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchConfig {
+    /// rank-based low_confidence 判定の閾値 (top1.score / mean(top-N.score) < ratio で立つ)。
+    /// 省略時は 1.5。0.0 は判定無効。
+    pub min_confidence_ratio: Option<f32>,
 }
 
 /// `kb-mcp eval` (retrieval quality evaluation) の設定。省略時は全デフォルトで走る。
@@ -172,6 +183,7 @@ impl Config {
             && self.watch.is_none()
             && self.transport.is_none()
             && self.eval.is_none()
+            && self.search.is_none()
     }
 
     /// `exclude_dirs` の実効値を返す。設定省略時は [`DEFAULT_EXCLUDE_DIRS`]
@@ -447,6 +459,41 @@ mod tests {
         )
         .unwrap();
         let err = Config::load_from(file.path()).expect_err("unknown [eval] field must reject");
+        assert!(err.to_string().contains("failed to parse config"));
+    }
+
+    #[test]
+    fn test_search_config_parses_from_toml() {
+        let mut file = tempfile("kb-mcp-config-search");
+        writeln!(
+            file,
+            "[search]\n\
+             min_confidence_ratio = 2.0\n"
+        )
+        .unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        let s = cfg.search.expect("search must be Some");
+        assert_eq!(s.min_confidence_ratio, Some(2.0));
+    }
+
+    #[test]
+    fn test_search_config_omitted_is_none() {
+        let mut file = tempfile("kb-mcp-config-search-omit");
+        writeln!(file, r#"model = "bge-small-en-v1.5""#).unwrap();
+        let cfg = Config::load_from(file.path()).unwrap();
+        assert!(cfg.search.is_none());
+    }
+
+    #[test]
+    fn test_search_config_rejects_unknown_field() {
+        let mut file = tempfile("kb-mcp-config-search-bad");
+        writeln!(
+            file,
+            "[search]\n\
+             bogus = 1\n"
+        )
+        .unwrap();
+        let err = Config::load_from(file.path()).expect_err("unknown [search] field must reject");
         assert!(err.to_string().contains("failed to parse config"));
     }
 
