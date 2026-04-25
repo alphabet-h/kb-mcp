@@ -272,9 +272,12 @@ pub fn build_connection_graph(
             .search_vec_candidates(
                 &embedding,
                 fetch_k,
-                opts.category.as_deref(),
-                opts.topic.as_deref(),
-                opts.min_quality,
+                &crate::db::SearchFilters {
+                    category: opts.category.as_deref(),
+                    topic: opts.topic.as_deref(),
+                    min_quality: opts.min_quality,
+                    ..Default::default()
+                },
             )
             .with_context(|| format!("knn failed at depth {current_depth}"))?;
         knn_queries += 1;

@@ -61,6 +61,62 @@ impl From<SearchResult> for SearchHit {
     }
 }
 
+/// Search 系 API に渡す filter 引数の集約。
+///
+/// 既存の category / topic / min_quality に加え、feature-26 で path_globs /
+/// tags_any / tags_all / date_from / date_to を追加した。引数が増えすぎて
+/// `clippy::too_many_arguments` 連発と可読性悪化を招くため、構造体 1 個に統合。
+///
+/// `Default` 実装で「すべてフィルタ無効」を表現する。
+#[derive(Debug, Default, Clone)]
+pub struct SearchFilters<'a> {
+    pub category:    Option<&'a str>,
+    pub topic:       Option<&'a str>,
+    pub min_quality: f32,
+    pub path_globs:  Option<&'a CompiledPathGlobs>,
+    pub tags_any:    &'a [String],
+    pub tags_all:    &'a [String],
+    pub date_from:   Option<&'a str>,
+    pub date_to:     Option<&'a str>,
+}
+
+impl<'a> SearchFilters<'a> {
+    /// いずれかのフィルタが指定されているか。over-fetch 判定で使う。
+    pub fn has_any(&self) -> bool {
+        self.category.is_some()
+            || self.topic.is_some()
+            || self.min_quality > 0.0
+            || self.path_globs.is_some()
+            || !self.tags_any.is_empty()
+            || !self.tags_all.is_empty()
+            || self.date_from.is_some()
+            || self.date_to.is_some()
+    }
+}
+
+/// `path_globs` の include / exclude を 2 本の GlobSet に分けてコンパイル
+/// したもの。Task 3 で実体化される。Task 1 では空のスタブ。
+#[derive(Debug, Default, Clone)]
+pub struct CompiledPathGlobs {
+    pub include: Option<globset::GlobSet>,
+    pub exclude: Option<globset::GlobSet>,
+}
+
+impl CompiledPathGlobs {
+    #[allow(dead_code)] // Task 3 で配線される
+    pub fn matches(&self, path: &str) -> bool {
+        let included = match &self.include {
+            Some(set) => set.is_match(path),
+            None => true,
+        };
+        let excluded = match &self.exclude {
+            Some(set) => set.is_match(path),
+            None => false,
+        };
+        included && !excluded
+    }
+}
+
 /// Topic/category grouping returned by [`Database::list_topics`].
 #[derive(Debug, Clone)]
 pub struct TopicInfo {
@@ -616,12 +672,9 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<SearchResult>> {
-        let hits =
-            self.search_vec_candidates(query_embedding, limit, category, topic, min_quality)?;
+        let hits = self.search_vec_candidates(query_embedding, limit, filters)?;
         Ok(hits.into_iter().map(|(_, r)| r).collect())
     }
 
@@ -634,17 +687,14 @@ impl Database {
         &self,
         query_text: &str,
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
         let Some(fts_query) = sanitize_fts_query(query_text) else {
             return Ok(Vec::new());
         };
 
         // min_quality による選択率低下は無視 (Med #5 と同じ理由)。
-        let has_filters = category.is_some() || topic.is_some();
-        let fetch_limit = if has_filters {
+        let fetch_limit = if filters.has_any() {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)
                 .min(FILTER_OVERFETCH_CAP)
@@ -701,15 +751,15 @@ impl Database {
                 date,
                 r_category,
             ) = row?;
-            if min_quality > 0.0 && quality_score < min_quality {
+            if filters.min_quality > 0.0 && quality_score < filters.min_quality {
                 continue;
             }
-            if let Some(cat) = category
+            if let Some(cat) = filters.category
                 && r_category.as_deref() != Some(cat)
             {
                 continue;
             }
-            if let Some(t) = topic
+            if let Some(t) = filters.topic
                 && r_topic.as_deref() != Some(t)
             {
                 continue;
@@ -743,18 +793,9 @@ impl Database {
         query_text: &str,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<SearchResult>> {
-        let hits = self.search_hybrid_candidates(
-            query_text,
-            query_embedding,
-            limit,
-            category,
-            topic,
-            min_quality,
-        )?;
+        let hits = self.search_hybrid_candidates(query_text, query_embedding, limit, filters)?;
         Ok(hits.into_iter().map(|(_, r)| r).collect())
     }
 
@@ -766,16 +807,12 @@ impl Database {
         query_text: &str,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
         let candidates = limit.saturating_mul(5).max(50);
 
-        let vec_hits =
-            self.search_vec_candidates(query_embedding, candidates, category, topic, min_quality)?;
-        let fts_hits =
-            self.search_fts_candidates(query_text, candidates, category, topic, min_quality)?;
+        let vec_hits = self.search_vec_candidates(query_embedding, candidates, filters)?;
+        let fts_hits = self.search_fts_candidates(query_text, candidates, filters)?;
 
         // RRF: chunk_id ごとに 1/(K + rank + 1) を加算
         let mut scores: HashMap<i64, f32> = HashMap::new();
@@ -819,15 +856,12 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: u32,
-        category: Option<&str>,
-        topic: Option<&str>,
-        min_quality: f32,
+        filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
         // category / topic は Rust 側フィルタなので over-fetch する。
         // min_quality は SQL 側で選択率が変わるが、実運用で低品質チャンクは
         // ごく一部のため常時 over-fetch は無駄 (evaluator 指摘 Med #5)。
-        let has_filters = category.is_some() || topic.is_some();
-        let fetch_k = if has_filters {
+        let fetch_k = if filters.has_any() {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)
                 .min(FILTER_OVERFETCH_CAP)
@@ -877,15 +911,15 @@ impl Database {
                 date,
                 r_category,
             ) = row?;
-            if min_quality > 0.0 && quality_score < min_quality {
+            if filters.min_quality > 0.0 && quality_score < filters.min_quality {
                 continue;
             }
-            if let Some(cat) = category
+            if let Some(cat) = filters.category
                 && r_category.as_deref() != Some(cat)
             {
                 continue;
             }
-            if let Some(t) = topic
+            if let Some(t) = filters.topic
                 && r_topic.as_deref() != Some(t)
             {
                 continue;
@@ -1394,19 +1428,33 @@ mod tests {
 
         // No filter path
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_similar(&dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2, "both chunks should be returned");
 
         // Filter path (category match)
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, Some("deep-dive"), None, 0.0)
+            .search_similar(
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    category: Some("deep-dive"),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 2);
 
         // Filter path (non-matching topic → empty)
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, Some("no-such-topic"), 0.0)
+            .search_similar(
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    topic: Some("no-such-topic"),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(hits.is_empty());
     }
@@ -1432,20 +1480,35 @@ mod tests {
 
         // threshold=0.0: 両方返る (既存挙動)
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_similar(&dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2);
 
         // threshold=0.5: 高品質のみ
         let hits = db
-            .search_similar(&dummy_embedding(0.1), 5, None, None, 0.5)
+            .search_similar(
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    min_quality: 0.5,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].heading.as_deref(), Some("high"));
 
         // hybrid でも同じ挙動
         let hits = db
-            .search_hybrid("rich", &dummy_embedding(0.1), 5, None, None, 0.5)
+            .search_hybrid(
+                "rich",
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters {
+                    min_quality: 0.5,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(hits.iter().all(|h| h.heading.as_deref() != Some("low")));
     }
@@ -1843,7 +1906,12 @@ mod tests {
             .unwrap();
 
         let hits = db
-            .search_hybrid("E0382", &dummy_embedding(0.5), 5, None, None, 0.0)
+            .search_hybrid(
+                "E0382",
+                &dummy_embedding(0.5),
+                5,
+                &SearchFilters::default(),
+            )
             .unwrap();
         assert_eq!(hits.len(), 2);
         // FTS でヒットするのは A だけ → A が上位
@@ -1866,7 +1934,7 @@ mod tests {
 
         // 2 文字クエリ → sanitize が None → vec-only
         let hits = db
-            .search_hybrid("ab", &dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_hybrid("ab", &dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].score > 0.0, "RRF スコアは正の有限値");
@@ -1900,7 +1968,12 @@ mod tests {
             .unwrap();
 
         let hits = db
-            .search_hybrid_candidates("E0382", &dummy_embedding(0.1), 5, None, None, 0.0)
+            .search_hybrid_candidates(
+                "E0382",
+                &dummy_embedding(0.1),
+                5,
+                &SearchFilters::default(),
+            )
             .unwrap();
         assert!(!hits.is_empty());
         // 返ってきた chunk_id は insert 時の id と一致
@@ -1939,7 +2012,7 @@ mod tests {
 
         // 直接 FTS 候補を取り、B が A より上位 (低 bm25) になることを確認
         let hits = db
-            .search_fts_candidates("kibarashi_unique_keyword", 10, None, None, 0.0)
+            .search_fts_candidates("kibarashi_unique_keyword", 10, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2);
         let (top_id, _) = hits[0];
@@ -1972,9 +2045,10 @@ mod tests {
                 "noexistent_query",
                 &dummy_embedding(0.5),
                 5,
-                Some("target"),
-                None,
-                0.0,
+                &SearchFilters {
+                    category: Some("target"),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(hits.len(), 1, "target カテゴリの 1 件を取りこぼさない");
@@ -2000,7 +2074,12 @@ mod tests {
 
         // 日本語 3 文字 "エラー" が trigram でヒットする
         let hits = db
-            .search_hybrid("エラー", &dummy_embedding(0.7), 5, None, None, 0.0)
+            .search_hybrid(
+                "エラー",
+                &dummy_embedding(0.7),
+                5,
+                &SearchFilters::default(),
+            )
             .unwrap();
         assert!(!hits.is_empty());
         assert!(

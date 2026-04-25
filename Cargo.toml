@@ -37,3 +37,5 @@ regex = "1"
 # notify-debouncer-full を採用。notify 本体は transitive で取り込まれる。
 notify = "8"
 notify-debouncer-full = "0.6"
+# [feature 26] path_globs filter 用
+globset = "0.4"

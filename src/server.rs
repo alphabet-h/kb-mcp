@@ -210,15 +210,19 @@ impl KbServer {
         );
 
         let db = self.db.lock().unwrap();
+        let filters = crate::db::SearchFilters {
+            category: params.category.as_deref(),
+            topic: params.topic.as_deref(),
+            min_quality: effective_min_quality,
+            ..Default::default()
+        };
         let search_outcome: anyhow::Result<Vec<crate::db::SearchResult>> = if use_rerank {
             // rerank 入力用に candidates を取得、score は cross-encoder で上書き
             match db.search_hybrid_candidates(
                 &params.query,
                 &query_embedding,
                 limit.saturating_mul(5).max(50),
-                params.category.as_deref(),
-                params.topic.as_deref(),
-                effective_min_quality,
+                &filters,
             ) {
                 Ok(cands) => {
                     let r = reranker_guard
@@ -229,14 +233,7 @@ impl KbServer {
                 Err(e) => Err(e),
             }
         } else {
-            db.search_hybrid(
-                &params.query,
-                &query_embedding,
-                limit,
-                params.category.as_deref(),
-                params.topic.as_deref(),
-                effective_min_quality,
-            )
+            db.search_hybrid(&params.query, &query_embedding, limit, &filters)
         };
 
         match search_outcome {

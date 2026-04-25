@@ -478,36 +478,27 @@ fn main() -> anyhow::Result<()> {
                 server_default,
             );
 
+            let filters = db::SearchFilters {
+                category: category.as_deref(),
+                topic: topic.as_deref(),
+                min_quality: effective_min_quality,
+                ..Default::default()
+            };
+
             let results = if reranker_choice.is_enabled() {
                 let candidates = db.search_hybrid_candidates(
                     &query,
                     &query_embedding,
                     limit.saturating_mul(5).max(50),
-                    category.as_deref(),
-                    topic.as_deref(),
-                    effective_min_quality,
+                    &filters,
                 )?;
                 if let Some(mut r) = embedder::Reranker::try_new(reranker_choice)? {
                     r.rerank_candidates(&query, candidates, limit)?
                 } else {
-                    db.search_hybrid(
-                        &query,
-                        &query_embedding,
-                        limit,
-                        category.as_deref(),
-                        topic.as_deref(),
-                        effective_min_quality,
-                    )?
+                    db.search_hybrid(&query, &query_embedding, limit, &filters)?
                 }
             } else {
-                db.search_hybrid(
-                    &query,
-                    &query_embedding,
-                    limit,
-                    category.as_deref(),
-                    topic.as_deref(),
-                    effective_min_quality,
-                )?
+                db.search_hybrid(&query, &query_embedding, limit, &filters)?
             };
 
             print_search_results(results, format);
