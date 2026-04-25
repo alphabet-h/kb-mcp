@@ -30,6 +30,7 @@ pub struct SearchResult {
     pub title: Option<String>,
     pub topic: Option<String>,
     pub date: Option<String>,
+    pub tags: Vec<String>,
 }
 
 /// JSON-serializable view of [`SearchResult`]. DB 層 (rusqlite) は `serde` 非依存
@@ -44,6 +45,7 @@ pub struct SearchHit {
     pub heading: Option<String>,
     pub topic: Option<String>,
     pub date: Option<String>,
+    pub tags: Vec<String>,
     pub content: String,
 }
 
@@ -56,6 +58,7 @@ impl From<SearchResult> for SearchHit {
             heading: r.heading,
             topic: r.topic,
             date: r.date,
+            tags: r.tags,
             content: r.content,
         }
     }
@@ -154,6 +157,16 @@ fn parse_dim_from_create_sql(sql: &str) -> Option<u32> {
     let rest = &sql[start..];
     let end = rest.find(']')?;
     rest[..end].trim().parse().ok()
+}
+
+/// `documents.tags` 列 (JSON 文字列) を `Vec<String>` に展開する。
+/// NULL / 空文字 / 不正 JSON は空 Vec として扱う (検索フィルタでヒット 0 件に
+/// なるだけで、エラーで検索を中断させない)。
+fn parse_tags_json(json: Option<String>) -> Vec<String> {
+    match json {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s).unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +592,7 @@ impl Database {
         let sql = "
             SELECT c.id, vec_to_json(v.embedding),
                    c.content, c.heading,
-                   d.path, d.title, d.topic, d.date
+                   d.path, d.title, d.topic, d.date, d.tags
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             JOIN vec_chunks v ON v.chunk_id = c.id
@@ -597,11 +610,12 @@ impl Database {
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, embedding_json, content, heading, path, title, topic, date) = r?;
+            let (id, embedding_json, content, heading, path, title, topic, date, tags_json) = r?;
             let embedding: Vec<f32> = serde_json::from_str(&embedding_json)
                 .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
             out.push((
@@ -615,6 +629,7 @@ impl Database {
                     title,
                     topic,
                     date,
+                    tags: parse_tags_json(tags_json),
                 },
             ));
         }
@@ -713,7 +728,7 @@ impl Database {
             "
             SELECT c.id, bm25(fts_chunks, {h}, {c}) AS score,
                    c.content, c.heading, c.quality_score,
-                   d.path, d.title, d.topic, d.date, d.category
+                   d.path, d.title, d.topic, d.date, d.category, d.tags
             FROM fts_chunks f
             JOIN chunks c ON c.id = f.rowid
             JOIN documents d ON d.id = c.document_id
@@ -739,6 +754,7 @@ impl Database {
                 row.get::<_, Option<String>>(7)?, // topic
                 row.get::<_, Option<String>>(8)?, // date
                 row.get::<_, Option<String>>(9)?, // category
+                row.get::<_, Option<String>>(10)?, // tags (JSON)
             ))
         })?;
 
@@ -755,6 +771,7 @@ impl Database {
                 r_topic,
                 date,
                 r_category,
+                tags_json,
             ) = row?;
             if filters.min_quality > 0.0 && quality_score < filters.min_quality {
                 continue;
@@ -779,6 +796,7 @@ impl Database {
                     title,
                     topic: r_topic,
                     date,
+                    tags: parse_tags_json(tags_json),
                 },
             ));
             if results.len() >= limit as usize {
@@ -877,7 +895,7 @@ impl Database {
         let sql = "
             SELECT v.chunk_id, v.distance,
                    c.content, c.heading, c.quality_score,
-                   d.path, d.title, d.topic, d.date, d.category
+                   d.path, d.title, d.topic, d.date, d.category, d.tags
             FROM vec_chunks v
             JOIN chunks c ON c.id = v.chunk_id
             JOIN documents d ON d.id = c.document_id
@@ -899,6 +917,7 @@ impl Database {
                 row.get::<_, Option<String>>(7)?, // topic
                 row.get::<_, Option<String>>(8)?, // date
                 row.get::<_, Option<String>>(9)?, // category
+                row.get::<_, Option<String>>(10)?, // tags (JSON)
             ))
         })?;
 
@@ -915,6 +934,7 @@ impl Database {
                 r_topic,
                 date,
                 r_category,
+                tags_json,
             ) = row?;
             if filters.min_quality > 0.0 && quality_score < filters.min_quality {
                 continue;
@@ -939,6 +959,7 @@ impl Database {
                     title,
                     topic: r_topic,
                     date,
+                    tags: parse_tags_json(tags_json),
                 },
             ));
             if out.len() >= limit as usize {
@@ -2301,5 +2322,33 @@ mod tests {
         assert!(mcp.titles.contains(&"MCP Features".to_string()));
 
         println!("test_list_topics: OK");
+    }
+
+    #[test]
+    fn test_search_result_includes_tags() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document(
+                "tagged.md",
+                Some("Tagged"),
+                None,
+                None,
+                None,
+                &["rust".into(), "async".into()],
+                None,
+                "h1",
+            )
+            .unwrap();
+        db.insert_chunk(doc_id, 0, None, "body", &dummy_embedding(0.1), 1.0)
+            .unwrap();
+
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 5, &SearchFilters::default())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].tags,
+            vec!["rust".to_string(), "async".to_string()]
+        );
     }
 }
