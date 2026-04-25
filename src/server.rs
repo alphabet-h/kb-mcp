@@ -612,10 +612,14 @@ pub(crate) fn compute_match_spans(
         for (start, _) in content_lower.match_indices(&term_lower) {
             let end = start + term_lower.len();
             // ASCII-only term + ASCII lowercasing なので byte 長は変わらず、
-            // content 側の byte offset でも同じ範囲を切り取れる。char boundary を念のため検算。
-            if content.is_char_boundary(start) && content.is_char_boundary(end) {
-                spans.push(crate::db::MatchSpan { start, end });
-            }
+            // content 側の byte offset も自動的に char boundary に揃う。
+            // debug_assert で不変条件を担保 (リリースでは noop、テストで logic
+            // regression を panic 検出)。
+            debug_assert!(
+                content.is_char_boundary(start) && content.is_char_boundary(end),
+                "ASCII-only invariant broke: span ({start}, {end}) not on char boundary in content"
+            );
+            spans.push(crate::db::MatchSpan { start, end });
         }
     }
     spans.sort_by_key(|s| (s.start, s.end));
