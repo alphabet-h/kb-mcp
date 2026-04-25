@@ -82,6 +82,11 @@ pub struct SearchFilters<'a> {
 
 impl<'a> SearchFilters<'a> {
     /// いずれかのフィルタが指定されているか。over-fetch 判定で使う。
+    ///
+    /// 注: `min_quality > 0.0` も含める。feature-25 以前は category/topic
+    /// だけで判定していたが、feature-26 で新フィルタ (path_globs/tags/date)
+    /// と一緒に扱う形に統合した。`min_quality` 単体指定でも over-fetch
+    /// が発動する (`FILTER_OVERFETCH_CAP` で頭打ち、害は低い)。
     pub fn has_any(&self) -> bool {
         self.category.is_some()
             || self.topic.is_some()
@@ -693,7 +698,7 @@ impl Database {
             return Ok(Vec::new());
         };
 
-        // min_quality による選択率低下は無視 (Med #5 と同じ理由)。
+        // filter 指定があれば over-fetch する (詳細は SearchFilters::has_any)。
         let fetch_limit = if filters.has_any() {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)
@@ -858,9 +863,9 @@ impl Database {
         limit: u32,
         filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
-        // category / topic は Rust 側フィルタなので over-fetch する。
-        // min_quality は SQL 側で選択率が変わるが、実運用で低品質チャンクは
-        // ごく一部のため常時 over-fetch は無駄 (evaluator 指摘 Med #5)。
+        // filter 指定があれば over-fetch する (詳細は SearchFilters::has_any)。
+        // category/topic/path_globs/tags/date は Rust 側フィルタなので
+        // 必ず over-fetch が必要、min_quality 単独でも fail-safe で広げる。
         let fetch_k = if filters.has_any() {
             limit
                 .saturating_mul(FILTER_OVERFETCH_FACTOR)
