@@ -59,9 +59,12 @@ struct SearchParams {
     query: String,
     /// Maximum number of results to return (default: 5)
     limit: Option<u32>,
-    /// Filter by category (e.g. "deep-dive", "ai-news", "tech-watch")
+    /// Filter by category (legacy, single value; e.g. "deep-dive",
+    /// "ai-news", "tech-watch"). Prefer `path_globs` / `tags_any` /
+    /// `tags_all` for new clients.
     category: Option<String>,
-    /// Filter by topic (e.g. "mcp", "chromadb")
+    /// Filter by topic (legacy, single value; e.g. "mcp", "chromadb").
+    /// Prefer `path_globs` / `tags_any` / `tags_all` for new clients.
     topic: Option<String>,
     /// Override the server default for reranking. Requires the server to have
     /// been started with `--reranker <model>` (otherwise ignored).
@@ -72,6 +75,27 @@ struct SearchParams {
     /// If true, disable the quality filter for this query (equivalent to
     /// `min_quality: 0.0`, but more explicit).
     include_low_quality: Option<bool>,
+
+    // ----- structured filter set (path / tags / date) -----
+    /// Path glob patterns. `!` prefix marks an exclude pattern,
+    /// e.g. `["docs/**", "!docs/draft/**"]`. An empty array `[]`
+    /// is rejected — pass `null` (omit the field) to disable, or
+    /// `["**", "!a/**"]` to express exclude-only intent.
+    path_globs: Option<Vec<String>>,
+    /// Hit passes if it carries any of these tags (OR semantics).
+    tags_any: Option<Vec<String>>,
+    /// Hit passes only if it carries every one of these tags (AND).
+    tags_all: Option<Vec<String>>,
+    /// Inclusive lower bound on `frontmatter.date` (lexicographic, ISO-8601 friendly).
+    date_from: Option<String>,
+    /// Inclusive upper bound on `frontmatter.date` (lexicographic, ISO-8601 friendly).
+    date_to: Option<String>,
+
+    // ----- low-confidence cutoff -----
+    /// Rank-based ratio threshold for trimming low-confidence tail results.
+    /// `null` falls back to the server default (`kb-mcp.toml` / CLI);
+    /// `0.0` disables the cutoff for this query.
+    min_confidence_ratio: Option<f32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -501,6 +525,59 @@ impl KbServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Convert the user-facing `path_globs` input
+/// (e.g. `["docs/**", "!docs/draft/**"]`) into a [`crate::db::CompiledPathGlobs`].
+///
+/// Patterns prefixed with `!` are routed into the exclude `GlobSet`; the rest
+/// build the include set. An empty input array is an explicit error — callers
+/// should pass `None` to disable filtering, or `["**", "!a/**"]` to express
+/// exclude-only intent. Inputs consisting entirely of `!`-prefixed patterns
+/// are accepted: `include` stays `None` (interpreted as "match everything")
+/// and the excludes apply on top.
+///
+/// Visible to the crate so the CLI (`src/main.rs`) can reuse the same
+/// validation path.
+pub(crate) fn compile_path_globs(
+    patterns: &[String],
+) -> anyhow::Result<crate::db::CompiledPathGlobs> {
+    use anyhow::Context;
+    if patterns.is_empty() {
+        anyhow::bail!(
+            "path_globs cannot be empty. Use null to disable, or [\"**\", \"!a/**\"] for exclude-only."
+        );
+    }
+    let mut include_b = globset::GlobSetBuilder::new();
+    let mut exclude_b = globset::GlobSetBuilder::new();
+    let mut has_include = false;
+    let mut has_exclude = false;
+    for raw in patterns {
+        let (target, pat, is_exclude) = if let Some(rest) = raw.strip_prefix('!') {
+            (&mut exclude_b, rest, true)
+        } else {
+            (&mut include_b, raw.as_str(), false)
+        };
+        let glob = globset::Glob::new(pat)
+            .with_context(|| format!("invalid path_glob pattern: {raw:?}"))?;
+        target.add(glob);
+        if is_exclude {
+            has_exclude = true;
+        } else {
+            has_include = true;
+        }
+    }
+    let include = if has_include {
+        Some(include_b.build()?)
+    } else {
+        None
+    };
+    let exclude = if has_exclude {
+        Some(exclude_b.build()?)
+    } else {
+        None
+    };
+    Ok(crate::db::CompiledPathGlobs { include, exclude })
+}
+
 /// `get_document` ツール用に、拡張子に対応する Parser で
 /// frontmatter (title/date/topic/tags) を抽出し DocumentResponse を組む。
 /// 純粋関数化してテスト可能にしている。
@@ -892,5 +969,39 @@ mod tests {
         let resp = build_document_response(&reg, "a.unknown", "unknown", raw.to_string());
         // markdown::parse が frontmatter を拾う
         assert_eq!(resp.title.as_deref(), Some("x"));
+    }
+
+    // -----------------------------------------------------------------------
+    // compile_path_globs: SearchParams.path_globs -> CompiledPathGlobs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compile_path_globs_include_only() {
+        let cpg = compile_path_globs(&["docs/**".into()]).unwrap();
+        assert!(cpg.matches("docs/a.md"));
+        assert!(!cpg.matches("notes/a.md"));
+    }
+
+    #[test]
+    fn test_compile_path_globs_with_exclude() {
+        let cpg = compile_path_globs(&["docs/**".into(), "!docs/draft/**".into()]).unwrap();
+        assert!(cpg.matches("docs/a.md"));
+        assert!(!cpg.matches("docs/draft/b.md"));
+        assert!(!cpg.matches("notes/c.md"));
+    }
+
+    #[test]
+    fn test_compile_path_globs_empty_array_is_error() {
+        let err = compile_path_globs(&[]).unwrap_err();
+        assert!(err.to_string().contains("path_globs cannot be empty"));
+    }
+
+    #[test]
+    fn test_compile_path_globs_only_excludes_warns() {
+        // include なし (全部 `!` prefix) は実装としてはエラーにしない、
+        // 「全件 include + これらを exclude」と解釈する。
+        let cpg = compile_path_globs(&["!docs/draft/**".into()]).unwrap();
+        assert!(cpg.matches("docs/a.md"));        // include 無 = 全 include
+        assert!(!cpg.matches("docs/draft/b.md")); // exclude 効く
     }
 }
