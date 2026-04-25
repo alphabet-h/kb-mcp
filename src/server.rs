@@ -45,6 +45,9 @@ pub struct KbServer {
     /// `[parsers].enabled` が無ければ `Registry::defaults()` = `["md"]` のみ。
     /// watcher とも共有するため Arc。
     parser_registry: Arc<Registry>,
+    /// `search` ツール既定の rank-based low_confidence ratio 閾値。
+    /// 0.0 = 判定無効。SearchParams.min_confidence_ratio が指定されたら override。
+    pub min_confidence_ratio: f32,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -195,6 +198,37 @@ struct ErrorResponse {
     error: String,
 }
 
+/// `search` MCP ツールの新出力 (feature-26、wrapper 形)。
+#[derive(Serialize)]
+struct SearchResponse {
+    results: Vec<crate::db::SearchHit>,
+    low_confidence: bool,
+    /// 入力 filter のうち non-default のものだけ正規化後の値で echo back。
+    filter_applied: SearchFilterEcho,
+}
+
+/// 入力 filter のうち non-default のものだけ echo。`null`/空配列の項目は
+/// `skip_serializing_if` で JSON から省略される。
+#[derive(Serialize, Default)]
+struct SearchFilterEcho {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_globs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags_any: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags_all: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_confidence_ratio: Option<f32>,
+}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
@@ -203,12 +237,26 @@ struct ErrorResponse {
 impl KbServer {
     #[tool(
         name = "search",
-        description = "Hybrid search (vector + FTS5 full-text, merged via Reciprocal Rank Fusion) over the knowledge base. The `score` field is the RRF score (higher = better)."
+        description = "Hybrid search (vector + FTS5 full-text, merged via Reciprocal Rank Fusion) over the knowledge base. Returns a wrapper with results, low_confidence flag, and filter_applied echo. The `score` field is the RRF score (or cross-encoder score when reranker is enabled). `match_spans` field (when present) gives byte offsets into `content` for ASCII query terms."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(5);
 
-        // Embed the query
+        // path_globs を事前 compile。エラー時は ErrorResponse を返却。
+        let cpg = match params.path_globs.as_ref() {
+            Some(globs) => match compile_path_globs(globs) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    return serde_json::to_string_pretty(&ErrorResponse {
+                        error: format!("invalid path_globs: {e}"),
+                    })
+                    .unwrap_or_default();
+                }
+            },
+            None => None,
+        };
+
+        // query embedding
         let query_embedding = {
             let mut embedder = self.embedder.lock().unwrap();
             match embedder.embed_single(&params.query) {
@@ -222,7 +270,6 @@ impl KbServer {
             }
         };
 
-        // Search the DB (optionally followed by reranking)
         let mut reranker_guard = self.reranker.lock().unwrap();
         let use_rerank =
             params.rerank.unwrap_or(self.rerank_by_default) && reranker_guard.is_some();
@@ -233,15 +280,22 @@ impl KbServer {
             self.quality_threshold,
         );
 
-        let db = self.db.lock().unwrap();
+        let tags_any: Vec<String> = params.tags_any.clone().unwrap_or_default();
+        let tags_all: Vec<String> = params.tags_all.clone().unwrap_or_default();
+
         let filters = crate::db::SearchFilters {
-            category: params.category.as_deref(),
-            topic: params.topic.as_deref(),
+            category:    params.category.as_deref(),
+            topic:       params.topic.as_deref(),
             min_quality: effective_min_quality,
-            ..Default::default()
+            path_globs:  cpg.as_ref(),
+            tags_any:    &tags_any,
+            tags_all:    &tags_all,
+            date_from:   params.date_from.as_deref(),
+            date_to:     params.date_to.as_deref(),
         };
+
+        let db = self.db.lock().unwrap();
         let search_outcome: anyhow::Result<Vec<crate::db::SearchResult>> = if use_rerank {
-            // rerank 入力用に candidates を取得、score は cross-encoder で上書き
             match db.search_hybrid_candidates(
                 &params.query,
                 &query_embedding,
@@ -260,16 +314,45 @@ impl KbServer {
             db.search_hybrid(&params.query, &query_embedding, limit, &filters)
         };
 
-        match search_outcome {
-            Ok(results) => {
-                let hits: Vec<SearchHit> = results.into_iter().map(Into::into).collect();
-                serde_json::to_string_pretty(&hits).unwrap_or_default()
+        let results = match search_outcome {
+            Ok(rs) => rs,
+            Err(e) => {
+                return serde_json::to_string_pretty(&ErrorResponse {
+                    error: format!("Search failed: {e}. Try running rebuild_index first."),
+                })
+                .unwrap_or_default();
             }
-            Err(e) => serde_json::to_string_pretty(&ErrorResponse {
-                error: format!("Search failed: {e}. Try running rebuild_index first."),
-            })
-            .unwrap_or_default(),
+        };
+
+        let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+
+        let effective_ratio = params
+            .min_confidence_ratio
+            .unwrap_or(self.min_confidence_ratio);
+        let low_confidence = compute_low_confidence(&scores, effective_ratio);
+
+        let mut hits: Vec<SearchHit> = results.into_iter().map(Into::into).collect();
+        for h in &mut hits {
+            h.match_spans = compute_match_spans(&params.query, &h.content);
         }
+
+        let echo = SearchFilterEcho {
+            category:  params.category.clone(),
+            topic:     params.topic.clone(),
+            path_globs: params.path_globs.clone().filter(|v| !v.is_empty()),
+            tags_any:  params.tags_any.clone().filter(|v| !v.is_empty()),
+            tags_all:  params.tags_all.clone().filter(|v| !v.is_empty()),
+            date_from: params.date_from.clone(),
+            date_to:   params.date_to.clone(),
+            min_confidence_ratio: params.min_confidence_ratio,
+        };
+
+        let resp = SearchResponse {
+            results: hits,
+            low_confidence,
+            filter_applied: echo,
+        };
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
     }
 
     #[tool(
@@ -578,6 +661,28 @@ pub(crate) fn compile_path_globs(
     Ok(crate::db::CompiledPathGlobs { include, exclude })
 }
 
+/// rank-based low_confidence 判定。
+///
+/// - `scores.len() < 2` のとき false (比較対象なし)
+/// - `mean(scores) <= 0.0` のとき false (フォールバック)
+/// - `min_ratio == 0.0` のとき false (判定無効)
+/// - `top1 / mean(scores) < min_ratio` のとき true
+///
+/// `scores` は score 降順を前提 (`scores[0]` が top1)。
+/// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
+pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
+    if scores.len() < 2 || min_ratio == 0.0 {
+        return false;
+    }
+    let sum: f32 = scores.iter().sum();
+    let mean = sum / scores.len() as f32;
+    if mean <= 0.0 {
+        return false;
+    }
+    let top1 = scores[0]; // results は score 降順を前提
+    (top1 / mean) < min_ratio
+}
+
 /// query を whitespace で分割し、全 term が ASCII の場合のみ chunk 内で
 /// case-insensitive な substring 検索を行う。byte offset (UTF-8 char boundary 保証) を返す。
 ///
@@ -751,6 +856,7 @@ pub struct KbServerShared {
     pub quality_threshold: f32,
     pub best_practice_templates: Vec<String>,
     pub parser_registry: Arc<Registry>,
+    pub min_confidence_ratio: f32,
 }
 
 impl KbServer {
@@ -768,6 +874,7 @@ impl KbServer {
             quality_threshold: shared.quality_threshold,
             best_practice_templates: shared.best_practice_templates.clone(),
             parser_registry: Arc::clone(&shared.parser_registry),
+            min_confidence_ratio: shared.min_confidence_ratio,
             tool_router: KbServer::tool_router(),
         }
     }
@@ -813,6 +920,9 @@ pub async fn run_server(
         quality_threshold,
         best_practice_templates,
         parser_registry: Arc::new(parser_registry),
+        // Task 7 で run_server signature 経由で config から流し込む。
+        // Task 6 では既定 0.0 (判定無効) で配線のみ。
+        min_confidence_ratio: 0.0,
     };
 
     // watcher をバックグラウンドで並走。
@@ -1105,5 +1215,50 @@ mod tests {
     fn test_compute_match_spans_no_match_returns_empty_vec() {
         let spans = compute_match_spans("nonexistent", "rust").unwrap();
         assert_eq!(spans.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_low_confidence: rank-based ratio judgment
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_low_confidence_top1_dominant_is_false() {
+        // top1=0.6, others=0.1 -> mean=0.225 -> ratio=2.66... > 1.5 -> false
+        let scores = [0.6_f32, 0.1, 0.1, 0.1];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_flat_distribution_is_true() {
+        // 全部同じ -> ratio=1.0 < 1.5 -> true
+        let scores = [0.3_f32, 0.3, 0.3, 0.3];
+        assert!(compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_single_hit_is_false() {
+        // results.len() < 2 -> 判定 skip -> false
+        let scores = [0.001_f32];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_zero_results_is_false() {
+        let scores: [f32; 0] = [];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_mean_zero_is_false() {
+        // mean <= 0.0 -> フォールバック skip
+        let scores = [0.0_f32, 0.0];
+        assert!(!compute_low_confidence(&scores, 1.5));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_ratio_zero_disables_judgment() {
+        // ratio=0.0 -> 常に false
+        let scores = [0.3_f32, 0.3, 0.3];
+        assert!(!compute_low_confidence(&scores, 0.0));
     }
 }
