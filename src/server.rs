@@ -284,14 +284,14 @@ impl KbServer {
         let tags_all: &[String] = params.tags_all.as_deref().unwrap_or(&[]);
 
         let filters = crate::db::SearchFilters {
-            category:    params.category.as_deref(),
-            topic:       params.topic.as_deref(),
+            category: params.category.as_deref(),
+            topic: params.topic.as_deref(),
             min_quality: effective_min_quality,
-            path_globs:  cpg.as_ref(),
+            path_globs: cpg.as_ref(),
             tags_any,
             tags_all,
-            date_from:   params.date_from.as_deref(),
-            date_to:     params.date_to.as_deref(),
+            date_from: params.date_from.as_deref(),
+            date_to: params.date_to.as_deref(),
         };
 
         let db = self.db.lock().unwrap();
@@ -337,13 +337,13 @@ impl KbServer {
         }
 
         let echo = SearchFilterEcho {
-            category:  params.category.clone(),
-            topic:     params.topic.clone(),
+            category: params.category.clone(),
+            topic: params.topic.clone(),
             path_globs: params.path_globs.clone().filter(|v| !v.is_empty()),
-            tags_any:  params.tags_any.clone().filter(|v| !v.is_empty()),
-            tags_all:  params.tags_all.clone().filter(|v| !v.is_empty()),
+            tags_any: params.tags_any.clone().filter(|v| !v.is_empty()),
+            tags_all: params.tags_all.clone().filter(|v| !v.is_empty()),
             date_from: params.date_from.clone(),
-            date_to:   params.date_to.clone(),
+            date_to: params.date_to.clone(),
             min_confidence_ratio: params.min_confidence_ratio,
         };
 
@@ -692,10 +692,7 @@ pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
 /// - `Some(spans)` — 計算済みでマッチあり (start byte 順にソート + 重複除去)
 ///
 /// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
-pub(crate) fn compute_match_spans(
-    query: &str,
-    content: &str,
-) -> Option<Vec<crate::db::MatchSpan>> {
+pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crate::db::MatchSpan>> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return None;
@@ -1159,7 +1156,7 @@ mod tests {
         // include なし (全部 `!` prefix) は実装としてはエラーにしない、
         // 「全件 include + これらを exclude」と解釈する。
         let cpg = compile_path_globs(&["!docs/draft/**".into()]).unwrap();
-        assert!(cpg.matches("docs/a.md"));        // include 無 = 全 include
+        assert!(cpg.matches("docs/a.md")); // include 無 = 全 include
         assert!(!cpg.matches("docs/draft/b.md")); // exclude 効く
     }
 

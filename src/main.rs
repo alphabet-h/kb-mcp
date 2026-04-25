@@ -519,14 +519,14 @@ fn main() -> anyhow::Result<()> {
             };
 
             let filters = db::SearchFilters {
-                category:    category.as_deref(),
-                topic:       topic.as_deref(),
+                category: category.as_deref(),
+                topic: topic.as_deref(),
                 min_quality: effective_min_quality,
-                path_globs:  cpg.as_ref(),
-                tags_any:    &tags_any,
-                tags_all:    &tags_all,
-                date_from:   date_from.as_deref(),
-                date_to:     date_to.as_deref(),
+                path_globs: cpg.as_ref(),
+                tags_any: &tags_any,
+                tags_all: &tags_all,
+                date_from: date_from.as_deref(),
+                date_to: date_to.as_deref(),
             };
 
             let results = if reranker_choice.is_enabled() {

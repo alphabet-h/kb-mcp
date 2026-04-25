@@ -91,14 +91,14 @@ impl From<SearchResult> for SearchHit {
 /// `Default` 実装で「すべてフィルタ無効」を表現する。
 #[derive(Debug, Default, Clone)]
 pub struct SearchFilters<'a> {
-    pub category:    Option<&'a str>,
-    pub topic:       Option<&'a str>,
+    pub category: Option<&'a str>,
+    pub topic: Option<&'a str>,
     pub min_quality: f32,
-    pub path_globs:  Option<&'a CompiledPathGlobs>,
-    pub tags_any:    &'a [String],
-    pub tags_all:    &'a [String],
-    pub date_from:   Option<&'a str>,
-    pub date_to:     Option<&'a str>,
+    pub path_globs: Option<&'a CompiledPathGlobs>,
+    pub tags_any: &'a [String],
+    pub tags_all: &'a [String],
+    pub date_from: Option<&'a str>,
+    pub date_to: Option<&'a str>,
 }
 
 impl<'a> SearchFilters<'a> {
@@ -212,11 +212,7 @@ fn matches_tags_all(hit_tags: &[String], all_pool: &[String]) -> bool {
 
 /// date filter: hit の date 文字列が `[from, to]` の範囲内 (lex 比較)。
 /// from / to が両方 None なら常に pass。date 欠損 (None) は strict に reject。
-fn matches_date_range(
-    hit_date: Option<&str>,
-    from: Option<&str>,
-    to: Option<&str>,
-) -> bool {
+fn matches_date_range(hit_date: Option<&str>, from: Option<&str>, to: Option<&str>) -> bool {
     if from.is_none() && to.is_none() {
         return true;
     }
@@ -813,14 +809,14 @@ impl Database {
             Ok((
                 chunk_id,
                 score,
-                row.get::<_, String>(2)?,         // content
-                row.get::<_, Option<String>>(3)?, // heading
-                row.get::<_, f32>(4)?,            // quality_score
-                row.get::<_, String>(5)?,         // path
-                row.get::<_, Option<String>>(6)?, // title
-                row.get::<_, Option<String>>(7)?, // topic
-                row.get::<_, Option<String>>(8)?, // date
-                row.get::<_, Option<String>>(9)?, // category
+                row.get::<_, String>(2)?,          // content
+                row.get::<_, Option<String>>(3)?,  // heading
+                row.get::<_, f32>(4)?,             // quality_score
+                row.get::<_, String>(5)?,          // path
+                row.get::<_, Option<String>>(6)?,  // title
+                row.get::<_, Option<String>>(7)?,  // topic
+                row.get::<_, Option<String>>(8)?,  // date
+                row.get::<_, Option<String>>(9)?,  // category
                 row.get::<_, Option<String>>(10)?, // tags (JSON)
             ))
         })?;
@@ -994,14 +990,14 @@ impl Database {
             Ok((
                 chunk_id,
                 distance,
-                row.get::<_, String>(2)?,         // content
-                row.get::<_, Option<String>>(3)?, // heading
-                row.get::<_, f32>(4)?,            // quality_score
-                row.get::<_, String>(5)?,         // path
-                row.get::<_, Option<String>>(6)?, // title
-                row.get::<_, Option<String>>(7)?, // topic
-                row.get::<_, Option<String>>(8)?, // date
-                row.get::<_, Option<String>>(9)?, // category
+                row.get::<_, String>(2)?,          // content
+                row.get::<_, Option<String>>(3)?,  // heading
+                row.get::<_, f32>(4)?,             // quality_score
+                row.get::<_, String>(5)?,          // path
+                row.get::<_, Option<String>>(6)?,  // title
+                row.get::<_, Option<String>>(7)?,  // topic
+                row.get::<_, Option<String>>(8)?,  // date
+                row.get::<_, Option<String>>(9)?,  // category
                 row.get::<_, Option<String>>(10)?, // tags (JSON)
             ))
         })?;
@@ -2035,12 +2031,7 @@ mod tests {
             .unwrap();
 
         let hits = db
-            .search_hybrid(
-                "E0382",
-                &dummy_embedding(0.5),
-                5,
-                &SearchFilters::default(),
-            )
+            .search_hybrid("E0382", &dummy_embedding(0.5), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 2);
         // FTS でヒットするのは A だけ → A が上位
@@ -2097,12 +2088,7 @@ mod tests {
             .unwrap();
 
         let hits = db
-            .search_hybrid_candidates(
-                "E0382",
-                &dummy_embedding(0.1),
-                5,
-                &SearchFilters::default(),
-            )
+            .search_hybrid_candidates("E0382", &dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert!(!hits.is_empty());
         // 返ってきた chunk_id は insert 時の id と一致
@@ -2449,10 +2435,7 @@ mod tests {
             .search_similar(&dummy_embedding(0.1), 5, &SearchFilters::default())
             .unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(
-            hits[0].tags,
-            vec!["rust".to_string(), "async".to_string()]
-        );
+        assert_eq!(hits[0].tags, vec!["rust".to_string(), "async".to_string()]);
     }
 
     #[test]
@@ -2462,8 +2445,15 @@ mod tests {
             let id = db
                 .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
                 .unwrap();
-            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
-                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
         }
 
         let include = globset::GlobSetBuilder::new()
@@ -2489,19 +2479,22 @@ mod tests {
     #[test]
     fn test_filter_path_globs_with_exclude() {
         let db = db_with_384();
-        for (i, p) in [
-            "docs/a.md",
-            "docs/draft/b.md",
-            "docs/c.md",
-        ]
-        .iter()
-        .enumerate()
+        for (i, p) in ["docs/a.md", "docs/draft/b.md", "docs/c.md"]
+            .iter()
+            .enumerate()
         {
             let id = db
                 .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
                 .unwrap();
-            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
-                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
         }
 
         let include = globset::GlobSetBuilder::new()
@@ -2532,18 +2525,34 @@ mod tests {
     fn test_filter_tags_all_and_tags_any_combined() {
         let db = db_with_384();
         let cases: &[(&str, &[&str])] = &[
-            ("doc_a.md", &["x", "b"]),       // tags_all=[x] OK, tags_any=[b,c] OK -> pass
-            ("doc_b.md", &["x", "z"]),       // tags_all=[x] OK, tags_any=[b,c] NG -> fail
-            ("doc_c.md", &["b", "c"]),       // tags_all=[x] NG -> fail
-            ("doc_d.md", &["x", "c", "b"]),  // both OK -> pass
+            ("doc_a.md", &["x", "b"]), // tags_all=[x] OK, tags_any=[b,c] OK -> pass
+            ("doc_b.md", &["x", "z"]), // tags_all=[x] OK, tags_any=[b,c] NG -> fail
+            ("doc_c.md", &["b", "c"]), // tags_all=[x] NG -> fail
+            ("doc_d.md", &["x", "c", "b"]), // both OK -> pass
         ];
         for (i, (p, tags)) in cases.iter().enumerate() {
             let tags_owned: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
             let id = db
-                .upsert_document(p, Some("t"), None, None, None, &tags_owned, None, &format!("h{i}"))
+                .upsert_document(
+                    p,
+                    Some("t"),
+                    None,
+                    None,
+                    None,
+                    &tags_owned,
+                    None,
+                    &format!("h{i}"),
+                )
                 .unwrap();
-            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
-                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
         }
         let any_pool: Vec<String> = vec!["b".into(), "c".into()];
         let all_pool: Vec<String> = vec!["x".into()];
@@ -2575,12 +2584,19 @@ mod tests {
             let id = db
                 .upsert_document(p, Some("t"), None, None, None, &[], *d, &format!("h{i}"))
                 .unwrap();
-            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
-                .unwrap();
+            db.insert_chunk(
+                id,
+                0,
+                None,
+                "body",
+                &dummy_embedding(0.1 + i as f32 * 0.01),
+                1.0,
+            )
+            .unwrap();
         }
         let filters = SearchFilters {
             date_from: Some("2026-01-01"),
-            date_to:   Some("2026-12-31"),
+            date_to: Some("2026-12-31"),
             ..Default::default()
         };
         let hits = db
@@ -2590,7 +2606,10 @@ mod tests {
         assert!(paths.contains(&"a.md"));
         assert!(paths.contains(&"b.md"));
         assert!(!paths.contains(&"c.md"));
-        assert!(!paths.contains(&"d.md"), "missing date is excluded (strict)");
+        assert!(
+            !paths.contains(&"d.md"),
+            "missing date is excluded (strict)"
+        );
     }
 
     #[test]
@@ -2609,7 +2628,16 @@ mod tests {
                 (format!("other/{i}.md"), 0.5_f32)
             };
             let id = db
-                .upsert_document(&path, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .upsert_document(
+                    &path,
+                    Some("t"),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    &format!("h{i}"),
+                )
                 .unwrap();
             db.insert_chunk(id, 0, None, "body", &dummy_embedding(emb_seed), 1.0)
                 .unwrap();
@@ -2643,14 +2671,9 @@ mod tests {
         // 通らない。string query を search_hybrid に通すと FTS branch が発火し、
         // FTS 側の path_globs 適用が確認できる。
         let db = db_with_384();
-        for (i, p) in [
-            "docs/a.md",
-            "docs/b.md",
-            "notes/c.md",
-            "notes/d.md",
-        ]
-        .iter()
-        .enumerate()
+        for (i, p) in ["docs/a.md", "docs/b.md", "notes/c.md", "notes/d.md"]
+            .iter()
+            .enumerate()
         {
             let id = db
                 .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
@@ -2706,7 +2729,16 @@ mod tests {
         for (i, (p, tags)) in cases.iter().enumerate() {
             let tags_owned: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
             let id = db
-                .upsert_document(p, Some("t"), None, None, None, &tags_owned, None, &format!("h{i}"))
+                .upsert_document(
+                    p,
+                    Some("t"),
+                    None,
+                    None,
+                    None,
+                    &tags_owned,
+                    None,
+                    &format!("h{i}"),
+                )
                 .unwrap();
             db.insert_chunk(
                 id,
