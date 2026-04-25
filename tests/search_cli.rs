@@ -20,10 +20,10 @@ impl Drop for Guard {
 }
 
 fn bin() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join(if cfg!(debug_assertions) { "debug" } else { "release" })
-        .join(if cfg!(windows) { "kb-mcp.exe" } else { "kb-mcp" })
+    // Cargo sets `CARGO_BIN_EXE_<name>` for integration tests automatically — no
+    // manual `target/<profile>/...` juggling. `CARGO_TARGET_DIR` overrides + cross-
+    // compile target triples are handled correctly. (Same pattern as eval_cli.rs.)
+    PathBuf::from(env!("CARGO_BIN_EXE_kb-mcp"))
 }
 
 fn write(path: &Path, content: &str) {
