@@ -111,7 +111,6 @@ pub struct CompiledPathGlobs {
 }
 
 impl CompiledPathGlobs {
-    #[allow(dead_code)] // Task 3 で配線される
     pub fn matches(&self, path: &str) -> bool {
         let included = match &self.include {
             Some(set) => set.is_match(path),
@@ -164,9 +163,59 @@ fn parse_dim_from_create_sql(sql: &str) -> Option<u32> {
 /// なるだけで、エラーで検索を中断させない)。
 fn parse_tags_json(json: Option<String>) -> Vec<String> {
     match json {
-        Some(s) if !s.is_empty() => serde_json::from_str(&s).unwrap_or_default(),
+        Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "malformed documents.tags JSON, treating as empty");
+                Vec::new()
+            }
+        },
         _ => Vec::new(),
     }
+}
+
+/// `tags_any` フィルタ: hit の tags のいずれかが `any_pool` に含まれていれば pass。
+/// `any_pool` が空なら常に pass (= フィルタ無効)。
+fn matches_tags_any(hit_tags: &[String], any_pool: &[String]) -> bool {
+    if any_pool.is_empty() {
+        return true;
+    }
+    any_pool.iter().any(|t| hit_tags.contains(t))
+}
+
+/// `tags_all` フィルタ: `all_pool` に含まれるすべての tag を hit が持っていれば pass。
+/// `all_pool` が空なら常に pass。
+fn matches_tags_all(hit_tags: &[String], all_pool: &[String]) -> bool {
+    if all_pool.is_empty() {
+        return true;
+    }
+    all_pool.iter().all(|t| hit_tags.contains(t))
+}
+
+/// date filter: hit の date 文字列が `[from, to]` の範囲内 (lex 比較)。
+/// from / to が両方 None なら常に pass。date 欠損 (None) は strict に reject。
+fn matches_date_range(
+    hit_date: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> bool {
+    if from.is_none() && to.is_none() {
+        return true;
+    }
+    let Some(d) = hit_date else {
+        return false; // 欠損は strict 排除
+    };
+    if let Some(f) = from
+        && d < f
+    {
+        return false;
+    }
+    if let Some(t) = to
+        && d > t
+    {
+        return false;
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +835,24 @@ impl Database {
             {
                 continue;
             }
+            // path_globs filter (Task 3 追加)
+            if let Some(cpg) = filters.path_globs
+                && !cpg.matches(&path)
+            {
+                continue;
+            }
+            // tags_any / tags_all filter (Task 3 追加)
+            let hit_tags = parse_tags_json(tags_json);
+            if !matches_tags_any(&hit_tags, filters.tags_any) {
+                continue;
+            }
+            if !matches_tags_all(&hit_tags, filters.tags_all) {
+                continue;
+            }
+            // date_from / date_to filter (Task 3 追加)
+            if !matches_date_range(date.as_deref(), filters.date_from, filters.date_to) {
+                continue;
+            }
             results.push((
                 chunk_id,
                 SearchResult {
@@ -796,7 +863,7 @@ impl Database {
                     title,
                     topic: r_topic,
                     date,
-                    tags: parse_tags_json(tags_json),
+                    tags: hit_tags,
                 },
             ));
             if results.len() >= limit as usize {
@@ -949,6 +1016,24 @@ impl Database {
             {
                 continue;
             }
+            // path_globs filter (Task 3 追加)
+            if let Some(cpg) = filters.path_globs
+                && !cpg.matches(&path)
+            {
+                continue;
+            }
+            // tags_any / tags_all filter (Task 3 追加)
+            let hit_tags = parse_tags_json(tags_json);
+            if !matches_tags_any(&hit_tags, filters.tags_any) {
+                continue;
+            }
+            if !matches_tags_all(&hit_tags, filters.tags_all) {
+                continue;
+            }
+            // date_from / date_to filter (Task 3 追加)
+            if !matches_date_range(date.as_deref(), filters.date_from, filters.date_to) {
+                continue;
+            }
             out.push((
                 chunk_id,
                 SearchResult {
@@ -959,7 +1044,7 @@ impl Database {
                     title,
                     topic: r_topic,
                     date,
-                    tags: parse_tags_json(tags_json),
+                    tags: hit_tags,
                 },
             ));
             if out.len() >= limit as usize {
@@ -2350,5 +2435,180 @@ mod tests {
             hits[0].tags,
             vec!["rust".to_string(), "async".to_string()]
         );
+    }
+
+    #[test]
+    fn test_filter_path_globs_include_only() {
+        let db = db_with_384();
+        for (i, p) in ["docs/a.md", "docs/b.md", "notes/c.md"].iter().enumerate() {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
+                .unwrap();
+        }
+
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: None,
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.iter().all(|p| p.starts_with("docs/")));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_path_globs_with_exclude() {
+        let db = db_with_384();
+        for (i, p) in [
+            "docs/a.md",
+            "docs/draft/b.md",
+            "docs/c.md",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
+                .unwrap();
+        }
+
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let exclude = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/draft/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: Some(exclude),
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(!paths.iter().any(|p| p.starts_with("docs/draft/")));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_tags_all_and_tags_any_combined() {
+        let db = db_with_384();
+        let cases: &[(&str, &[&str])] = &[
+            ("doc_a.md", &["x", "b"]),       // tags_all=[x] OK, tags_any=[b,c] OK -> pass
+            ("doc_b.md", &["x", "z"]),       // tags_all=[x] OK, tags_any=[b,c] NG -> fail
+            ("doc_c.md", &["b", "c"]),       // tags_all=[x] NG -> fail
+            ("doc_d.md", &["x", "c", "b"]),  // both OK -> pass
+        ];
+        for (i, (p, tags)) in cases.iter().enumerate() {
+            let tags_owned: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &tags_owned, None, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
+                .unwrap();
+        }
+        let any_pool: Vec<String> = vec!["b".into(), "c".into()];
+        let all_pool: Vec<String> = vec!["x".into()];
+        let filters = SearchFilters {
+            tags_any: &any_pool,
+            tags_all: &all_pool,
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"doc_a.md"));
+        assert!(paths.contains(&"doc_d.md"));
+        assert!(!paths.contains(&"doc_b.md"));
+        assert!(!paths.contains(&"doc_c.md"));
+    }
+
+    #[test]
+    fn test_filter_date_range_strict_excludes_missing() {
+        let db = db_with_384();
+        let dates = &[
+            ("a.md", Some("2026-01-15")),
+            ("b.md", Some("2026-04-01")),
+            ("c.md", Some("2025-12-31")),
+            ("d.md", None),
+        ];
+        for (i, (p, d)) in dates.iter().enumerate() {
+            let id = db
+                .upsert_document(p, Some("t"), None, None, None, &[], *d, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.1 + i as f32 * 0.01), 1.0)
+                .unwrap();
+        }
+        let filters = SearchFilters {
+            date_from: Some("2026-01-01"),
+            date_to:   Some("2026-12-31"),
+            ..Default::default()
+        };
+        let hits = db
+            .search_similar(&dummy_embedding(0.1), 10, &filters)
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"a.md"));
+        assert!(paths.contains(&"b.md"));
+        assert!(!paths.contains(&"c.md"));
+        assert!(!paths.contains(&"d.md"), "missing date is excluded (strict)");
+    }
+
+    #[test]
+    fn test_filter_has_any_triggers_overfetch_for_path_globs() {
+        let db = db_with_384();
+        // 同じ embedding を 20 件登録、path_globs で 1 件しか通さない
+        for i in 0..20 {
+            let p = if i == 0 {
+                "docs/keep.md".to_string()
+            } else {
+                format!("other/{i}.md")
+            };
+            let id = db
+                .upsert_document(&p, Some("t"), None, None, None, &[], None, &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(id, 0, None, "body", &dummy_embedding(0.5), 1.0)
+                .unwrap();
+        }
+        let include = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("docs/**").unwrap())
+            .build()
+            .unwrap();
+        let cpg = CompiledPathGlobs {
+            include: Some(include),
+            exclude: None,
+        };
+        let filters = SearchFilters {
+            path_globs: Some(&cpg),
+            ..Default::default()
+        };
+        // limit=5 だが path_globs で 1 件しか通らない。over-fetch が効いていれば 1 件返る、
+        // 効いていなければ 0 件 (KNN top-5 が docs/ 以外を全部拾うため)。
+        let hits = db
+            .search_similar(&dummy_embedding(0.5), 5, &filters)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "docs/keep.md");
     }
 }
