@@ -80,6 +80,13 @@ bind = "127.0.0.1:3100"
 # history_size = 10                       # 既定: 10
 # k_values = [1, 5, 10]                   # 既定: [1, 5, 10]
 # regression_threshold = 0.05             # 既定: 0.05
+
+# 任意: `search` ツールのチューニング (v0.3.0+)。省略時は既定値で動作する。
+# [search]
+# # rank-based low_confidence 判定: top1.score / mean(top-N.score) <
+# # min_confidence_ratio で flag が立つ。0.0 で判定無効。CLI
+# # `--min-confidence-ratio` / MCP param `min_confidence_ratio` で per-query 上書き可。
+# min_confidence_ratio = 1.5
 ```
 
 この設定ファイルを置けば `kb-mcp serve` / `index` / `status` / `graph` / `search` のどれも対応フラグを省略して動かせる。未知のキーはタイポ対策のため拒否される。`FASTEMBED_CACHE_DIR` の実環境変数は設定ファイルの同項目より優先される。
@@ -180,6 +187,38 @@ kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # 呼び出し単
 `--format` は `json` (既定、`{score, path, title, heading, topic, date, content}` の配列) か `text` (`---` 区切りの LLM フレンドリなブロック)。他のフラグは `serve` と同じ: `--kb-path` / `--model` / `--reranker` / `--category` / `--topic` / `--limit`。品質フィルタは既定有効 — 単発クエリで フィルタ無効状態に戻すには `--include-low-quality` または `--min-quality 0` を渡す。`kb-mcp.toml` の既定値は `serve` / `index` と同じく適用される。
 
 典型的な skill-bin 用途: Claude Code の skill が `bin/` に `kb-mcp.exe` + `kb-mcp.toml` を同梱し、`kb-mcp search "{{user_query}}" --format text --limit 3` のようなコマンドで LLM が引用するための参照抜粋を返す。
+
+### 検索フィルタと引用 (v0.3.0+)
+
+v0.3.0 から `search` MCP ツールの戻り値が単なるヒット配列ではなくラッパオブジェクトになる。**これは破壊的変更**で、`Vec<SearchHit>` を直接 parse しているクライアントは更新が必要:
+
+```jsonc
+{
+  "results":        [{ "score": 0.83, "path": "...", "match_spans": [...], "tags": [...], ... }],
+  "low_confidence": false,
+  "filter_applied": { /* デフォルトと異なるフィルタだけ echo back、フィルタ無しなら空 object */ }
+}
+```
+
+`results[].match_spans` は ASCII クエリの場合に `content` 内のバイトオフセットを返すため、MCP クライアント側で原文の正確な引用を作れる。`low_confidence` は順位ベースの flag (`top1.score / mean(top-N.score) < min_confidence_ratio`) で、閾値の既定は `1.5`。`kb-mcp.toml` の `[search].min_confidence_ratio` で全体調整、`--min-confidence-ratio` で per-query 上書き可能。
+
+v0.3.0 で `search` ツール / CLI に追加されたフィルタ:
+
+```bash
+kb-mcp search "tokio spawn" \
+  --path-glob "docs/**" --path-glob "!docs/draft/**" \
+  --tag-any rust,async \
+  --date-from 2026-01-01 \
+  --min-confidence-ratio 1.5
+```
+
+- `--path-glob <PATTERN>` (繰り返し可) — パス glob によるフィルタ。`!` 始まりは exclude。MCP param: `path_globs`
+- `--tag-any <a,b,c>` — チャンクが**いずれか**のタグを持つときのみ通過。MCP param: `tags_any`
+- `--tag-all <a,b,c>` — チャンクが**すべての**タグを持つときのみ通過。MCP param: `tags_all`
+- `--date-from <YYYY-MM-DD>` / `--date-to <YYYY-MM-DD>` — 辞書順比較。どちらかが指定された場合、`date` 未設定のチャンクは厳密に除外される。MCP params: `date_from` / `date_to`
+- `--min-confidence-ratio <N>` — `low_confidence` 閾値の per-query 上書き
+
+CLI `kb-mcp search --format json` も同じラッパ形式で出力する。`match_spans` / byte offset の詳細は [docs/citations.ja.md](docs/citations.ja.md)、フィルタの完全リファレンスは [docs/filters.ja.md](docs/filters.ja.md) 参照。
 
 ### 起点ドキュメントからの Connection Graph
 
@@ -435,7 +474,7 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 
 | ツール | 説明 | 主なパラメータ |
 |---|---|---|
-| `search` | ベクトル + FTS5 全文検索を Reciprocal Rank Fusion でマージしたハイブリッド検索、任意で cross-encoder 再ランク。関連度でランク付けされた chunk を返す | `query` (必須)、`limit`、`category`、`topic`、`rerank` (サーバ既定を上書き)、`min_quality` (品質フィルタ閾値を 0.0-1.0 で上書き)、`include_low_quality` (このクエリで品質フィルタ無効化) |
+| `search` | ベクトル + FTS5 全文検索を Reciprocal Rank Fusion でマージしたハイブリッド検索、任意で cross-encoder 再ランク。`{ results, low_confidence, filter_applied }` ラッパで関連度ランク付き chunk を返す。詳細: [docs/citations.ja.md](docs/citations.ja.md)、[docs/filters.ja.md](docs/filters.ja.md) | `query` (必須)、`limit`、`category`、`topic`、`rerank` (サーバ既定を上書き)、`min_quality`、`include_low_quality`、`path_globs` (`!` 始まりは exclude)、`tags_any` / `tags_all`、`date_from` / `date_to` (`YYYY-MM-DD`)、`min_confidence_ratio` |
 | `list_topics` | index 済みの全トピック / カテゴリと文書数を列挙 | (なし) |
 | `get_document` | 相対パスから文書の全文 + メタデータを取得 | `path` (例: `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | opt-in: `kb-mcp.toml` の `[best_practice].path_templates` を設定しているときのみ機能する。対象向けの best practice 文書を取得し、任意で特定 h2 セクションを抽出。未設定時は "not configured" エラーを返す | `target` (例: `"claude-code"`)、`category` (任意) |

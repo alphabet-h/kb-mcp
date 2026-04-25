@@ -79,6 +79,14 @@ bind = "127.0.0.1:3100"
 # history_size = 10                       # default: 10
 # k_values = [1, 5, 10]                   # default: [1, 5, 10]
 # regression_threshold = 0.05             # default: 0.05
+
+# Optional: `search` tool tuning (v0.3.0+). Omit the section for defaults.
+# [search]
+# # rank-based low-confidence flag: trips when
+# # top1.score / mean(top-N.score) < min_confidence_ratio.
+# # 0.0 disables the flag. CLI `--min-confidence-ratio` and the MCP
+# # param `min_confidence_ratio` override per query.
+# min_confidence_ratio = 1.5
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
@@ -179,6 +187,38 @@ kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # optional per-in
 `--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The quality filter is on by default — pass `--include-low-quality` or `--min-quality 0` to restore the previous (filter-off) behavior for a single query. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
 
 Typical skill-bin use: a Claude Code skill places `kb-mcp.exe` + `kb-mcp.toml` in its `bin/`, then a command like `kb-mcp search "{{user_query}}" --format text --limit 3` returns a focused reference excerpt for the LLM to cite.
+
+### Search filters and citations (v0.3.0+)
+
+Starting in v0.3.0 the `search` MCP tool returns a wrapper object instead of a raw array of hits. **This is a breaking change** for clients that parse the response as `Vec<SearchHit>` directly:
+
+```jsonc
+{
+  "results":        [{ "score": 0.83, "path": "...", "match_spans": [...], "tags": [...], ... }],
+  "low_confidence": false,
+  "filter_applied": { /* non-default filters echoed back; empty object when no filters */ }
+}
+```
+
+`results[].match_spans` are byte offsets into `content` for ASCII queries, so MCP clients can quote the source text accurately. `low_confidence` is a rank-based flag (`top1.score / mean(top-N.score) < min_confidence_ratio`); the threshold defaults to `1.5` and can be tuned via `[search].min_confidence_ratio` in `kb-mcp.toml` or `--min-confidence-ratio` per query.
+
+The `search` tool / CLI also gained these filters in v0.3.0:
+
+```bash
+kb-mcp search "tokio spawn" \
+  --path-glob "docs/**" --path-glob "!docs/draft/**" \
+  --tag-any rust,async \
+  --date-from 2026-01-01 \
+  --min-confidence-ratio 1.5
+```
+
+- `--path-glob <PATTERN>` (repeatable) — include / exclude by path glob; `!`-prefix is an exclude. MCP param: `path_globs`.
+- `--tag-any <a,b,c>` — pass if the chunk has **any** of these tags. MCP param: `tags_any`.
+- `--tag-all <a,b,c>` — pass only if the chunk has **all** of these tags. MCP param: `tags_all`.
+- `--date-from <YYYY-MM-DD>` / `--date-to <YYYY-MM-DD>` — lex comparison; chunks with no `date` are excluded strictly when either bound is set. MCP params: `date_from` / `date_to`.
+- `--min-confidence-ratio <N>` — per-query override of the `low_confidence` threshold.
+
+CLI `kb-mcp search --format json` follows the same wrapper format. See [docs/citations.md](docs/citations.md) for `match_spans` / byte-offset details and [docs/filters.md](docs/filters.md) for the full filter reference.
 
 ### Connection graph from a starting document
 
@@ -434,7 +474,7 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 
 | Tool | Description | Key parameters |
 |---|---|---|
-| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion, optionally followed by cross-encoder reranking. Returns chunks ranked by relevance. | `query` (required), `limit`, `category`, `topic`, `rerank` (override server default), `min_quality` (override quality filter 0.0-1.0), `include_low_quality` (disable the filter for this query) |
+| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion, optionally followed by cross-encoder reranking. Returns a wrapper `{ results, low_confidence, filter_applied }` with chunks ranked by relevance. See [docs/citations.md](docs/citations.md), [docs/filters.md](docs/filters.md). | `query` (required), `limit`, `category`, `topic`, `rerank` (override server default), `min_quality`, `include_low_quality`, `path_globs` (glob list, `!`-prefix excludes), `tags_any` / `tags_all`, `date_from` / `date_to` (`YYYY-MM-DD`), `min_confidence_ratio` |
 | `list_topics` | List all indexed topics and categories with document counts. | (none) |
 | `get_document` | Get the full content and metadata of a document by its relative path. | `path` (e.g. `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | Opt-in: when `[best_practice].path_templates` is configured in `kb-mcp.toml`, fetch a best-practices document for the given target and optionally extract an h2 section. Without configuration the tool returns a "not configured" error. | `target` (e.g. `"claude-code"`), `category` (optional) |
