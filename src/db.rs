@@ -33,11 +33,21 @@ pub struct SearchResult {
     pub tags: Vec<String>,
 }
 
+/// `SearchHit.content` (UTF-8) 内の byte offset 範囲。
+/// `start` / `end` は **必ず char (UTF-8 codepoint) 境界に一致**することを
+/// 計算側が保証する。クライアントは `content.get(start..end).unwrap_or("")`
+/// で安全に slice すべき。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MatchSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
 /// JSON-serializable view of [`SearchResult`]. DB 層 (rusqlite) は `serde` 非依存
 /// のままにしておき、API / CLI への露出はこの型を経由する。
 ///
 /// フィールドは `SearchResult` と同形。`From<SearchResult>` で移し替えるだけ。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchHit {
     pub score: f32,
     pub path: String,
@@ -47,6 +57,13 @@ pub struct SearchHit {
     pub date: Option<String>,
     pub tags: Vec<String>,
     pub content: String,
+
+    /// `null` (省略) = 未計算 (機能非対応 — non-ASCII term を含む query) /
+    /// `[]` = 計算済みだが一致なし / `[{...}]` = 計算済みでマッチあり。
+    /// **Serialize 時は `None` で key 不在になる** (`null` ではない)。
+    /// Deserialize 側は `null` と key 不在を区別しない (どちらも None)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_spans: Option<Vec<MatchSpan>>,
 }
 
 impl From<SearchResult> for SearchHit {
@@ -60,6 +77,7 @@ impl From<SearchResult> for SearchHit {
             date: r.date,
             tags: r.tags,
             content: r.content,
+            match_spans: None,
         }
     }
 }
@@ -2715,5 +2733,23 @@ mod tests {
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths, vec!["doc_with_rust.md"]);
+    }
+
+    #[test]
+    fn test_search_hit_has_match_spans_field_default_none() {
+        // SearchResult から SearchHit に変換した直後は match_spans は None。
+        // (具体的な計算は server レイヤで行う)
+        let r = SearchResult {
+            score: 0.1,
+            content: "abc".into(),
+            heading: None,
+            path: "x.md".into(),
+            title: None,
+            topic: None,
+            date: None,
+            tags: vec![],
+        };
+        let h: SearchHit = r.into();
+        assert!(h.match_spans.is_none());
     }
 }

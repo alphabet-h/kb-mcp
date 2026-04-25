@@ -578,6 +578,51 @@ pub(crate) fn compile_path_globs(
     Ok(crate::db::CompiledPathGlobs { include, exclude })
 }
 
+/// query を whitespace で分割し、全 term が ASCII の場合のみ chunk 内で
+/// case-insensitive な substring 検索を行う。byte offset (UTF-8 char boundary 保証) を返す。
+///
+/// 戻り値:
+/// - `None` — query 全体に non-ASCII を 1 つでも含む / 空 query (= 計算しない)
+/// - `Some(vec![])` — 計算したが一致なし
+/// - `Some(spans)` — 計算済みでマッチあり (start byte 順にソート + 重複除去)
+///
+/// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
+pub(crate) fn compute_match_spans(
+    query: &str,
+    content: &str,
+) -> Option<Vec<crate::db::MatchSpan>> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let terms: Vec<&str> = trimmed.split_whitespace().collect();
+    if terms.is_empty() {
+        return None;
+    }
+    if terms.iter().any(|t| !t.is_ascii()) {
+        return None;
+    }
+    let content_lower = content.to_ascii_lowercase();
+    let mut spans: Vec<crate::db::MatchSpan> = Vec::new();
+    for term in &terms {
+        let term_lower = term.to_ascii_lowercase();
+        if term_lower.is_empty() {
+            continue;
+        }
+        for (start, _) in content_lower.match_indices(&term_lower) {
+            let end = start + term_lower.len();
+            // ASCII-only term + ASCII lowercasing なので byte 長は変わらず、
+            // content 側の byte offset でも同じ範囲を切り取れる。char boundary を念のため検算。
+            if content.is_char_boundary(start) && content.is_char_boundary(end) {
+                spans.push(crate::db::MatchSpan { start, end });
+            }
+        }
+    }
+    spans.sort_by_key(|s| (s.start, s.end));
+    spans.dedup_by(|a, b| a.start == b.start && a.end == b.end);
+    Some(spans)
+}
+
 /// `get_document` ツール用に、拡張子に対応する Parser で
 /// frontmatter (title/date/topic/tags) を抽出し DocumentResponse を組む。
 /// 純粋関数化してテスト可能にしている。
@@ -1003,5 +1048,58 @@ mod tests {
         let cpg = compile_path_globs(&["!docs/draft/**".into()]).unwrap();
         assert!(cpg.matches("docs/a.md"));        // include 無 = 全 include
         assert!(!cpg.matches("docs/draft/b.md")); // exclude 効く
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_match_spans: ASCII-only highlight offset computation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_match_spans_ascii_basic() {
+        let spans = compute_match_spans("tokio spawn", "use tokio::spawn for async");
+        let s = spans.expect("ASCII query -> Some");
+        assert_eq!(s.len(), 2);
+        assert_eq!(&"use tokio::spawn for async"[s[0].start..s[0].end], "tokio");
+        assert_eq!(&"use tokio::spawn for async"[s[1].start..s[1].end], "spawn");
+    }
+
+    #[test]
+    fn test_compute_match_spans_case_insensitive_ascii() {
+        let spans = compute_match_spans("Rust", "RUST is rusty").unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&"RUST is rusty"[spans[0].start..spans[0].end], "RUST");
+        assert_eq!(&"RUST is rusty"[spans[1].start..spans[1].end], "rust");
+    }
+
+    #[test]
+    fn test_compute_match_spans_non_ascii_query_returns_none() {
+        // 日本語 (non-ASCII) を含む query は計算しない。
+        let spans = compute_match_spans("rust 日本語", "rust と日本語");
+        assert!(spans.is_none());
+    }
+
+    #[test]
+    fn test_compute_match_spans_ascii_query_in_utf8_chunk() {
+        // 日本語混じり chunk に ASCII term。byte offset が char boundary を満たすこと。
+        let chunk = "前置 tokio 後ろ";
+        let spans = compute_match_spans("tokio", chunk).unwrap();
+        assert_eq!(spans.len(), 1);
+        let s = &spans[0];
+        assert!(chunk.is_char_boundary(s.start));
+        assert!(chunk.is_char_boundary(s.end));
+        assert_eq!(&chunk[s.start..s.end], "tokio");
+    }
+
+    #[test]
+    fn test_compute_match_spans_empty_query_returns_none() {
+        // 空クエリは Some(vec![]) でも None でもよいが、None を採用 (計算未実施扱い)
+        let spans = compute_match_spans("", "anything");
+        assert!(spans.is_none());
+    }
+
+    #[test]
+    fn test_compute_match_spans_no_match_returns_empty_vec() {
+        let spans = compute_match_spans("nonexistent", "rust").unwrap();
+        assert_eq!(spans.len(), 0);
     }
 }
