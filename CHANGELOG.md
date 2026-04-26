@@ -4,6 +4,19 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-26
+
+### Internal
+- Added `cargo-dist` 0.31 setup for cross-platform binary releases. From
+  this release onwards, GitHub Releases include prebuilt archives for
+  Linux x86_64/aarch64, macOS x86_64/aarch64, and Windows x86_64, plus
+  per-archive SHA-256 sums and a global `sha256.sum`. ONNX runtime and
+  SQLite remain statically linked, so the archives ship a single binary
+  with no extra DLLs.
+- README en+ja gain an `Install` section describing the prebuilt archives;
+  the existing `cargo build --release` instructions are demoted to a
+  `Build from source` subsection.
+
 ## [0.4.0] - 2026-04-26
 
 ### Added
@@ -102,7 +115,8 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.1.0...v0.2.0
