@@ -120,8 +120,10 @@ pub struct EvalConfig {
 }
 
 impl Config {
-    /// バイナリと同じディレクトリの `kb-mcp.toml` を読み込む。
-    /// ファイルが存在しない場合は空の `Config::default()` を返す (エラーなし)。
+    /// 後方互換シム。`discover(None)` に委譲し `ConfigSource` を捨てる。
+    /// 実際の探索順は CWD → `.git` 祖先 → バイナリ隣 (legacy) で、
+    /// 関数名は historical naming のまま残している。新規コードは
+    /// [`Config::discover`] を直接呼び ConfigSource を tracing に乗せること。
     pub fn load_alongside_binary() -> Result<Self> {
         Self::discover(None).map(|(c, _)| c)
     }
@@ -136,13 +138,11 @@ impl Config {
         Self::discover_with_alongside(explicit, &cwd, alongside_binary_path().as_deref())
     }
 
-    /// `discover` を CWD 注入可能にしたバージョン。テスト用に `pub(crate)`。
-    /// `alongside_binary_path()` は `current_exe()` 経由のため `discover` から呼ぶ。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn discover_at(
-        explicit: Option<&Path>,
-        cwd: &Path,
-    ) -> Result<(Self, ConfigSource)> {
+    /// `discover` を CWD 注入可能にしたバージョン。test-only。
+    /// `alongside_binary_path()` は `current_exe()` 経由のため、production は
+    /// `discover` を呼び、テストは CWD を制御するためにこちらを呼ぶ。
+    #[cfg(test)]
+    fn discover_at(explicit: Option<&Path>, cwd: &Path) -> Result<(Self, ConfigSource)> {
         Self::discover_with_alongside(explicit, cwd, alongside_binary_path().as_deref())
     }
 
@@ -1073,6 +1073,24 @@ mod tests {
             .expect("discover ok");
         assert_eq!(src, ConfigSource::NotFound);
         assert!(cfg.is_empty());
+    }
+
+    #[test]
+    fn test_discover_alongside_binary_when_no_higher_tier() {
+        // CWD / .git どちらにも toml が無く、バイナリ隣にだけ存在 → AlongsideBinary。
+        #[cfg(windows)]
+        let kb = "C:/side-kb";
+        #[cfg(not(windows))]
+        let kb = "/side-kb";
+        // 2 つの別ディレクトリを作る: CWD (toml なし) と alongside (toml あり)
+        let cwd_dir = TempDir::new("kb-mcp-discover-side-cwd");
+        let side_dir = TempDir::new("kb-mcp-discover-side-bin");
+        let side_toml = side_dir.path().join("kb-mcp.toml");
+        std::fs::write(&side_toml, format!("kb_path = \"{kb}\"\n")).unwrap();
+        let (cfg, src) = Config::discover_with_alongside(None, cwd_dir.path(), Some(&side_toml))
+            .expect("discover ok");
+        assert_eq!(src, ConfigSource::AlongsideBinary);
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(kb)));
     }
 
     /// テスト用 tempdir (Drop で自動削除)。`tests/validate_cli.rs::TempKb` の lib 版。
