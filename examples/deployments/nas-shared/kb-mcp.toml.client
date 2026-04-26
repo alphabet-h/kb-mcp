@@ -1,0 +1,32 @@
+# NAS-shared deployment — READ-ONLY CLIENT config (kb-mcp.toml)
+#
+# Use this on every machine *except* the indexer host. The NAS share must
+# be mounted read-only on these machines. See README.md / README.ja.md.
+
+# Mounted NAS path. Same path on every client. Reads-only on this machine.
+kb_path = "/mnt/nas/knowledge-base"
+
+# Match the indexer host's model — mismatches are rejected at startup
+# by the index_meta check.
+model = "bge-m3"
+
+# Reranker is optional client-side. The CPU cost lands on the local
+# machine where kb-mcp serve runs, so it can be different per client.
+# Comment out if you don't want the ~2.3 GB local download.
+reranker = "bge-v2-m3"
+rerank_by_default = false
+
+# Local cache, fast disk. Each client downloads the model once.
+fastembed_cache_dir = "/var/cache/fastembed"
+
+[parsers]
+enabled = ["md"]
+
+# Watcher OFF — clients never write, and inotify over network FS is
+# unreliable anyway. Index freshness is the indexer host's responsibility.
+[watch]
+enabled = false
+
+[quality_filter]
+enabled = true
+threshold = 0.3

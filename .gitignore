@@ -14,3 +14,8 @@ CLAUDE.local.md
 
 # Runtime config placed next to the binary (user-local). Template is kb-mcp.toml.example.
 kb-mcp.toml
+
+# Deployment recipe templates under examples/deployments/ are meant to be
+# committed (they are example artifacts, not user-local runtime files).
+!examples/deployments/**/.mcp.json
+!examples/deployments/**/kb-mcp.toml

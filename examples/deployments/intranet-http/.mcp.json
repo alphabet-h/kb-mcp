@@ -1,0 +1,9 @@
+{
+  "_comment_intranet_http": "Intranet HTTP deployment, CLIENT side. Replace 'kb-server.lan' with your server's hostname or IP. If you front kb-mcp with nginx for TLS/auth, switch to https:// and the proxy URL. No kb-mcp binary is required on the client — any HTTP-capable MCP client speaks Streamable HTTP.",
+  "mcpServers": {
+    "ai-knowledge": {
+      "type": "http",
+      "url": "http://kb-server.lan:3100/mcp"
+    }
+  }
+}

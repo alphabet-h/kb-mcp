@@ -1,0 +1,44 @@
+# Intranet HTTP server deployment — kb-mcp.toml (server side)
+#
+# Place this at /srv/kb-mcp/kb-mcp.toml so the systemd unit's
+# `WorkingDirectory=/srv/kb-mcp` setting causes CWD discovery to pick it up.
+# See README.md / README.ja.md for the full setup.
+
+# Absolute path to the knowledge base directory on the server.
+# .kb-mcp.db will land at /srv/kb-mcp/.kb-mcp.db (parent of kb_path).
+kb_path = "/srv/kb-mcp/knowledge-base"
+
+# Multilingual model is the safer default for shared KBs.
+model = "bge-m3"
+
+# Reranker loaded but off by default; clients opt in per-query.
+reranker = "bge-v2-m3"
+rerank_by_default = false
+
+# Cache lives under the kbmcp user's home (the systemd unit ensures /var/cache/fastembed exists and is owned by kbmcp).
+fastembed_cache_dir = "/var/cache/fastembed"
+
+[parsers]
+enabled = ["md"]
+
+# Watcher ON — the server is the single writer, and inotify on local disk is reliable.
+# 500 ms debounce coalesces fast-edit bursts. Bump if `git pull` events spam.
+[watch]
+enabled = true
+debounce_ms = 500
+
+[quality_filter]
+enabled = true
+threshold = 0.3
+
+# HTTP transport. Bind to a LAN-reachable address ONLY if you trust everyone
+# on that network — kb-mcp has no authentication. For real deployments,
+# bind to 127.0.0.1:3100 and put nginx/Caddy in front for TLS + auth.
+[transport]
+kind = "http"
+
+[transport.http]
+# Loopback default (recommended). Change to 0.0.0.0:3100 for direct LAN access
+# without a proxy, or to the LAN-internal IP (e.g. 192.168.1.10:3100) to
+# expose only on a specific interface.
+bind = "127.0.0.1:3100"
