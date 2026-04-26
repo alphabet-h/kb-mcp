@@ -845,7 +845,7 @@ mod tests {
         // shellexpand は元文字列を返すので、最低限「panic しない」を保証。
         let expanded = expand_tilde("~/.kb-mcp.toml");
         // Windows でも Unix でも入力に `~/` が残らないか、home が解決されているかのどちらか。
-        // shellexpand 0.8 は home 取れない場合 input をそのまま返す挙動なので分岐 assert。
+        // shellexpand 3 は home 取れない場合 input をそのまま返す挙動なので分岐 assert。
         if let Some(home) = dirs_next_fallback() {
             assert!(
                 expanded.starts_with(&home) || expanded == "~/.kb-mcp.toml",
