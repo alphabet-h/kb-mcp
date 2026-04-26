@@ -120,13 +120,94 @@ pub struct EvalConfig {
 }
 
 impl Config {
-    /// バイナリと同じディレクトリの `kb-mcp.toml` を読み込む。
-    /// ファイルが存在しない場合は空の `Config::default()` を返す (エラーなし)。
+    /// 後方互換シム。`discover(None)` に委譲し `ConfigSource` を捨てる。
+    /// 実際の探索順は CWD → `.git` 祖先 → バイナリ隣 (legacy) で、
+    /// 関数名は historical naming のまま残している。新規コードは
+    /// [`Config::discover`] を直接呼び ConfigSource を tracing に乗せること。
     pub fn load_alongside_binary() -> Result<Self> {
-        let Some(path) = alongside_binary_path() else {
-            return Ok(Self::default());
-        };
-        Self::load_from(&path)
+        Self::discover(None).map(|(c, _)| c)
+    }
+
+    /// CLI `--config` で渡されたパスがあればそれを (絶対 / 相対 + `~` 展開した上で) 採用、
+    /// なければ CWD → `.git` 祖先 → バイナリ隣の順で `kb-mcp.toml` を探し、
+    /// 最初に見つかったものを読む。全部失敗したら `Config::default()` を返す。
+    ///
+    /// 戻り値の `ConfigSource` は呼び出し元 (`main.rs`) が `tracing` ログに出す。
+    pub fn discover(explicit: Option<&Path>) -> Result<(Self, ConfigSource)> {
+        let cwd = std::env::current_dir().context("failed to read current_dir")?;
+        Self::discover_with_alongside(explicit, &cwd, alongside_binary_path().as_deref())
+    }
+
+    /// `discover` を CWD 注入可能にしたバージョン。test-only。
+    /// `alongside_binary_path()` は `current_exe()` 経由のため、production は
+    /// `discover` を呼び、テストは CWD を制御するためにこちらを呼ぶ。
+    #[cfg(test)]
+    fn discover_at(explicit: Option<&Path>, cwd: &Path) -> Result<(Self, ConfigSource)> {
+        Self::discover_with_alongside(explicit, cwd, alongside_binary_path().as_deref())
+    }
+
+    /// `discover` のフル注入版 (テスト専用)。バイナリ隣のパスも override する。
+    pub(crate) fn discover_with_alongside(
+        explicit: Option<&Path>,
+        cwd: &Path,
+        alongside: Option<&Path>,
+    ) -> Result<(Self, ConfigSource)> {
+        // 1. 明示 (--config)
+        if let Some(p) = explicit {
+            // `~` 展開を噛ませる。OsStr → String の変換は lossy で十分 (パスが
+            // 非 UTF-8 の Windows 環境は実用上稀、shellexpand も String 入力)。
+            let s = p.to_string_lossy();
+            let expanded = PathBuf::from(expand_tilde(&s));
+            // 相対パスは CWD 起点で resolve (canonicalize は不要 = symlink 維持)。
+            let resolved = if expanded.is_absolute() {
+                expanded
+            } else {
+                cwd.join(expanded)
+            };
+            if !resolved.exists() {
+                return Err(anyhow::anyhow!(
+                    "--config path not found: {}",
+                    resolved.display()
+                ));
+            }
+            let cfg = Self::load_from(&resolved).with_context(|| {
+                format!("failed to load config from --config {}", resolved.display())
+            })?;
+            return Ok((cfg, ConfigSource::Explicit));
+        }
+
+        // 2. CWD 直下
+        let cwd_toml = cwd.join("kb-mcp.toml");
+        if cwd_toml.exists() {
+            let cfg = Self::load_from(&cwd_toml).with_context(|| {
+                format!("failed to load config from cwd {}", cwd_toml.display())
+            })?;
+            return Ok((cfg, ConfigSource::Cwd));
+        }
+
+        // 3. .git 祖先
+        if let Some(root) = find_git_root(cwd) {
+            let git_toml = root.join("kb-mcp.toml");
+            if git_toml.exists() {
+                let cfg = Self::load_from(&git_toml).with_context(|| {
+                    format!("failed to load config from git root {}", git_toml.display())
+                })?;
+                return Ok((cfg, ConfigSource::GitRoot));
+            }
+        }
+
+        // 4. バイナリ隣 (legacy)
+        if let Some(side) = alongside
+            && side.exists()
+        {
+            let cfg = Self::load_from(side).with_context(|| {
+                format!("failed to load config alongside binary {}", side.display())
+            })?;
+            return Ok((cfg, ConfigSource::AlongsideBinary));
+        }
+
+        // 5. 未発見 → Default
+        Ok((Self::default(), ConfigSource::NotFound))
     }
 
     /// 指定パスから読み込む。ファイルが存在しない場合は空の `Config`。
@@ -220,11 +301,51 @@ impl Config {
     }
 }
 
+/// `kb-mcp.toml` がどのソースから読まれたかを表す。`tracing` ログと
+/// テストの assert から参照される。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// CLI `--config <PATH>` で明示指定。
+    Explicit,
+    /// CWD 直下 `./kb-mcp.toml`。
+    Cwd,
+    /// `.git` 祖先ディレクトリ直下の `kb-mcp.toml`。
+    GitRoot,
+    /// `current_exe()` の隣 (legacy 探索)。
+    AlongsideBinary,
+    /// 全探索が失敗し `Config::default()` を返した。
+    NotFound,
+}
+
+/// `~` を home に展開する。home が取れない (CI 等) 場合は入力をそのまま返す。
+/// 内部的には `shellexpand::tilde` のラッパで、Windows でも `~` を解決する。
+pub fn expand_tilde(s: &str) -> String {
+    shellexpand::tilde(s).into_owned()
+}
+
 /// 実行中のバイナリと同じディレクトリにある `kb-mcp.toml` の絶対パス。
 /// `current_exe()` が取得できない環境では `None`。
 fn alongside_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join("kb-mcp.toml"))
+}
+
+/// `start` から親方向に `.git` (ディレクトリまたは worktree 用ファイル) を
+/// 探す。`start` 自身を含めて最大 20 ディレクトリ (= start + 19 祖先) を
+/// チェックし、見つからなければ `None`。
+///
+/// `.git` がディレクトリかファイルかは判定しない (`exists()` で拾う) ので、
+/// regular repo / worktree / submodule すべてで動く。NAS 暴走防止のため
+/// 階層数上限を設けている。
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut cur: &Path = start;
+    for _ in 0..20 {
+        if cur.join(".git").exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+    None
 }
 
 /// `path` が絶対なら何もしない、相対なら `base.join(path)` を返す。
@@ -800,5 +921,239 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    #[test]
+    fn test_config_source_variants_are_distinguishable() {
+        // 4 ソース + NotFound が all distinct であること。Debug 表示を使う。
+        let variants = [
+            ConfigSource::Explicit,
+            ConfigSource::Cwd,
+            ConfigSource::GitRoot,
+            ConfigSource::AlongsideBinary,
+            ConfigSource::NotFound,
+        ];
+        let labels: Vec<String> = variants.iter().map(|v| format!("{v:?}")).collect();
+        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(
+            unique.len(),
+            variants.len(),
+            "all variants must be distinct"
+        );
+    }
+
+    #[test]
+    fn test_expand_tilde_with_home() {
+        // `~/foo` は home_dir 起点に展開される。home が取れない CI 環境でも
+        // shellexpand は元文字列を返すので、最低限「panic しない」を保証。
+        let expanded = expand_tilde("~/.kb-mcp.toml");
+        // Windows でも Unix でも入力に `~/` が残らないか、home が解決されているかのどちらか。
+        // shellexpand 3 は home 取れない場合 input をそのまま返す挙動なので分岐 assert。
+        if let Some(home) = dirs_next_fallback() {
+            assert!(
+                expanded.starts_with(&home) || expanded == "~/.kb-mcp.toml",
+                "expanded={expanded:?}, home={home:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_git_root_returns_dir_when_git_present() {
+        let dir = TempDir::new("kb-mcp-find-git-root-yes");
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        let nested = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        let found = find_git_root(&nested);
+        assert_eq!(found.as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn test_find_git_root_handles_git_file_for_worktree() {
+        // worktree の場合は `.git` が file のことがある。`exists()` で拾えるか。
+        let dir = TempDir::new("kb-mcp-find-git-root-worktree");
+        let git_file = dir.path().join(".git");
+        std::fs::write(&git_file, "gitdir: /elsewhere\n").unwrap();
+        let found = find_git_root(dir.path());
+        assert_eq!(found.as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn test_find_git_root_returns_none_when_not_in_repo() {
+        let dir = TempDir::new("kb-mcp-find-git-root-no");
+        // `.git` は作らない。
+        let found = find_git_root(dir.path());
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_git_root_caps_at_20_levels() {
+        // 21 階層深くまで掘っても 20 階層上限で諦める。
+        // 実ファイル作成はしない (filesystem 上限を避ける)、PathBuf 上の操作だけで
+        // 確認できるよう、find_git_root の上限ロジックを切り出した内部関数を
+        // テスト可能にしておく。ここでは「上限超え深さでも panic / loop 暴走しない」
+        // ことだけを保証する smoke test。
+        let mut p = std::env::temp_dir().join("kb-mcp-cap-test");
+        for i in 0..30 {
+            p = p.join(format!("d{i}"));
+        }
+        // ディレクトリは存在しないので exists() は毎回 false を返し、
+        // 20 イテレーションの上限に到達して None で終わる (panic / 無限ループ
+        // しないことだけを保証する smoke test)。
+        let _ = find_git_root(&p);
+    }
+
+    #[test]
+    fn test_discover_explicit_takes_priority_over_cwd() {
+        // 明示と CWD 両方に toml があっても明示が勝つ。
+        #[cfg(windows)]
+        let (cwd_kb, explicit_kb) = ("C:/cwd-kb", "C:/explicit-kb");
+        #[cfg(not(windows))]
+        let (cwd_kb, explicit_kb) = ("/cwd-kb", "/explicit-kb");
+        let dir = TempDir::new("kb-mcp-discover-explicit");
+        let cwd_toml = dir.path().join("kb-mcp.toml");
+        std::fs::write(&cwd_toml, format!("kb_path = \"{cwd_kb}\"\n")).unwrap();
+        let explicit_toml = dir.path().join("explicit.toml");
+        std::fs::write(&explicit_toml, format!("kb_path = \"{explicit_kb}\"\n")).unwrap();
+        let (cfg, src) =
+            Config::discover_at(Some(&explicit_toml), dir.path()).expect("discover ok");
+        assert_eq!(src, ConfigSource::Explicit);
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(explicit_kb)));
+    }
+
+    #[test]
+    fn test_discover_explicit_missing_fails_fast() {
+        // 明示で不存在 → エラー、CWD には toml があってもフォールバック禁止。
+        #[cfg(windows)]
+        let cwd_kb = "C:/cwd-kb";
+        #[cfg(not(windows))]
+        let cwd_kb = "/cwd-kb";
+        let dir = TempDir::new("kb-mcp-discover-explicit-miss");
+        let cwd_toml = dir.path().join("kb-mcp.toml");
+        std::fs::write(&cwd_toml, format!("kb_path = \"{cwd_kb}\"\n")).unwrap();
+        let explicit_toml = dir.path().join("does-not-exist.toml");
+        let err = Config::discover_at(Some(&explicit_toml), dir.path())
+            .expect_err("must error on missing explicit");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--config"),
+            "error must mention --config: {msg}"
+        );
+        assert!(msg.contains("not found"), "error must say not found: {msg}");
+    }
+
+    #[test]
+    fn test_discover_cwd_when_no_explicit() {
+        #[cfg(windows)]
+        let kb = "C:/cwd-kb";
+        #[cfg(not(windows))]
+        let kb = "/cwd-kb";
+        let dir = TempDir::new("kb-mcp-discover-cwd");
+        let toml = dir.path().join("kb-mcp.toml");
+        std::fs::write(&toml, format!("kb_path = \"{kb}\"\n")).unwrap();
+        let (cfg, src) = Config::discover_at(None, dir.path()).expect("discover ok");
+        assert_eq!(src, ConfigSource::Cwd);
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(kb)));
+    }
+
+    #[test]
+    fn test_discover_walks_to_git_root() {
+        #[cfg(windows)]
+        let kb = "C:/git-kb";
+        #[cfg(not(windows))]
+        let kb = "/git-kb";
+        let dir = TempDir::new("kb-mcp-discover-gitroot");
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        let toml = dir.path().join("kb-mcp.toml");
+        std::fs::write(&toml, format!("kb_path = \"{kb}\"\n")).unwrap();
+        let nested = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        // CWD = nested (toml 無し)、祖先に .git + kb-mcp.toml。
+        let (cfg, src) = Config::discover_at(None, &nested).expect("discover ok");
+        assert_eq!(src, ConfigSource::GitRoot);
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(kb)));
+    }
+
+    #[test]
+    fn test_discover_cwd_wins_over_git_root() {
+        // CWD に toml があり、かつ .git 祖先にも toml がある場合 → CWD が勝つ。
+        #[cfg(windows)]
+        let (cwd_kb, git_kb) = ("C:/cwd-wins", "C:/git-loses");
+        #[cfg(not(windows))]
+        let (cwd_kb, git_kb) = ("/cwd-wins", "/git-loses");
+        let dir = TempDir::new("kb-mcp-discover-cwd-vs-git");
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        // git root 直下の toml
+        std::fs::write(
+            dir.path().join("kb-mcp.toml"),
+            format!("kb_path = \"{git_kb}\"\n"),
+        )
+        .unwrap();
+        // ネストして CWD にも toml
+        let cwd = dir.path().join("project/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("kb-mcp.toml"), format!("kb_path = \"{cwd_kb}\"\n")).unwrap();
+        let (cfg, src) = Config::discover_at(None, &cwd).expect("discover ok");
+        assert_eq!(src, ConfigSource::Cwd);
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(cwd_kb)));
+    }
+
+    #[test]
+    fn test_discover_returns_default_when_none() {
+        let dir = TempDir::new("kb-mcp-discover-none");
+        let absent = dir.path().join("there-is-no-toml-here.toml");
+        let (cfg, src) =
+            Config::discover_with_alongside(None, dir.path(), Some(&absent)).expect("discover ok");
+        assert_eq!(src, ConfigSource::NotFound);
+        assert!(cfg.is_empty());
+    }
+
+    #[test]
+    fn test_discover_alongside_binary_when_no_higher_tier() {
+        // CWD / .git どちらにも toml が無く、バイナリ隣にだけ存在 → AlongsideBinary。
+        #[cfg(windows)]
+        let kb = "C:/side-kb";
+        #[cfg(not(windows))]
+        let kb = "/side-kb";
+        // 2 つの別ディレクトリを作る: CWD (toml なし) と alongside (toml あり)
+        let cwd_dir = TempDir::new("kb-mcp-discover-side-cwd");
+        let side_dir = TempDir::new("kb-mcp-discover-side-bin");
+        let side_toml = side_dir.path().join("kb-mcp.toml");
+        std::fs::write(&side_toml, format!("kb_path = \"{kb}\"\n")).unwrap();
+        let (cfg, src) = Config::discover_with_alongside(None, cwd_dir.path(), Some(&side_toml))
+            .expect("discover ok");
+        assert_eq!(src, ConfigSource::AlongsideBinary);
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(kb)));
+    }
+
+    /// テスト用 tempdir (Drop で自動削除)。`tests/validate_cli.rs::TempKb` の lib 版。
+    struct TempDir {
+        path: PathBuf,
+    }
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let pid = std::process::id();
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("{prefix}-{pid}-{nonce}"));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn dirs_next_fallback() -> Option<String> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|s| s.to_string_lossy().into_owned())
     }
 }

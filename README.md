@@ -18,10 +18,10 @@ The binary is produced at `target/release/kb-mcp` (or `kb-mcp.exe` on Windows).
 
 ## Optional config file
 
-Any CLI option below can be given a default via `kb-mcp.toml` placed **next to the binary**. CLI arguments always win; the file just removes repetition for a given deployment. Copy `kb-mcp.toml.example` to `kb-mcp.toml` and edit:
+Any CLI option below can be given a default via a `kb-mcp.toml` file. CLI arguments always win; the file just removes repetition for a given deployment. The discovery order is described in [Config file discovery](#config-file-discovery) below — the most common placement is the project root (CWD) or alongside the binary. Copy `kb-mcp.toml.example` to `kb-mcp.toml` and edit:
 
 ```toml
-# kb-mcp.toml (sits next to kb-mcp / kb-mcp.exe)
+# kb-mcp.toml (placed in the project root, the .git ancestor, or next to kb-mcp)
 kb_path = "/path/to/knowledge-base"
 model = "bge-m3"
 reranker = "bge-v2-m3"
@@ -90,6 +90,56 @@ bind = "127.0.0.1:3100"
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
+
+### Config file discovery
+
+`kb-mcp` looks up `kb-mcp.toml` in the following order on every invocation
+and stops at the first hit:
+
+| Priority | Location                                  | Notes                                        |
+| -------- | ----------------------------------------- | -------------------------------------------- |
+| 1        | `--config <PATH>` (any subcommand)        | Errors out if the file does not exist.       |
+| 2        | `./kb-mcp.toml` (current working dir)     | Most natural for project-local KBs.          |
+| 3        | `<git-root>/kb-mcp.toml` (walks up)       | Checks CWD + up to 19 ancestors (20 dirs total). |
+| 4        | `<binary-dir>/kb-mcp.toml`                | Legacy / global-install fallback.            |
+| 5        | (no config — built-in defaults)           | `--kb-path` becomes mandatory on the CLI.    |
+
+`~` in `--config` is expanded to the home directory on all platforms
+(including Windows `cmd.exe` where the shell does not expand it).
+
+The chosen source is logged to stderr at startup as
+`kb_mcp::config: loaded config source=...` so you can confirm which file is
+in effect.
+
+#### Example: per-project KB packaged in a repository
+
+```jsonc
+// repo-root/.mcp.json
+{
+  "mcpServers": {
+    "kb": { "command": "kb-mcp", "args": ["serve"] }
+  }
+}
+```
+
+Commit `kb-mcp.toml` next to `.mcp.json`. Opening the project in Claude Code
+launches `kb-mcp serve` from the repo root, the CWD lookup picks up
+the project's `kb-mcp.toml`, and `.mcp.json` stays minimal.
+
+#### Example: multiple KBs in the same Claude Code session
+
+```jsonc
+{
+  "mcpServers": {
+    "kb-personal": { "command": "kb-mcp", "args": ["serve", "--config", "~/kb/personal/kb-mcp.toml"] },
+    "kb-project":  { "command": "kb-mcp", "args": ["serve", "--config", "./kb-mcp.toml"] },
+    "kb-rust-docs":{ "command": "kb-mcp", "args": ["serve", "--config", "~/kb/rust-docs/kb-mcp.toml"] }
+  }
+}
+```
+
+Each entry runs as an independent MCP server with its own `kb-mcp.toml` and
+its own `.kb-mcp.db`, so Claude can disambiguate by server name.
 
 ## Usage
 
@@ -342,7 +392,7 @@ For agent workflows, a more conservative alternative: load the reranker but leav
 }
 ```
 
-Or, if you placed a `kb-mcp.toml` next to the binary with those options set, the `.mcp.json` can shrink to:
+Or, if you placed a `kb-mcp.toml` somewhere on the [discovery path](#config-file-discovery) with those options set, the `.mcp.json` can shrink to:
 
 ```json
 {

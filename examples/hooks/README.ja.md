@@ -34,7 +34,7 @@ Claude Code の [PostToolUse hook](https://docs.claude.com/en/docs/claude-code/h
 
 `kb-mcp index` は SHA-256 の content hash 差分検出を使うため、変更されていないファイルはスキップされる。実際、小さな KB では 2 回目以降は 1 秒未満で終わる。バイナリが `PATH` 上に無いなら `kb-mcp` を絶対パスに置き換える。
 
-`kb_path` は (バイナリ隣接の) `kb-mcp.toml` から読まれる。`kb-mcp index --kb-path /abs/path/to/knowledge-base` のようにハードコードもできる。
+`kb_path` は `kb-mcp.toml` から読まれる (探索順は README の「設定ファイルの探索順」を参照、通常はプロジェクトルートかバイナリの隣)。`kb-mcp index --kb-path /abs/path/to/knowledge-base` のようにハードコードもできる。
 
 ## Tier B — パスフィルタ付き再構築 (スクリプト)
 

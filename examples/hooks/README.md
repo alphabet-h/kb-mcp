@@ -40,8 +40,10 @@ skipped. In practice the second and subsequent invocations finish in well
 under a second on small KBs. If the binary is not on `PATH`, replace
 `kb-mcp` with an absolute path.
 
-The `kb_path` is read from `kb-mcp.toml` (placed next to the binary). You
-can also hard-code it with `kb-mcp index --kb-path /abs/path/to/knowledge-base`.
+The `kb_path` is read from `kb-mcp.toml` (see the README's *Config file
+discovery* section for the full lookup order — typically the project
+root or alongside the binary). You can also hard-code it with
+`kb-mcp index --kb-path /abs/path/to/knowledge-base`.
 
 ## Tier B — path-filtered rebuild (script)
 

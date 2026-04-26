@@ -18,10 +18,10 @@ cargo build --release
 
 ## 設定ファイル (任意)
 
-以下の CLI オプションはすべて、バイナリと**同じディレクトリ**に置いた `kb-mcp.toml` で既定値を与えられる。CLI 引数は常に優先され、設定ファイルは単に同じデプロイでの記述の繰り返しを減らすためのもの。`kb-mcp.toml.example` を `kb-mcp.toml` にコピーして編集する:
+以下の CLI オプションはすべて `kb-mcp.toml` で既定値を与えられる。CLI 引数は常に優先され、設定ファイルは単に同じデプロイでの記述の繰り返しを減らすためのもの。配置場所の探索順は [設定ファイルの探索順](#設定ファイルの探索順) を参照 — 最も一般的なのはプロジェクトルート (CWD) かバイナリの隣。`kb-mcp.toml.example` を `kb-mcp.toml` にコピーして編集する:
 
 ```toml
-# kb-mcp.toml (kb-mcp / kb-mcp.exe と同じディレクトリに置く)
+# kb-mcp.toml (プロジェクトルート / .git 祖先 / kb-mcp の隣 のいずれかに置く)
 kb_path = "/path/to/knowledge-base"
 model = "bge-m3"
 reranker = "bge-v2-m3"
@@ -90,6 +90,56 @@ bind = "127.0.0.1:3100"
 ```
 
 この設定ファイルを置けば `kb-mcp serve` / `index` / `status` / `graph` / `search` のどれも対応フラグを省略して動かせる。未知のキーはタイポ対策のため拒否される。`FASTEMBED_CACHE_DIR` の実環境変数は設定ファイルの同項目より優先される。
+
+### 設定ファイルの探索順
+
+`kb-mcp` は起動のたびに以下の順序で `kb-mcp.toml` を探し、最初に見つかった
+ものだけを使う:
+
+| 優先 | 場所                                       | 備考                                                     |
+| ---- | ------------------------------------------ | -------------------------------------------------------- |
+| 1    | `--config <PATH>` (全 subcommand 共通)     | 指定したファイルが無ければエラー終了 (フォールバック禁止) |
+| 2    | `./kb-mcp.toml` (CWD 直下)                 | プロジェクトローカル KB に最適                           |
+| 3    | `<git-root>/kb-mcp.toml` (祖先方向に探索)  | CWD + 最大 19 祖先 (合計 20 ディレクトリ) を確認        |
+| 4    | `<binary-dir>/kb-mcp.toml`                 | 後方互換 / グローバル install 用フォールバック            |
+| 5    | (なし — 組み込み既定値)                    | この場合 `--kb-path` を CLI で必ず指定する必要あり        |
+
+`--config` に渡した `~` は全プラットフォームで home に展開する (`~` を展開
+しない Windows `cmd.exe` でも動く)。
+
+起動時に stderr へ `kb_mcp::config: loaded config source=...` が出るので、
+どの toml が実際に効いているかはログで確認できる。
+
+#### 例: プロジェクトに同梱する per-project KB
+
+```jsonc
+// repo-root/.mcp.json
+{
+  "mcpServers": {
+    "kb": { "command": "kb-mcp", "args": ["serve"] }
+  }
+}
+```
+
+`kb-mcp.toml` を `.mcp.json` の隣にコミットしておけば、Claude Code が
+プロジェクトを開いた時点で `kb-mcp serve` がリポジトリルートから起動し、
+CWD 探索でその `kb-mcp.toml` を拾う。`.mcp.json` 側に引数を書く必要が
+無くなる。
+
+#### 例: 1 セッションで複数 KB を併用
+
+```jsonc
+{
+  "mcpServers": {
+    "kb-personal": { "command": "kb-mcp", "args": ["serve", "--config", "~/kb/personal/kb-mcp.toml"] },
+    "kb-project":  { "command": "kb-mcp", "args": ["serve", "--config", "./kb-mcp.toml"] },
+    "kb-rust-docs":{ "command": "kb-mcp", "args": ["serve", "--config", "~/kb/rust-docs/kb-mcp.toml"] }
+  }
+}
+```
+
+各エントリは独立した MCP サーバとして動き、それぞれ自分の `kb-mcp.toml` と
+`.kb-mcp.db` を持つ。Claude からは MCP サーバ名で source を識別できる。
 
 ## 使い方
 
@@ -342,7 +392,7 @@ Golden YAML のリファレンス、指標の詳細説明、diff 出力の読み
 }
 ```
 
-あるいは、バイナリと同じディレクトリに `kb-mcp.toml` を置いて同じ項目を設定しているなら、`.mcp.json` はここまで縮められる:
+あるいは、[探索パス](#設定ファイルの探索順) のいずれかに `kb-mcp.toml` を置いて同じ項目を設定しているなら、`.mcp.json` はここまで縮められる:
 
 ```json
 {
