@@ -100,7 +100,7 @@ and stops at the first hit:
 | -------- | ----------------------------------------- | -------------------------------------------- |
 | 1        | `--config <PATH>` (any subcommand)        | Errors out if the file does not exist.       |
 | 2        | `./kb-mcp.toml` (current working dir)     | Most natural for project-local KBs.          |
-| 3        | `<git-root>/kb-mcp.toml` (walks up)       | Up to 20 ancestor levels; works in subdirs.  |
+| 3        | `<git-root>/kb-mcp.toml` (walks up)       | Checks CWD + up to 19 ancestors (20 dirs total). |
 | 4        | `<binary-dir>/kb-mcp.toml`                | Legacy / global-install fallback.            |
 | 5        | (no config — built-in defaults)           | `--kb-path` becomes mandatory on the CLI.    |
 
