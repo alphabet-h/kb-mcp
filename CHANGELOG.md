@@ -4,6 +4,8 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-27
+
 ### Fixed
 - `kb-mcp eval` no longer reports `nDCG@k > 1.0`. The previous DCG loop
   iterated `top` and counted any hit that matched at least one expected
@@ -135,7 +137,8 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...v0.3.0
