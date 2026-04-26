@@ -41,3 +41,8 @@ notify-debouncer-full = "0.6"
 globset = "0.4"
 # [feature 27] config discovery: cross-platform `~` 展開
 shellexpand = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
