@@ -1,0 +1,36 @@
+#!/bin/sh
+# Block pushes when source files would fail `cargo fmt --check`.
+#
+# CI runs `cargo fmt --all -- --check` (see CONTRIBUTING.md "Code style").
+# This hook runs the same check locally so a forgotten `cargo fmt` is caught
+# before the push reaches GitHub Actions.
+#
+# Enable in a fresh clone with:
+#   git config core.hooksPath .githooks
+#
+# To bypass for an emergency push (rarely justified): `git push --no-verify`.
+
+set -e
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-push: cargo not found in PATH — skipping fmt check." >&2
+    exit 0
+fi
+
+echo "pre-push: running cargo fmt --check ..."
+if ! cargo fmt --all -- --check; then
+    cat >&2 <<'EOF'
+
+✗ cargo fmt --check failed — push aborted.
+
+  Run:
+      cargo fmt --all
+      git add -u && git commit -m "style: apply cargo fmt"
+
+  Then retry the push. To bypass (rarely justified): git push --no-verify
+EOF
+    exit 1
+fi
+
+echo "pre-push: cargo fmt OK."
+exit 0
