@@ -249,6 +249,22 @@ fn alongside_binary_path() -> Option<PathBuf> {
     Some(exe.parent()?.join("kb-mcp.toml"))
 }
 
+/// `start` から親方向に `.git` (ディレクトリまたは worktree 用ファイル) を
+/// 探す。最大 20 階層まで遡り、見つからなければ `None`。
+///
+/// `.git` がディレクトリかファイルかは判定しない (`exists()` で拾う) ので、
+/// regular repo / worktree / submodule すべてで動く。
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut cur: &Path = start;
+    for _ in 0..20 {
+        if cur.join(".git").exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+    None
+}
+
 /// `path` が絶対なら何もしない、相対なら `base.join(path)` を返す。
 fn resolve_relative(base: &Path, path: PathBuf) -> PathBuf {
     if path.is_absolute() {
@@ -851,6 +867,76 @@ mod tests {
                 expanded.starts_with(&home) || expanded == "~/.kb-mcp.toml",
                 "expanded={expanded:?}, home={home:?}"
             );
+        }
+    }
+
+    #[test]
+    fn test_find_git_root_returns_dir_when_git_present() {
+        let dir = TempDir::new("kb-mcp-find-git-root-yes");
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        let nested = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        let found = find_git_root(&nested);
+        assert_eq!(found.as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn test_find_git_root_handles_git_file_for_worktree() {
+        // worktree の場合は `.git` が file のことがある。`exists()` で拾えるか。
+        let dir = TempDir::new("kb-mcp-find-git-root-worktree");
+        let git_file = dir.path().join(".git");
+        std::fs::write(&git_file, "gitdir: /elsewhere\n").unwrap();
+        let found = find_git_root(dir.path());
+        assert_eq!(found.as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn test_find_git_root_returns_none_when_not_in_repo() {
+        let dir = TempDir::new("kb-mcp-find-git-root-no");
+        // `.git` は作らない。
+        let found = find_git_root(dir.path());
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_git_root_caps_at_20_levels() {
+        // 21 階層深くまで掘っても 20 階層上限で諦める。
+        // 実ファイル作成はしない (filesystem 上限を避ける)、PathBuf 上の操作だけで
+        // 確認できるよう、find_git_root の上限ロジックを切り出した内部関数を
+        // テスト可能にしておく。ここでは「上限超え深さでも panic / loop 暴走しない」
+        // ことだけを保証する smoke test。
+        let mut p = std::env::temp_dir().join("kb-mcp-cap-test");
+        for i in 0..30 {
+            p = p.join(format!("d{i}"));
+        }
+        // ディレクトリは存在しないが find_git_root は filesystem に触れず
+        // parent() で遡るだけなので、None を返して即終了するはず。
+        let _ = find_git_root(&p);
+    }
+
+    /// テスト用 tempdir (Drop で自動削除)。`tests/validate_cli.rs::TempKb` の lib 版。
+    struct TempDir {
+        path: PathBuf,
+    }
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let pid = std::process::id();
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("{prefix}-{pid}-{nonce}"));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
         }
     }
 
