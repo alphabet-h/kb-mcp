@@ -13,3 +13,9 @@ installers = []
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where to host releases
 hosting = "github"
+# Disable static-CRT linking on Windows. The default (true) forces /defaultlib:libcmt
+# which conflicts with `ort-sys` (ONNX Runtime) — its prebuilt binary is linked against
+# the dynamic UCRT, causing LNK2001 unresolved external symbols (__imp_tolower etc.).
+# Dynamic CRT means kb-mcp.exe depends on ucrtbase.dll / vcruntime140.dll, both shipped
+# with Windows 10+ (and the VC++ Redistributable on older Windows).
+msvc-crt-static = false
