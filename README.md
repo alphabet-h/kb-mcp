@@ -16,11 +16,12 @@ Download the archive for your platform from the [latest GitHub release](https://
 
 | Platform | Archive |
 | --- | --- |
-| Linux x86_64 | `kb-mcp-x86_64-unknown-linux-gnu.tar.xz` |
-| Linux aarch64 | `kb-mcp-aarch64-unknown-linux-gnu.tar.xz` |
+| Linux x86_64 (glibc 2.38+ / Ubuntu 24.04+ / Debian 13+ / RHEL 9.5+) | `kb-mcp-x86_64-unknown-linux-gnu.tar.xz` |
+| Linux aarch64 (glibc 2.38+) | `kb-mcp-aarch64-unknown-linux-gnu.tar.xz` |
 | macOS Apple Silicon | `kb-mcp-aarch64-apple-darwin.tar.xz` |
-| macOS Intel | `kb-mcp-x86_64-apple-darwin.tar.xz` |
-| Windows x86_64 | `kb-mcp-x86_64-pc-windows-msvc.zip` |
+| Windows x86_64 (Windows 10+) | `kb-mcp-x86_64-pc-windows-msvc.zip` |
+
+> **Intel Mac (`x86_64-apple-darwin`)** is not shipped as a prebuilt: the upstream ONNX Runtime crate (`ort-sys`) does not provide a binary for that target. Build from source as described below.
 
 Each archive ships the binary plus `CHANGELOG.md`, `LICENSE-MIT`, `LICENSE-APACHE`, and `README.md`. Verify the SHA-256 checksum (each release exposes `sha256.sum` and per-archive `*.sha256` files) before running.
 
