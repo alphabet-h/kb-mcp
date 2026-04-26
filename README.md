@@ -8,7 +8,25 @@ A live-sync file watcher keeps the index fresh on manual edits, `git pull`, and 
 
 > **日本語版**: [README.ja.md](./README.ja.md)
 
-## Build
+## Install
+
+### Pre-built binaries (recommended for non-Rust users)
+
+Download the archive for your platform from the [latest GitHub release](https://github.com/alphabet-h/kb-mcp/releases/latest), extract it, and place `kb-mcp` (or `kb-mcp.exe` on Windows) somewhere on `PATH`. Available targets:
+
+| Platform | Archive |
+| --- | --- |
+| Linux x86_64 | `kb-mcp-x86_64-unknown-linux-gnu.tar.xz` |
+| Linux aarch64 | `kb-mcp-aarch64-unknown-linux-gnu.tar.xz` |
+| macOS Apple Silicon | `kb-mcp-aarch64-apple-darwin.tar.xz` |
+| macOS Intel | `kb-mcp-x86_64-apple-darwin.tar.xz` |
+| Windows x86_64 | `kb-mcp-x86_64-pc-windows-msvc.zip` |
+
+Each archive ships the binary plus `CHANGELOG.md`, `LICENSE-MIT`, `LICENSE-APACHE`, and `README.md`. Verify the SHA-256 checksum (each release exposes `sha256.sum` and per-archive `*.sha256` files) before running.
+
+ONNX runtime and SQLite are statically linked into the binary, so no extra DLLs are required. Embedding models (ONNX) are downloaded from HuggingFace on first run — see [Working around HuggingFace TLS failures](#working-around-huggingface-tls-failures) if your network blocks that.
+
+### Build from source
 
 ```bash
 cargo build --release
