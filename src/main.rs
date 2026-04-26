@@ -322,9 +322,14 @@ fn require_kb_path(cli_value: Option<PathBuf>, config_default: Option<PathBuf>) 
 
 fn main() -> anyhow::Result<()> {
     // tracing-subscriber は config 探索ログを出すために main の最初で初期化。
-    // EnvFilter feature が有効でない場合は with_max_level で INFO 以上を出す。
+    // RUST_LOG 未設定時は info 以上を出す既定値。
+    // try_init を使うのは embedded / 別 init とのレース時に panic させないため
+    // (現状は他に init 箇所はないが、防御的選択)。
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .try_init();
 

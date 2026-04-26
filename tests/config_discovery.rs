@@ -49,7 +49,10 @@ impl Drop for TempDir {
 
 #[test]
 fn test_explicit_config_missing_fails_fast() {
-    let Some(bin) = kb_mcp_bin() else { return };
+    let Some(bin) = kb_mcp_bin() else {
+        eprintln!("kb-mcp binary not built — skipping");
+        return;
+    };
     let dir = TempDir::new("kb-mcp-disc-explicit-miss");
     let nope = dir.path().join("nope.toml");
     let out = Command::new(&bin)
