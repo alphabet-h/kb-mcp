@@ -170,16 +170,18 @@ impl Config {
                     resolved.display()
                 ));
             }
-            let cfg = Self::load_from(&resolved)
-                .with_context(|| format!("failed to load config from --config {}", resolved.display()))?;
+            let cfg = Self::load_from(&resolved).with_context(|| {
+                format!("failed to load config from --config {}", resolved.display())
+            })?;
             return Ok((cfg, ConfigSource::Explicit));
         }
 
         // 2. CWD 直下
         let cwd_toml = cwd.join("kb-mcp.toml");
         if cwd_toml.exists() {
-            let cfg = Self::load_from(&cwd_toml)
-                .with_context(|| format!("failed to load config from cwd {}", cwd_toml.display()))?;
+            let cfg = Self::load_from(&cwd_toml).with_context(|| {
+                format!("failed to load config from cwd {}", cwd_toml.display())
+            })?;
             return Ok((cfg, ConfigSource::Cwd));
         }
 
@@ -933,7 +935,11 @@ mod tests {
         ];
         let labels: Vec<String> = variants.iter().map(|v| format!("{v:?}")).collect();
         let unique: std::collections::HashSet<_> = labels.iter().collect();
-        assert_eq!(unique.len(), variants.len(), "all variants must be distinct");
+        assert_eq!(
+            unique.len(),
+            variants.len(),
+            "all variants must be distinct"
+        );
     }
 
     #[test]
@@ -1029,7 +1035,10 @@ mod tests {
         let err = Config::discover_at(Some(&explicit_toml), dir.path())
             .expect_err("must error on missing explicit");
         let msg = format!("{err}");
-        assert!(msg.contains("--config"), "error must mention --config: {msg}");
+        assert!(
+            msg.contains("--config"),
+            "error must mention --config: {msg}"
+        );
         assert!(msg.contains("not found"), "error must say not found: {msg}");
     }
 
@@ -1093,8 +1102,8 @@ mod tests {
     fn test_discover_returns_default_when_none() {
         let dir = TempDir::new("kb-mcp-discover-none");
         let absent = dir.path().join("there-is-no-toml-here.toml");
-        let (cfg, src) = Config::discover_with_alongside(None, dir.path(), Some(&absent))
-            .expect("discover ok");
+        let (cfg, src) =
+            Config::discover_with_alongside(None, dir.path(), Some(&absent)).expect("discover ok");
         assert_eq!(src, ConfigSource::NotFound);
         assert!(cfg.is_empty());
     }

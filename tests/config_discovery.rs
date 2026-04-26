@@ -8,7 +8,11 @@ fn kb_mcp_bin() -> Option<PathBuf> {
     let target = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     #[cfg(windows)]
     let bin = target.join(profile).join("kb-mcp.exe");
     #[cfg(not(windows))]
@@ -31,7 +35,9 @@ impl TempDir {
         Self { path }
     }
     #[allow(dead_code)]
-    fn path(&self) -> &Path { &self.path }
+    fn path(&self) -> &Path {
+        &self.path
+    }
     #[allow(dead_code)]
     fn write(&self, rel: &str, content: &str) {
         let full = self.path.join(rel);
@@ -102,7 +108,10 @@ fn test_explicit_config_missing_fails_fast() {
         .output()
         .expect("spawn kb-mcp");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "expected non-zero exit, stderr={stderr}");
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit, stderr={stderr}"
+    );
     assert!(
         stderr.contains("--config") && stderr.contains("not found"),
         "stderr must mention `--config ... not found`: {stderr}"
@@ -122,7 +131,10 @@ fn test_explicit_config_takes_priority_over_cwd() {
     std::fs::create_dir_all(&kb).unwrap();
     std::fs::write(
         &explicit,
-        format!("kb_path = \"{}\"\n", kb.to_string_lossy().replace('\\', "/")),
+        format!(
+            "kb_path = \"{}\"\n",
+            kb.to_string_lossy().replace('\\', "/")
+        ),
     )
     .unwrap();
     // status は kb_path 配下に DB が無くても起動して exit 0 になる。stderr に source=Explicit が出る。
@@ -135,7 +147,10 @@ fn test_explicit_config_takes_priority_over_cwd() {
     ]);
     let err = stderr_str(&out);
     let plain = strip_ansi(&err);
-    assert!(plain.contains("source=Explicit"), "stderr must show Explicit: {err}");
+    assert!(
+        plain.contains("source=Explicit"),
+        "stderr must show Explicit: {err}"
+    );
 }
 
 #[test]
@@ -149,7 +164,10 @@ fn test_cwd_picked_when_no_explicit() {
     std::fs::create_dir_all(&kb).unwrap();
     dir.write(
         "kb-mcp.toml",
-        &format!("kb_path = \"{}\"\n", kb.to_string_lossy().replace('\\', "/")),
+        &format!(
+            "kb_path = \"{}\"\n",
+            kb.to_string_lossy().replace('\\', "/")
+        ),
     );
     let out = dir.run_kb_mcp(&["status"]);
     let err = stderr_str(&out);
@@ -169,7 +187,10 @@ fn test_walks_to_git_root() {
     std::fs::create_dir_all(&kb).unwrap();
     dir.write(
         "kb-mcp.toml",
-        &format!("kb_path = \"{}\"\n", kb.to_string_lossy().replace('\\', "/")),
+        &format!(
+            "kb_path = \"{}\"\n",
+            kb.to_string_lossy().replace('\\', "/")
+        ),
     );
     let nested = dir.path().join("a/b/c");
     std::fs::create_dir_all(&nested).unwrap();
@@ -181,7 +202,10 @@ fn test_walks_to_git_root() {
         .expect("spawn");
     let err = stderr_str(&out);
     let plain = strip_ansi(&err);
-    assert!(plain.contains("source=GitRoot"), "stderr must show GitRoot: {err}");
+    assert!(
+        plain.contains("source=GitRoot"),
+        "stderr must show GitRoot: {err}"
+    );
 }
 
 #[test]
@@ -238,7 +262,10 @@ fn test_explicit_with_tilde_expands() {
     std::fs::create_dir_all(&kb_in_home).unwrap();
     std::fs::write(
         &toml_in_home,
-        format!("kb_path = \"{}\"\n", kb_in_home.to_string_lossy().replace('\\', "/")),
+        format!(
+            "kb_path = \"{}\"\n",
+            kb_in_home.to_string_lossy().replace('\\', "/")
+        ),
     )
     .unwrap();
 
