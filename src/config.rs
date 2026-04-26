@@ -250,10 +250,12 @@ fn alongside_binary_path() -> Option<PathBuf> {
 }
 
 /// `start` から親方向に `.git` (ディレクトリまたは worktree 用ファイル) を
-/// 探す。最大 20 階層まで遡り、見つからなければ `None`。
+/// 探す。`start` 自身を含めて最大 20 ディレクトリ (= start + 19 祖先) を
+/// チェックし、見つからなければ `None`。
 ///
 /// `.git` がディレクトリかファイルかは判定しない (`exists()` で拾う) ので、
-/// regular repo / worktree / submodule すべてで動く。
+/// regular repo / worktree / submodule すべてで動く。NAS 暴走防止のため
+/// 階層数上限を設けている。
 fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut cur: &Path = start;
     for _ in 0..20 {
@@ -910,8 +912,9 @@ mod tests {
         for i in 0..30 {
             p = p.join(format!("d{i}"));
         }
-        // ディレクトリは存在しないが find_git_root は filesystem に触れず
-        // parent() で遡るだけなので、None を返して即終了するはず。
+        // ディレクトリは存在しないので exists() は毎回 false を返し、
+        // 20 イテレーションの上限に到達して None で終わる (panic / 無限ループ
+        // しないことだけを保証する smoke test)。
         let _ = find_git_root(&p);
     }
 
