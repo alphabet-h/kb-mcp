@@ -63,18 +63,21 @@ fn stderr_str(out: &std::process::Output) -> String {
 
 /// ANSI エスケープシーケンス (`ESC[...m` 等) を除去してプレーンテキストを返す。
 /// tracing-subscriber がターミナルを検知して色を付けた場合に備える。
+///
+/// 対応範囲: CSI シーケンス (`ESC [ <params> <final-byte>`)。tracing-subscriber が
+/// 出すのは SGR (`ESC[...m`) のみなのでこれで十分。それ以外の ESC シーケンス
+/// (`ESC c` 等の単発系) は ESC ごとプレーンテキストとして出力する pass-through。
+/// Test-only ヘルパなので allocation 効率より明瞭さ優先。
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // CSI sequence: ESC [ ... (終端はアルファベット)
-            if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
-                for ch in chars.by_ref() {
-                    if ch.is_ascii_alphabetic() {
-                        break;
-                    }
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            // CSI sequence: ESC [ ... (終端は ASCII alphabetic)
+            chars.next(); // consume '['
+            for ch in chars.by_ref() {
+                if ch.is_ascii_alphabetic() {
+                    break;
                 }
             }
         } else {
@@ -228,14 +231,16 @@ fn test_explicit_with_tilde_expands() {
     );
     let toml_in_home = home.join(format!("{stamp}.toml"));
     let kb_in_home = home.join(format!("{stamp}-kb"));
+    // Drop guard を **先に** 構築。下の `unwrap()` が panic しても、既に作られた
+    // ファイル / ディレクトリは scope 終了で確実に消える (Cleanup::drop は
+    // remove_file / remove_dir_all を `let _` で握り潰すので、未作成パスでも安全)。
+    let _cleanup = scopeguard_like(toml_in_home.clone(), kb_in_home.clone());
     std::fs::create_dir_all(&kb_in_home).unwrap();
     std::fs::write(
         &toml_in_home,
         format!("kb_path = \"{}\"\n", kb_in_home.to_string_lossy().replace('\\', "/")),
     )
     .unwrap();
-    // Drop guard 代わり: 関数末尾で削除。
-    let _cleanup = scopeguard_like(toml_in_home.clone(), kb_in_home.clone());
 
     let tilde_arg = format!("~/{stamp}.toml");
     let out = Command::new(bin)
