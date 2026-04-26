@@ -7,9 +7,9 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 ### Added
 - `--config <PATH>` global CLI flag for selecting an arbitrary `kb-mcp.toml`.
   `~` is expanded on all platforms. Missing path errors fast (no fallback).
-- Discovery now walks up to 20 directories (CWD + up to 19 `.git` ancestor
-  levels) to find a project-root `kb-mcp.toml`, and falls back to
-  `./kb-mcp.toml` (CWD) before the legacy binary-side location.
+- Discovery now checks `./kb-mcp.toml` (CWD) first, then walks up to 19
+  `.git` ancestor levels for a project-root `kb-mcp.toml`, before falling
+  back to the legacy binary-side location.
 
 ### Changed
 - `kb_mcp::config: loaded config source=...` is logged to stderr at startup

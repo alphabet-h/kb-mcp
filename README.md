@@ -18,10 +18,10 @@ The binary is produced at `target/release/kb-mcp` (or `kb-mcp.exe` on Windows).
 
 ## Optional config file
 
-Any CLI option below can be given a default via `kb-mcp.toml` placed **next to the binary**. CLI arguments always win; the file just removes repetition for a given deployment. Copy `kb-mcp.toml.example` to `kb-mcp.toml` and edit:
+Any CLI option below can be given a default via a `kb-mcp.toml` file. CLI arguments always win; the file just removes repetition for a given deployment. The discovery order is described in [Config file discovery](#config-file-discovery) below — the most common placement is the project root (CWD) or alongside the binary. Copy `kb-mcp.toml.example` to `kb-mcp.toml` and edit:
 
 ```toml
-# kb-mcp.toml (sits next to kb-mcp / kb-mcp.exe)
+# kb-mcp.toml (placed in the project root, the .git ancestor, or next to kb-mcp)
 kb_path = "/path/to/knowledge-base"
 model = "bge-m3"
 reranker = "bge-v2-m3"
@@ -392,7 +392,7 @@ For agent workflows, a more conservative alternative: load the reranker but leav
 }
 ```
 
-Or, if you placed a `kb-mcp.toml` next to the binary with those options set, the `.mcp.json` can shrink to:
+Or, if you placed a `kb-mcp.toml` somewhere on the [discovery path](#config-file-discovery) with those options set, the `.mcp.json` can shrink to:
 
 ```json
 {

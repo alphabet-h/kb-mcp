@@ -18,10 +18,10 @@ cargo build --release
 
 ## 設定ファイル (任意)
 
-以下の CLI オプションはすべて、バイナリと**同じディレクトリ**に置いた `kb-mcp.toml` で既定値を与えられる。CLI 引数は常に優先され、設定ファイルは単に同じデプロイでの記述の繰り返しを減らすためのもの。`kb-mcp.toml.example` を `kb-mcp.toml` にコピーして編集する:
+以下の CLI オプションはすべて `kb-mcp.toml` で既定値を与えられる。CLI 引数は常に優先され、設定ファイルは単に同じデプロイでの記述の繰り返しを減らすためのもの。配置場所の探索順は [設定ファイルの探索順](#設定ファイルの探索順) を参照 — 最も一般的なのはプロジェクトルート (CWD) かバイナリの隣。`kb-mcp.toml.example` を `kb-mcp.toml` にコピーして編集する:
 
 ```toml
-# kb-mcp.toml (kb-mcp / kb-mcp.exe と同じディレクトリに置く)
+# kb-mcp.toml (プロジェクトルート / .git 祖先 / kb-mcp の隣 のいずれかに置く)
 kb_path = "/path/to/knowledge-base"
 model = "bge-m3"
 reranker = "bge-v2-m3"
@@ -392,7 +392,7 @@ Golden YAML のリファレンス、指標の詳細説明、diff 出力の読み
 }
 ```
 
-あるいは、バイナリと同じディレクトリに `kb-mcp.toml` を置いて同じ項目を設定しているなら、`.mcp.json` はここまで縮められる:
+あるいは、[探索パス](#設定ファイルの探索順) のいずれかに `kb-mcp.toml` を置いて同じ項目を設定しているなら、`.mcp.json` はここまで縮められる:
 
 ```json
 {

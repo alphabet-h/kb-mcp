@@ -25,8 +25,10 @@ use std::path::{Path, PathBuf};
     long_about = "MCP server for semantic search over a knowledge base of Markdown\n\
                   (and optionally plain-text, opt-in via [parsers].enabled) files.\n\
                   \n\
-                  Any of the options below can be provided via `kb-mcp.toml` placed\n\
-                  in the same directory as the binary. CLI arguments override the file."
+                  Any of the options below can be provided via `kb-mcp.toml`. The file\n\
+                  is discovered in priority order: --config <PATH>, then ./kb-mcp.toml,\n\
+                  then walking up to the .git ancestor, then alongside the binary.\n\
+                  CLI arguments override the file. See README for details."
 )]
 struct Cli {
     /// Path to a `kb-mcp.toml` config file. Overrides discovery (CWD / .git

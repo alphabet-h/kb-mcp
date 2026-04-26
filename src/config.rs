@@ -1066,6 +1066,30 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_cwd_wins_over_git_root() {
+        // CWD に toml があり、かつ .git 祖先にも toml がある場合 → CWD が勝つ。
+        #[cfg(windows)]
+        let (cwd_kb, git_kb) = ("C:/cwd-wins", "C:/git-loses");
+        #[cfg(not(windows))]
+        let (cwd_kb, git_kb) = ("/cwd-wins", "/git-loses");
+        let dir = TempDir::new("kb-mcp-discover-cwd-vs-git");
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        // git root 直下の toml
+        std::fs::write(
+            dir.path().join("kb-mcp.toml"),
+            format!("kb_path = \"{git_kb}\"\n"),
+        )
+        .unwrap();
+        // ネストして CWD にも toml
+        let cwd = dir.path().join("project/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("kb-mcp.toml"), format!("kb_path = \"{cwd_kb}\"\n")).unwrap();
+        let (cfg, src) = Config::discover_at(None, &cwd).expect("discover ok");
+        assert_eq!(src, ConfigSource::Cwd);
+        assert_eq!(cfg.kb_path.as_deref(), Some(Path::new(cwd_kb)));
+    }
+
+    #[test]
     fn test_discover_returns_default_when_none() {
         let dir = TempDir::new("kb-mcp-discover-none");
         let absent = dir.path().join("there-is-no-toml-here.toml");
