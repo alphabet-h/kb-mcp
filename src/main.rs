@@ -29,6 +29,12 @@ use std::path::{Path, PathBuf};
                   in the same directory as the binary. CLI arguments override the file."
 )]
 struct Cli {
+    /// Path to a `kb-mcp.toml` config file. Overrides discovery (CWD / .git
+    /// ancestor / binary-side). Errors fast if the file does not exist.
+    /// `~` is expanded to the home directory on all platforms.
+    #[arg(long, value_name = "PATH", global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -315,11 +321,23 @@ fn require_kb_path(cli_value: Option<PathBuf>, config_default: Option<PathBuf>) 
 }
 
 fn main() -> anyhow::Result<()> {
-    // 設定ファイルを先に読み、FASTEMBED_CACHE_DIR を embedder 初期化より前に env 反映する。
-    let cfg = Config::load_alongside_binary()?;
-    cfg.apply_cache_dir_env();
+    // tracing-subscriber は config 探索ログを出すために main の最初で初期化。
+    // EnvFilter feature が有効でない場合は with_max_level で INFO 以上を出す。
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(std::io::stderr)
+        .try_init();
 
+    // CLI parse を先に行い、--config の値を discover に渡す。
+    // discover が FASTEMBED_CACHE_DIR を解決するので embedder 初期化より前に来る順序は維持。
     let cli = Cli::parse();
+    let (cfg, source) = Config::discover(cli.config.as_deref())?;
+    tracing::info!(
+        target: "kb_mcp::config",
+        source = ?source,
+        "loaded config"
+    );
+    cfg.apply_cache_dir_env();
 
     match cli.command {
         Commands::Serve {
