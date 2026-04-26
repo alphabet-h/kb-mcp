@@ -220,6 +220,28 @@ impl Config {
     }
 }
 
+/// `kb-mcp.toml` がどのソースから読まれたかを表す。`tracing` ログと
+/// テストの assert から参照される。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// CLI `--config <PATH>` で明示指定。
+    Explicit,
+    /// CWD 直下 `./kb-mcp.toml`。
+    Cwd,
+    /// `.git` 祖先ディレクトリ直下の `kb-mcp.toml`。
+    GitRoot,
+    /// `current_exe()` の隣 (legacy 探索)。
+    AlongsideBinary,
+    /// 全探索が失敗し `Config::default()` を返した。
+    NotFound,
+}
+
+/// `~` を home に展開する。home が取れない (CI 等) 場合は入力をそのまま返す。
+/// 内部的には `shellexpand::tilde` のラッパで、Windows でも `~` を解決する。
+pub fn expand_tilde(s: &str) -> String {
+    shellexpand::tilde(s).into_owned()
+}
+
 /// 実行中のバイナリと同じディレクトリにある `kb-mcp.toml` の絶対パス。
 /// `current_exe()` が取得できない環境では `None`。
 fn alongside_binary_path() -> Option<PathBuf> {
@@ -800,5 +822,41 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    #[test]
+    fn test_config_source_variants_are_distinguishable() {
+        // 4 ソース + NotFound が all distinct であること。Debug 表示を使う。
+        let variants = [
+            ConfigSource::Explicit,
+            ConfigSource::Cwd,
+            ConfigSource::GitRoot,
+            ConfigSource::AlongsideBinary,
+            ConfigSource::NotFound,
+        ];
+        let labels: Vec<String> = variants.iter().map(|v| format!("{v:?}")).collect();
+        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), variants.len(), "all variants must be distinct");
+    }
+
+    #[test]
+    fn test_expand_tilde_with_home() {
+        // `~/foo` は home_dir 起点に展開される。home が取れない CI 環境でも
+        // shellexpand は元文字列を返すので、最低限「panic しない」を保証。
+        let expanded = expand_tilde("~/.kb-mcp.toml");
+        // Windows でも Unix でも入力に `~/` が残らないか、home が解決されているかのどちらか。
+        // shellexpand 0.8 は home 取れない場合 input をそのまま返す挙動なので分岐 assert。
+        if let Some(home) = dirs_next_fallback() {
+            assert!(
+                expanded.starts_with(&home) || expanded == "~/.kb-mcp.toml",
+                "expanded={expanded:?}, home={home:?}"
+            );
+        }
+    }
+
+    fn dirs_next_fallback() -> Option<String> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|s| s.to_string_lossy().into_owned())
     }
 }

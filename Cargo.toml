@@ -39,3 +39,5 @@ notify = "8"
 notify-debouncer-full = "0.6"
 # [feature 26] path_globs filter 用
 globset = "0.4"
+# [feature 27] config discovery: cross-platform `~` 展開
+shellexpand = "3"
