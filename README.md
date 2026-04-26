@@ -354,6 +354,8 @@ See [docs/eval.md](docs/eval.md) for the golden YAML reference, metric definitio
 
 ## Connecting to Claude Code / Cursor
 
+> **Looking for full deployment recipes?** See [`examples/deployments/`](./examples/deployments/) for ready-to-adapt configs covering three patterns: personal local, NAS-shared (one writer + many read-only clients), and intranet HTTP server (one server + many clients). The snippets below are the canonical stdio entry point you'll find in those recipes.
+
 Add the following to `.mcp.json` in your project root (or the equivalent MCP config for your client):
 
 ```json
