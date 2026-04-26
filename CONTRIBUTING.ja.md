@@ -10,6 +10,16 @@
 - Git
 - ONNX モデルキャッシュ用に約 3 GB の空き容量 (`--ignored` テスト実行時のみ)
 
+## 初回セットアップ
+
+clone 後に一度だけ、リポジトリ同梱の git hooks を有効化する:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+これで `.githooks/pre-push` が有効になり、push のたびに `cargo fmt --all -- --check` が走るので、`cargo fmt` の入れ忘れが CI に到達する前にローカルで止まる。hook 本体はリポジトリで共有 — [`.githooks/pre-push`](./.githooks/pre-push) を参照。緊急時に bypass したい場合は push に `--no-verify` を付ける。
+
 ## ビルドとテスト
 
 ```bash

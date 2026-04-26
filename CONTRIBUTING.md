@@ -10,6 +10,16 @@ Thanks for considering a contribution! This document covers the essentials of wo
 - Git
 - ~3 GB of disk space for ONNX model caches when running ignored tests
 
+## First-time setup
+
+After cloning, opt in to the repository's git hooks once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This activates `.githooks/pre-push`, which runs `cargo fmt --all -- --check` before every push so a missed `cargo fmt` cannot reach CI. The hook is shared with the rest of the team — see [`.githooks/pre-push`](./.githooks/pre-push). To bypass it in an emergency, append `--no-verify` to the push.
+
 ## Build and test
 
 ```bash
