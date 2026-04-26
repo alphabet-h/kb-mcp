@@ -4,6 +4,8 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-26
+
 ### Added
 - `--config <PATH>` global CLI flag for selecting an arbitrary `kb-mcp.toml`.
   `~` is expanded on all platforms. Missing path errors fast (no fallback).
@@ -19,6 +21,11 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 ### Compatibility
 - Fully back-compat: the binary-side `kb-mcp.toml` (`<exe-dir>/kb-mcp.toml`)
   is still picked up when no higher-priority source is present.
+
+### Internal
+- `.githooks/pre-push` enforces `cargo fmt --check` before push so a
+  forgotten `cargo fmt` cannot reach CI. Opt-in once via
+  `git config core.hooksPath .githooks` (see CONTRIBUTING.md).
 
 ## [0.3.0] - 2026-04-26
 
@@ -95,7 +102,8 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alphabet-h/kb-mcp/releases/tag/v0.1.0
