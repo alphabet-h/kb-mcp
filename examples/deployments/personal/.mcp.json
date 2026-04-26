@@ -1,0 +1,10 @@
+{
+  "_comment_personal": "Personal local deployment — stdio, single client. The empty `args` relies on `kb-mcp.toml` being on the discovery path (CWD / .git ancestor / binary side). Drop this in your project root next to kb-mcp.toml, or point Claude Code at it via `~/.config/claude/.mcp.json`.",
+  "mcpServers": {
+    "ai-knowledge": {
+      "type": "stdio",
+      "command": "kb-mcp",
+      "args": ["serve"]
+    }
+  }
+}
