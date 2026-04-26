@@ -117,17 +117,22 @@ pub fn reciprocal_rank(expected: &[ExpectedHit], top: &[HitRecord]) -> f64 {
     0.0
 }
 
-/// nDCG@k (binary relevance)。
-/// DCG = Σ_{rank ≤ k, hit} 1 / log2(rank + 1)
+/// nDCG@k (binary relevance, value range [0, 1])。
+///
+/// DCG  = Σ_{e ∈ expected} 1 / log2(first_hit_rank(e) + 1)  (rank ≤ k に制限、無ければ寄与 0)
 /// IDCG = Σ_{i=1..=min(|expected|, k)} 1 / log2(i + 1)
+///
+/// expected ごとに「最初に hit した rank」を 1 回だけ gain として積む実装。
+/// 同一 path の複数 chunk が top-k に並んでも DCG が IDCG を超えないことが保証される
+/// (heading None の expected で path-only 一致する chunk が複数並ぶケースでも上限 1.0)。
 pub fn ndcg_at_k(expected: &[ExpectedHit], top: &[HitRecord], k: usize) -> f64 {
     if expected.is_empty() || top.is_empty() || k == 0 {
         return 0.0;
     }
-    let window = top.iter().take(k);
-    let dcg: f64 = window
-        .clone()
-        .filter(|h| expected.iter().any(|e| is_hit(e, h)))
+    let window: Vec<&HitRecord> = top.iter().take(k).collect();
+    let dcg: f64 = expected
+        .iter()
+        .filter_map(|e| window.iter().find(|h| is_hit(e, h)).copied())
         .map(|h| 1.0 / ((h.rank as f64 + 1.0).log2()))
         .sum();
     let ideal_count = expected.len().min(k);
@@ -831,6 +836,47 @@ mod tests {
     fn test_ndcg_empty_expected() {
         let top = vec![hit(1, "a.md", None)];
         assert_eq!(ndcg_at_k(&[], &top, 5), 0.0);
+    }
+
+    /// Regression: 同一 expected (heading None) に対して同 path の異 heading hit が
+    /// top-k に複数並ぶシナリオで nDCG が 1.0 を超えてはならない。
+    /// 旧実装は top 側 loop で多重カウントし >1.0 を返していた。
+    #[test]
+    fn test_ndcg_multi_chunk_per_expected_capped_at_one() {
+        let expected = vec![exp("docs/X.md", None)];
+        let top = vec![
+            hit(1, "docs/X.md", Some("Section A")),
+            hit(2, "docs/X.md", Some("Section B")),
+            hit(3, "docs/X.md", Some("Section C")),
+            hit(4, "other.md", None),
+            hit(5, "other2.md", None),
+        ];
+        let score = ndcg_at_k(&expected, &top, 10);
+        assert!(score <= 1.0 + 1e-9, "nDCG must not exceed 1.0, got {score}");
+        // 最初の hit は rank 1 (ideal) なので 1.0 ぴったり。
+        assert!(
+            (score - 1.0).abs() < 1e-9,
+            "expected exactly 1.0, got {score}"
+        );
+    }
+
+    /// Regression (mixed): 1 件目 expected は rank 2 で初 hit、2 件目 expected は
+    /// 同 path の別 chunk (rank 1) で hit。各 expected は最も rank の小さい hit
+    /// で 1 回ずつカウントされ、上限 1.0 を超えない。
+    #[test]
+    fn test_ndcg_two_expected_one_with_multiple_chunk_hits() {
+        let expected = vec![
+            exp("a.md", None), // ← path-only、複数 chunk が hit する
+            exp("b.md", None),
+        ];
+        let top = vec![
+            hit(1, "a.md", Some("Intro")),
+            hit(2, "a.md", Some("Body")),
+            hit(3, "b.md", Some("Concl")),
+            hit(4, "x.md", None),
+        ];
+        let score = ndcg_at_k(&expected, &top, 5);
+        assert!(score <= 1.0 + 1e-9, "nDCG must not exceed 1.0, got {score}");
     }
 
     #[test]

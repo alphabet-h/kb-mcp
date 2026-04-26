@@ -4,6 +4,17 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Fixed
+- `kb-mcp eval` no longer reports `nDCG@k > 1.0`. The previous DCG loop
+  iterated `top` and counted any hit that matched at least one expected
+  entry, which over-counted gains when several chunks of the same doc
+  (e.g. different headings under one path-only `expected`) appeared in
+  top-k. The fix iterates `expected` and uses each entry's first matching
+  rank exactly once, restoring the standard `[0, 1]` value range. Recall
+  and MRR were not affected. Existing `.kb-mcp-eval-history.json` files
+  still load, but historic `nDCG@k` values are not comparable across the
+  fix boundary — re-run `kb-mcp eval` to establish a fresh baseline.
+
 ## [0.4.1] - 2026-04-26
 
 ### Internal
