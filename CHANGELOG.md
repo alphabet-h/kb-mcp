@@ -4,6 +4,22 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Added
+- `--config <PATH>` global CLI flag for selecting an arbitrary `kb-mcp.toml`.
+  `~` is expanded on all platforms. Missing path errors fast (no fallback).
+- Discovery now walks up to 20 directories (CWD + up to 19 `.git` ancestor
+  levels) to find a project-root `kb-mcp.toml`, and falls back to
+  `./kb-mcp.toml` (CWD) before the legacy binary-side location.
+
+### Changed
+- `kb_mcp::config: loaded config source=...` is logged to stderr at startup
+  so the active config file is observable. `tracing-subscriber` now uses
+  the `env-filter` feature so `RUST_LOG` is honored (default = `info`).
+
+### Compatibility
+- Fully back-compat: the binary-side `kb-mcp.toml` (`<exe-dir>/kb-mcp.toml`)
+  is still picked up when no higher-priority source is present.
+
 ## [0.3.0] - 2026-04-26
 
 ### Added
