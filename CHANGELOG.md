@@ -4,6 +4,24 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Internal
+- Added `.github/workflows/nightly.yml` (F-38). Runs daily at UTC
+  04:00 (and on `workflow_dispatch`) with two jobs:
+  - `ignored-tests`: `cargo test -- --include-ignored` on
+    `ubuntu-latest` with `~/.cache/fastembed` cached via
+    `actions/cache@v4` so the BGE-small / BGE-M3 / BGE-reranker-v2-m3
+    downloads are paid once. Catches regressions in the model-DL
+    test path (`embedder` / `reranker` / `tests/eval_cli.rs` /
+    `tests/http_transport.rs` / `tests/search_cli.rs`) that the
+    fast `cargo test` lane on PRs cannot exercise.
+  - `cargo-audit`: installs `cargo-audit` and runs it against the
+    dep tree, so a fresh RustSec advisory becomes a job failure
+    (notification surface). Distinct lane so a temporarily-flaky
+    advisory does not block the ignored-tests run.
+  - `eval` regression detection (`kb-mcp eval --fail-on-regression`)
+    is split out — that flag does not exist yet and is tracked
+    separately from F-38's CI scope.
+
 ## [0.5.0] - 2026-04-29
 
 ### Security

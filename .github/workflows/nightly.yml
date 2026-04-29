@@ -1,0 +1,77 @@
+name: Nightly
+
+# 毎日 UTC 04:00 (≒ JST 13:00) に走らせる「重めの自動チェック」。
+# - cargo test -- --ignored: 通常 CI では skip している embedder / reranker 系
+#   実 DL を伴う test (#[ignore] が付いている 9 本) を一通り走らせる。
+#   ~/.cache/fastembed を actions/cache@v4 で挟むので、2 回目以降は HuggingFace
+#   からの再 DL は不要 (BGE-small ~130 MB / BGE-M3 ~2.3 GB / BGE-reranker
+#   ~2.3 GB)。
+# - cargo audit: 依存ツリーを RustSec advisory DB と突合。新しい advisory
+#   が出た時に nightly が fail することで notification として機能する。
+#
+# workflow_dispatch も付けてあるので、依存 bump 後やリリース前に手動トリガ
+# 可能。`gh workflow run nightly.yml` で起動できる。
+#
+# F-38 (2026-04-29 audit) で導入。eval regression detection は kb-mcp eval
+# 側に --fail-on-regression flag を入れる別 PR で追加予定。
+
+on:
+  schedule:
+    # cron は UTC。'0 4 * * *' = 毎日 UTC 04:00。
+    - cron: '0 4 * * *'
+  workflow_dispatch: {}
+
+# 同一 ref で同時実行を抑制 (手動 + schedule が重なった場合の保険)。
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ignored-tests:
+    name: ignored tests (model-DL)
+    runs-on: ubuntu-latest
+    # 初回は 5 GB 弱の DL があり得るので thoroughly 余裕を持つ。
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # fastembed のモデルキャッシュ。Linux runner では既定で
+      # ~/.cache/fastembed に展開される (src/embedder.rs::resolve_cache_dir
+      # の優先順位 #2)。本 repo は env で上書きしていないので default location
+      # で良い。Cargo.lock のハッシュを key に含めると ort/fastembed の major
+      # bump 時に cache が自然に invalidate される。
+      - name: Cache fastembed models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            fastembed-${{ runner.os }}-
+
+      - name: cargo test -- --ignored
+        # `--include-ignored` は ignored + 通常両方を走らせる。nightly では
+        # 通常の `cargo test` も合わせて走らせて、ignored だけ落ちる
+        # (model DL だけ壊れている) ケースを切り分けやすくする。
+        run: cargo test -- --include-ignored
+
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      # advisory にぶつかれば exit 1 で job fail = notification として機能する。
+      # 既知 advisory を一時的に許容したい場合は --ignore RUSTSEC-... を渡す。
+      - name: cargo audit
+        run: cargo audit
