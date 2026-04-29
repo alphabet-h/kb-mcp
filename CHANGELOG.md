@@ -4,6 +4,20 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Security
+- HTTP transport: surfaced `[transport.http].allowed_hosts` in
+  `kb-mcp.toml` so operators can extend the inbound `Host` header
+  allow-list past rmcp's default loopback-only set
+  (`["localhost", "127.0.0.1", "::1"]`) without dropping to
+  `disable_allowed_hosts`. Use this for LAN / intranet exposure
+  (`allowed_hosts = ["kb.example.lan", "192.168.1.10"]`); a `[]`
+  empty array still disables the check entirely (operator-acknowledged
+  opt-out). Additionally, kb-mcp now emits a `tracing::warn` at
+  startup when the bind address is non-loopback **and**
+  `allowed_hosts` is unset — a near-certain misconfiguration where
+  external requests would otherwise be silently 403'd by Host
+  validation. Closes F-33 from the 2026-04-29 audit.
+
 ### Internal
 - Hardened DB transaction protection across the three write paths flagged
   by the 2026-04-29 audit (F-32):

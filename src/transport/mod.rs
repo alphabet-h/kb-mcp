@@ -40,6 +40,15 @@ pub struct HttpTransportConfig {
     /// `127.0.0.1:3100` 等の SocketAddr 文字列 (bind address)。
     #[serde(default)]
     pub bind: Option<String>,
+
+    /// 受理する `Host` ヘッダの allow-list。`None` (省略) なら rmcp の
+    /// default = `["localhost", "127.0.0.1", "::1"]` (loopback only、DNS
+    /// rebinding 防御) を使う。LAN / イントラ公開時は
+    /// `["192.168.1.10", "kb.example.lan", ...]` のように明示する。
+    /// 空 `Vec` を渡すと rmcp は **全 Host を許可** する (
+    /// `disable_allowed_hosts` と同等)。public 公開時は推奨されない。
+    #[serde(default)]
+    pub allowed_hosts: Option<Vec<String>>,
 }
 
 /// `[transport]` config section.
@@ -60,7 +69,13 @@ pub struct TransportConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
     Stdio,
-    Http { addr: SocketAddr },
+    Http {
+        addr: SocketAddr,
+        /// `None` = rmcp の default loopback-only allow-list を使う。
+        /// `Some(vec)` = 明示 list (空 `Vec` を渡すと rmcp 側で全 Host
+        /// 許可になる)。F-33 で `kb-mcp.toml` から surface した。
+        allowed_hosts: Option<Vec<String>>,
+    },
 }
 
 const DEFAULT_HTTP_PORT: u16 = 3100;
@@ -71,6 +86,10 @@ impl Transport {
     /// - CLI `--transport` wins over config
     /// - `[transport.http]` 単独指定 (kind 省略) は HTTP 扱い (糖衣)
     /// - HTTP bind 解決: `--bind` (完全形) > `(127.0.0.1, --port)` > config bind > `127.0.0.1:3100`
+    /// - `allowed_hosts`: `[transport.http].allowed_hosts` が指定されていれば
+    ///   それ、無ければ rmcp default (loopback only) を保つ。CLI からは設定
+    ///   不可 (config 専用、誤設定を防ぐ意図 — ここを CLI で渡せると public
+    ///   bind 時に「うっかり全 Host 許可」が起きやすい)。
     pub fn resolve(
         cli_transport: Option<TransportKind>,
         cli_bind: Option<SocketAddr>,
@@ -97,7 +116,13 @@ impl Transport {
             TransportKindConfig::Stdio => Ok(Transport::Stdio),
             TransportKindConfig::Http => {
                 let addr = resolve_http_addr(cli_bind, cli_port, cfg)?;
-                Ok(Transport::Http { addr })
+                let allowed_hosts = cfg
+                    .and_then(|c| c.http.as_ref())
+                    .and_then(|h| h.allowed_hosts.clone());
+                Ok(Transport::Http {
+                    addr,
+                    allowed_hosts,
+                })
             }
         }
     }
@@ -146,6 +171,7 @@ mod tests {
             t,
             Transport::Http {
                 addr: "127.0.0.1:3100".parse().unwrap(),
+                allowed_hosts: None,
             }
         );
     }
@@ -157,6 +183,7 @@ mod tests {
             t,
             Transport::Http {
                 addr: "127.0.0.1:4000".parse().unwrap(),
+                allowed_hosts: None,
             }
         );
     }
@@ -174,6 +201,7 @@ mod tests {
             t,
             Transport::Http {
                 addr: "0.0.0.0:9000".parse().unwrap(),
+                allowed_hosts: None,
             }
         );
     }
@@ -196,6 +224,7 @@ mod tests {
             kind: None,
             http: Some(HttpTransportConfig {
                 bind: Some("127.0.0.1:5555".into()),
+                allowed_hosts: None,
             }),
         };
         let t = Transport::resolve(None, None, None, Some(&cfg)).unwrap();
@@ -203,6 +232,7 @@ mod tests {
             t,
             Transport::Http {
                 addr: "127.0.0.1:5555".parse().unwrap(),
+                allowed_hosts: None,
             }
         );
     }
@@ -213,10 +243,82 @@ mod tests {
             kind: Some(TransportKindConfig::Http),
             http: Some(HttpTransportConfig {
                 bind: Some("not-an-address".into()),
+                allowed_hosts: None,
             }),
         };
         let err = Transport::resolve(None, None, None, Some(&cfg)).expect_err("must reject");
         assert!(err.to_string().contains("SocketAddr"));
+    }
+
+    /// F-33: `[transport.http].allowed_hosts` が toml で明示されたら
+    /// それが `Transport::Http` に渡る。
+    #[test]
+    fn test_resolve_config_allowed_hosts_passes_through() {
+        let cfg = TransportConfig {
+            kind: Some(TransportKindConfig::Http),
+            http: Some(HttpTransportConfig {
+                bind: Some("0.0.0.0:3100".into()),
+                allowed_hosts: Some(vec![
+                    "kb.example.lan".to_string(),
+                    "192.168.1.10".to_string(),
+                ]),
+            }),
+        };
+        let t = Transport::resolve(None, None, None, Some(&cfg)).unwrap();
+        match t {
+            Transport::Http {
+                addr,
+                allowed_hosts,
+            } => {
+                assert_eq!(addr, "0.0.0.0:3100".parse().unwrap());
+                assert_eq!(
+                    allowed_hosts,
+                    Some(vec![
+                        "kb.example.lan".to_string(),
+                        "192.168.1.10".to_string()
+                    ])
+                );
+            }
+            _ => panic!("expected Transport::Http"),
+        }
+    }
+
+    /// F-33: `[transport.http].allowed_hosts` の deserialize は省略可。
+    /// toml に書かなければ `None` (= rmcp default loopback-only).
+    #[test]
+    fn test_http_transport_config_omits_allowed_hosts() {
+        let toml_str = r#"bind = "127.0.0.1:3100""#;
+        let cfg: HttpTransportConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.bind.as_deref(), Some("127.0.0.1:3100"));
+        assert_eq!(cfg.allowed_hosts, None);
+    }
+
+    /// F-33: 配列で書けばそれが Vec<String> に解釈される。
+    #[test]
+    fn test_http_transport_config_parses_allowed_hosts() {
+        let toml_str = r#"
+            bind = "0.0.0.0:3100"
+            allowed_hosts = ["kb.example.lan", "192.168.1.10"]
+        "#;
+        let cfg: HttpTransportConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.allowed_hosts,
+            Some(vec![
+                "kb.example.lan".to_string(),
+                "192.168.1.10".to_string(),
+            ])
+        );
+    }
+
+    /// F-33: 空配列も valid (rmcp 側で全 Host 許可になる、operator 自己責任)。
+    #[test]
+    fn test_http_transport_config_allows_empty_vec() {
+        let toml_str = r#"
+            bind = "0.0.0.0:3100"
+            allowed_hosts = []
+        "#;
+        let cfg: HttpTransportConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.allowed_hosts, Some(vec![]));
     }
 
     #[test]
