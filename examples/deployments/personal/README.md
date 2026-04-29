@@ -45,6 +45,7 @@ stdio.
 - **PostToolUse hook** is optional and complementary — see [`examples/hooks/`](../../hooks/). The watcher already covers manual edits; the hook is mainly useful when you want zero-latency rebuild after Claude itself writes files.
 - **Reranker** is loaded but off by default. Enable per-query with `rerank: true` in the MCP `search` call when you need it; the latency cost (~300-700 ms on CPU) is not worth paying for every search.
 - **Single client per server**. stdio only supports one MCP client at a time — fine for solo use; for multiple clients see [`intranet-http/`](../intranet-http/).
+- **`alwaysLoad: true`** in the example `.mcp.json` is a Claude Code v2.1.121+ option that forces kb-mcp's tools to be present at initial load instead of going through the tool-search shortlist. Recommended for RAG use ("I want to search anytime"). Drop it if first-startup latency (model download / index open) outweighs the win, or if your client predates v2.1.121. Other MCP clients ignore the field.
 
 ## When to step up to another recipe
 

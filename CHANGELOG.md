@@ -4,6 +4,16 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Documentation
+- `examples/deployments/{personal,nas-shared,intranet-http}/.mcp.json`
+  now set `"alwaysLoad": true` on the kb-mcp server entry. This is a
+  Claude Code v2.1.121+ option that forces kb-mcp's tools to be present
+  at initial load instead of going through the tool-search shortlist —
+  appropriate for the "search anytime" RAG use case. Other MCP clients
+  (Cursor, etc.) ignore the field. Each recipe README (en+ja) gains a
+  note covering when to keep it on vs drop it (initial-startup latency
+  trade-off, especially relevant for NAS-mounted KBs).
+
 ## [0.4.2] - 2026-04-27
 
 ### Fixed
