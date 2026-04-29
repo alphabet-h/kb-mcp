@@ -371,4 +371,32 @@ mod tests {
         let err = toml::from_str::<QualityFilterConfig>(src).unwrap_err();
         assert!(err.to_string().contains("bogus") || err.to_string().contains("unknown"));
     }
+
+    // -----------------------------------------------------------------------
+    // F-37: chunk_quality_score の値域 invariant property test
+    // -----------------------------------------------------------------------
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 256,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// chunk_quality_score は任意の (heading, content) に対して
+        /// [0.0, 1.0] の範囲かつ有限 f32 を返す。
+        /// (実装は `score.max(0.0)` で下限を保証、上限は減点しか加わらない
+        ///  構造で保証されているが、将来の penalty 追加時に値域を超える
+        ///  regression を proptest で機械的に catch する。)
+        #[test]
+        fn prop_chunk_quality_score_in_unit_range(
+            heading in proptest::option::of("[\\PC]{0,32}"),
+            content in "[\\PC]{0,4096}",
+        ) {
+            let s = chunk_quality_score(heading.as_deref(), &content);
+            proptest::prop_assert!(
+                s.is_finite() && (0.0..=1.0).contains(&s),
+                "chunk_quality_score must be in [0.0, 1.0] and finite, got {} (heading={:?}, content_len={})",
+                s, heading, content.len()
+            );
+        }
+    }
 }

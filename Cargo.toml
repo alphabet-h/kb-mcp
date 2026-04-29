@@ -42,6 +42,11 @@ globset = "0.4"
 # [feature 27] config discovery: cross-platform `~` 展開
 shellexpand = "3"
 
+[dev-dependencies]
+# Property-based testing for f64 invariant guards (recall_at_k / ndcg_at_k /
+# chunk_quality_score の値域 [0.0, 1.0] を proptest で固定)。
+proptest = "1"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

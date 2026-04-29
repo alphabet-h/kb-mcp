@@ -5,6 +5,14 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 ## [Unreleased]
 
 ### Internal
+- Added `proptest` 1 as a dev-dependency and locked the f64 value-range
+  invariants of the retrieval-quality metrics: `recall_at_k`,
+  `ndcg_at_k`, `reciprocal_rank`, and `chunk_quality_score` are now
+  property-tested over randomized inputs to ensure each result is
+  finite and in `[0.0, 1.0]`. This is a permanent guard against the
+  v0.4.2 nDCG > 1.0 class of regression — any future change that lets
+  one of these metrics escape the unit range will fail `cargo test`
+  before it can ship.
 - Migrated YAML parsing from `serde_yaml` 0.9 (deprecated and
   unmaintained — alias-bomb guards rely on the upstream limits in
   `unsafe-libyaml`) to `serde_yaml_bw` 2 ("YAML support for Serde
