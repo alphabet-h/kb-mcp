@@ -170,7 +170,7 @@ kb-mcp index --kb-path /path/to/knowledge-base --force   # full re-index
 kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # switch to BGE-M3 (1024 dim, multilingual)
 ```
 
-Scans source files under the given directory, skipping `.obsidian/`. By default only `.md` is picked up (the default behavior). Add `[parsers].enabled = ["md", "txt"]` to `kb-mcp.toml` to also index `.txt` files — their title is derived from the filename (`deep-dive-2026.txt` → `"deep dive 2026"`) and the whole body becomes a single chunk. Files whose content hash has not changed since the last run are skipped unless `--force` is passed.
+Scans source files under the given directory, skipping the default `exclude_dirs` set (`.obsidian`, `.git`, `node_modules`, `target`, `.vscode`, `.idea` — see "Directory exclusion" below). By default only `.md` is picked up. Add `[parsers].enabled = ["md", "txt"]` to `kb-mcp.toml` to also index `.txt` files — their title is derived from the filename (`deep-dive-2026.txt` → `"deep dive 2026"`) and the whole body becomes a single chunk. Files whose content hash has not changed since the last run are skipped unless `--force` is passed.
 
 `--model` accepts:
 - `bge-small-en-v1.5` (default) — 384 dim, English-focused, ~130 MB first download.
@@ -202,11 +202,13 @@ Practical recommendation: pick the model that matches your knowledge base's **pr
 kb-mcp serve --kb-path /path/to/knowledge-base
 kb-mcp serve --kb-path /path/to/knowledge-base --model bge-m3   # must match the indexed model
 kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder reranking
-kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP, multi-clientkb-mcp serve --kb-path ... --no-watch                           # disable live-sync```
+kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP, multi-client
+kb-mcp serve --kb-path ... --no-watch                           # disable live-sync
+```
 
-Starts the MCP server on stdio transport by default (one client at a time). Pass `--transport http --port <PORT>` (or `--bind <SOCKETADDR>`) to serve multiple clients simultaneously via Streamable HTTP — details in the [HTTP transport](#http-transport-for-multiple-simultaneous-clients-feature-18) section.
+Starts the MCP server on stdio transport by default (one client at a time). Pass `--transport http --port <PORT>` (or `--bind <SOCKETADDR>`) to serve multiple clients simultaneously via Streamable HTTP — details in the [HTTP transport](#http-transport-for-multiple-simultaneous-clients) section.
 
-The server exposes 6 tools (see below) and keeps the index in-process for low-latency queries. `--model` must match the model that built the current index, otherwise the server refuses to start with an actionable error message. A file watcher (enabled by default) re-indexes affected files when `--kb-path` changes — see [Live-sync via file watcher](#live-sync-via-file-watcher-feature-12).
+The server exposes 6 tools (see below) and keeps the index in-process for low-latency queries. `--model` must match the model that built the current index, otherwise the server refuses to start with an actionable error message. A file watcher (enabled by default) re-indexes affected files when the contents under `--kb-path` change — see [Live-sync via file watcher](#live-sync-via-file-watcher).
 
 `--reranker` (optional, default `none`) enables a cross-encoder re-ranking pass over the top candidates of the hybrid search:
 
@@ -249,11 +251,11 @@ For shell scripts or skill bins that just need "search this string in the KB" wi
 
 ```bash
 kb-mcp search "RAG server comparison" --limit 3 --format text
-kb-mcp search "E0382" --category deep-dive --format json | jq '.[] | .path'
+kb-mcp search "E0382" --category deep-dive --format json | jq '.results[] | .path'
 kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # optional per-invocation rerank
 ```
 
-`--format` is `json` (default, an array of `{score, path, title, heading, topic, date, content}`) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The quality filter is on by default — pass `--include-low-quality` or `--min-quality 0` to restore the previous (filter-off) behavior for a single query. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
+`--format` is `json` (default, a `{ results, low_confidence, filter_applied }` wrapper as documented under "Search filters and citations" below) or `text` (LLM-friendly blocks separated by `---`). All other flags mirror `serve`: `--kb-path`, `--model`, `--reranker`, `--category`, `--topic`, `--limit`. The quality filter is on by default — pass `--include-low-quality` or `--min-quality 0` to restore the previous (filter-off) behavior for a single query. The `kb-mcp.toml` defaults apply exactly as in `serve`/`index`.
 
 Typical skill-bin use: a Claude Code skill places `kb-mcp.exe` + `kb-mcp.toml` in its `bin/`, then a command like `kb-mcp search "{{user_query}}" --format text --limit 3` returns a focused reference excerpt for the LLM to cite.
 
@@ -315,7 +317,7 @@ The output is a flat array of nodes with `parent_id` / `depth` / `score` so the 
 
 ### Validate frontmatter against a TOML schema
 
-If your knowledge base follows a frontmatter convention, `kb-mcp validate` checks every `.md` file against a TOML schema and reports violations. See the [Frontmatter schema validation](#frontmatter-schema-validation-feature-17) section below for the schema format; the command itself is:
+If your knowledge base follows a frontmatter convention, `kb-mcp validate` checks every `.md` file against a TOML schema and reports violations. See the [Frontmatter schema validation](#frontmatter-schema-validation) section below for the schema format; the command itself is:
 
 ```bash
 kb-mcp validate --kb-path /path/to/knowledge-base
@@ -324,6 +326,8 @@ kb-mcp validate --kb-path ... --format github         # ::error annotations for 
 ```
 
 Exit codes: `0` (no violations), `1` (violations), `2` (schema load error). When `kb-mcp-schema.toml` is absent under `--kb-path`, the command exits 0 with a short "no schema found" note, so adding `kb-mcp validate` to an existing workflow is non-disruptive until you actually write a schema.
+
+> The `--strict` flag is currently a no-op (accepted for forward compatibility with future stricter checking modes). Use the regular invocation for now.
 
 ### Evaluate retrieval quality against a golden query set
 
@@ -480,7 +484,7 @@ type = "array"
 min_length = 1
 ```
 
-- **No schema file → exit 0** with a short "no schema found" note. Pre-feature-17 behavior is preserved.
+- **No schema file → exit 0** with a short "no schema found" note. Backward compatible: existing pipelines that don't yet have a schema file continue to pass.
 - `--format text` (default, color when TTY) / `json` / `github` for CI annotations.
 - Exit codes: `0` (no violations), `1` (violations), `2` (schema load error).
 - `.txt` files are skipped (no frontmatter concept).

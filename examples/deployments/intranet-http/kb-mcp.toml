@@ -15,7 +15,9 @@ model = "bge-m3"
 reranker = "bge-v2-m3"
 rerank_by_default = false
 
-# Cache lives under the kbmcp user's home (the systemd unit ensures /var/cache/fastembed exists and is owned by kbmcp).
+# ONNX model cache. Create this directory before first run:
+#   sudo install -d -o kbmcp -g kbmcp /var/cache/fastembed
+# (the systemd unit only `ReadWritePaths=` it; it does not create or chown.)
 fastembed_cache_dir = "/var/cache/fastembed"
 
 [parsers]

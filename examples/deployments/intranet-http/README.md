@@ -46,7 +46,13 @@ machines on the same intranet over Streamable HTTP.
 3. Drop `kb-mcp.toml` from this directory at `/srv/kb-mcp/kb-mcp.toml`
    (CWD discovery — the systemd unit sets `WorkingDirectory=/srv/kb-mcp`).
    Edit `kb_path`, `model`, and `[transport.http].bind` to taste.
-4. Build the initial index (as root or sudo as kbmcp):
+4. Create the ONNX cache directory (the systemd unit only declares
+   `ReadWritePaths=`, it does not create or chown the dir):
+
+   ```bash
+   sudo install -d -o kbmcp -g kbmcp /var/cache/fastembed
+   ```
+5. Build the initial index (as root or sudo as kbmcp):
 
    ```bash
    sudo -u kbmcp /usr/local/bin/kb-mcp index \
@@ -54,19 +60,19 @@ machines on the same intranet over Streamable HTTP.
    ```
 
    Expect minutes the first time (model download + embedding generation).
-5. Install the systemd unit:
+6. Install the systemd unit:
 
    ```bash
    sudo cp kb-mcp.service /etc/systemd/system/kb-mcp.service
    sudo systemctl daemon-reload
    sudo systemctl enable --now kb-mcp.service
    ```
-6. Health check:
+7. Health check:
 
    ```bash
    curl http://127.0.0.1:3100/healthz   # → 200 OK
    ```
-7. Open the firewall to your intranet only. Example UFW:
+8. Open the firewall to your intranet only. Example UFW:
 
    ```bash
    sudo ufw allow from 192.168.1.0/24 to any port 3100 proto tcp

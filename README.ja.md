@@ -170,7 +170,7 @@ kb-mcp index --kb-path /path/to/knowledge-base --force   # 完全再インデッ
 kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # BGE-M3 (1024 dim、多言語) に切替
 ```
 
-指定ディレクトリ配下のソースファイルを走査し、`.obsidian/` はスキップする。既定では `.md` のみ取り込み (デフォルト挙動)。`kb-mcp.toml` に `[parsers].enabled = ["md", "txt"]` を追加すると `.txt` もインデックス対象になる (タイトルはファイル名から派生: `deep-dive-2026.txt` → `"deep dive 2026"`、本文全体が 1 チャンク)。前回実行時と content hash が変わっていないファイルは `--force` を渡さない限りスキップされる。
+指定ディレクトリ配下のソースファイルを走査し、既定の `exclude_dirs` セット (`.obsidian` / `.git` / `node_modules` / `target` / `.vscode` / `.idea` — 後述「ディレクトリ除外」参照) をスキップする。既定では `.md` のみ取り込み。`kb-mcp.toml` に `[parsers].enabled = ["md", "txt"]` を追加すると `.txt` もインデックス対象になる (タイトルはファイル名から派生: `deep-dive-2026.txt` → `"deep dive 2026"`、本文全体が 1 チャンク)。前回実行時と content hash が変わっていないファイルは `--force` を渡さない限りスキップされる。
 
 `--model` が受け付ける値:
 - `bge-small-en-v1.5` (既定) — 384 次元、英語特化、初回 DL 約 130 MB
@@ -202,11 +202,13 @@ kb-mcp index --kb-path /path/to/knowledge-base --model bge-m3 --force  # BGE-M3 
 kb-mcp serve --kb-path /path/to/knowledge-base
 kb-mcp serve --kb-path /path/to/knowledge-base --model bge-m3   # index 時と一致必須
 kb-mcp serve --kb-path ... --model bge-m3 --reranker bge-v2-m3  # + cross-encoder 再ランク
-kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP、複数クライアントkb-mcp serve --kb-path ... --no-watch                           # ライブ同期無効```
+kb-mcp serve --kb-path ... --transport http --port 3100         # HTTP、複数クライアント
+kb-mcp serve --kb-path ... --no-watch                           # ライブ同期無効
+```
 
-既定では stdio トランスポート (1 クライアント / サーバ) で MCP サーバを起動する。複数クライアントを同時接続するには `--transport http --port <PORT>` (または `--bind <SOCKETADDR>`) を渡し Streamable HTTP に切り替える — 詳細は [HTTP トランスポート (複数クライアント同時接続)](#http-トランスポート-複数クライアント同時接続-feature-18) 参照。
+既定では stdio トランスポート (1 クライアント / サーバ) で MCP サーバを起動する。複数クライアントを同時接続するには `--transport http --port <PORT>` (または `--bind <SOCKETADDR>`) を渡し Streamable HTTP に切り替える — 詳細は [HTTP トランスポート (複数クライアント同時接続)](#http-トランスポート-複数クライアント同時接続) 参照。
 
-サーバは 6 つの MCP ツール (後述) を公開し、インデックスをプロセス内に保持して低レイテンシでクエリに答える。`--model` が現在の index を作ったモデルと一致しない場合、実行可能なエラーメッセージで起動を拒否する。ファイルウォッチャ (既定有効) が `--kb-path` 配下の変更を検知して再インデックスする — [ライブ同期 (file watcher)](#ライブ同期-file-watcher-feature-12) 参照。
+サーバは 6 つの MCP ツール (後述) を公開し、インデックスをプロセス内に保持して低レイテンシでクエリに答える。`--model` が現在の index を作ったモデルと一致しない場合、実行可能なエラーメッセージで起動を拒否する。ファイルウォッチャ (既定有効) が `--kb-path` 配下のコンテンツ変更を検知して再インデックスする — [ライブ同期 (file watcher)](#ライブ同期-file-watcher) 参照。
 
 `--reranker` (任意、既定 `none`) はハイブリッド検索の上位候補に cross-encoder 再ランクをかける:
 
@@ -249,11 +251,11 @@ kb-mcp status --kb-path /path/to/knowledge-base
 
 ```bash
 kb-mcp search "RAG server comparison" --limit 3 --format text
-kb-mcp search "E0382" --category deep-dive --format json | jq '.[] | .path'
+kb-mcp search "E0382" --category deep-dive --format json | jq '.results[] | .path'
 kb-mcp search "クエリ最適化" --reranker bge-v2-m3        # 呼び出し単位の再ランクも可
 ```
 
-`--format` は `json` (既定、`{score, path, title, heading, topic, date, content}` の配列) か `text` (`---` 区切りの LLM フレンドリなブロック)。他のフラグは `serve` と同じ: `--kb-path` / `--model` / `--reranker` / `--category` / `--topic` / `--limit`。品質フィルタは既定有効 — 単発クエリで フィルタ無効状態に戻すには `--include-low-quality` または `--min-quality 0` を渡す。`kb-mcp.toml` の既定値は `serve` / `index` と同じく適用される。
+`--format` は `json` (既定、後述「検索フィルタと引用」の通り `{ results, low_confidence, filter_applied }` ラッパ) か `text` (`---` 区切りの LLM フレンドリなブロック)。他のフラグは `serve` と同じ: `--kb-path` / `--model` / `--reranker` / `--category` / `--topic` / `--limit`。品質フィルタは既定有効 — 単発クエリで フィルタ無効状態に戻すには `--include-low-quality` または `--min-quality 0` を渡す。`kb-mcp.toml` の既定値は `serve` / `index` と同じく適用される。
 
 典型的な skill-bin 用途: Claude Code の skill が `bin/` に `kb-mcp.exe` + `kb-mcp.toml` を同梱し、`kb-mcp search "{{user_query}}" --format text --limit 3` のようなコマンドで LLM が引用するための参照抜粋を返す。
 
@@ -315,7 +317,7 @@ kb-mcp graph --start a.md --exclude junk1.md,junk2.md --min-similarity 0.5
 
 ### TOML スキーマによる frontmatter 検証
 
-ナレッジベースで frontmatter の規約を運用しているなら、`kb-mcp validate` がすべての `.md` を TOML スキーマに対して検証し違反を報告する。スキーマ書式は [Frontmatter スキーマ検証](#frontmatter-スキーマ検証-feature-17) 節参照。コマンド自体は:
+ナレッジベースで frontmatter の規約を運用しているなら、`kb-mcp validate` がすべての `.md` を TOML スキーマに対して検証し違反を報告する。スキーマ書式は [Frontmatter スキーマ検証](#frontmatter-スキーマ検証) 節参照。コマンド自体は:
 
 ```bash
 kb-mcp validate --kb-path /path/to/knowledge-base
@@ -324,6 +326,8 @@ kb-mcp validate --kb-path ... --format github         # CI 用 ::error annotatio
 ```
 
 終了コード: `0` (違反なし) / `1` (違反あり) / `2` (スキーマロードエラー)。`--kb-path` 直下に `kb-mcp-schema.toml` が無いときは短い "no schema found" メッセージと共に exit 0 となるため、既存ワークフローへの `kb-mcp validate` 追加は実際にスキーマを書くまで非破壊。
+
+> `--strict` フラグは現状 no-op (将来のより厳格な検証モードへの前方互換のため受理されるだけ)。当面は通常の呼び出しで OK。
 
 ### Golden query セットに対する retrieval 品質評価
 
