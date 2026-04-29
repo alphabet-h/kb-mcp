@@ -30,23 +30,25 @@ impl Parser for MarkdownParser {
 // Internal: serde helper for flexible YAML deserialization
 // ---------------------------------------------------------------------------
 
-/// Intermediate representation for serde_yaml deserialization.
-/// `date` is captured as `serde_yaml::Value` so it works regardless of whether
+/// Intermediate representation for serde_yaml_bw deserialization.
+/// `date` is captured as `serde_yaml_bw::Value` so it works regardless of whether
 /// the YAML encodes it as a string (`"2026-04-10"`) or a native date value.
 #[derive(Deserialize)]
 struct RawFrontmatter {
     title: Option<String>,
-    date: Option<serde_yaml::Value>,
+    date: Option<serde_yaml_bw::Value>,
     topic: Option<String>,
-    depth: Option<serde_yaml::Value>,
+    depth: Option<serde_yaml_bw::Value>,
     #[serde(default)]
     tags: Vec<String>,
 }
 
 impl From<RawFrontmatter> for Frontmatter {
     fn from(raw: RawFrontmatter) -> Self {
+        // serde_yaml_bw::Value は (value, tag) の 2-field 。tag はここでは使わない
+        // ので `_` で無視する。
         let date = raw.date.map(|v| match v {
-            serde_yaml::Value::String(s) => s,
+            serde_yaml_bw::Value::String(s, _) => s,
             other => {
                 let s = format!("{other:?}");
                 s.trim_matches('"').to_string()
@@ -54,8 +56,8 @@ impl From<RawFrontmatter> for Frontmatter {
         });
 
         let depth = raw.depth.map(|v| match v {
-            serde_yaml::Value::String(s) => s,
-            serde_yaml::Value::Number(n) => n.to_string(),
+            serde_yaml_bw::Value::String(s, _) => s,
+            serde_yaml_bw::Value::Number(n, _) => n.to_string(),
             other => format!("{other:?}"),
         });
 
@@ -91,7 +93,7 @@ fn extract_frontmatter(raw: &str) -> (Frontmatter, String) {
         let body = rest.trim_start_matches(['\r', '\n']).to_string();
 
         // Windows 生成の `.md` で `\r\n` 改行のとき、yaml_raw 各行末に `\r` が
-        // 残って serde_yaml のパース結果の文字列 value にリークするので
+        // 残って serde_yaml_bw のパース結果の文字列 value にリークするので
         // パース前に CRLF → LF へ正規化する。
         let yaml_normalized;
         let yaml_str: &str = if yaml_raw.contains('\r') {
@@ -101,7 +103,7 @@ fn extract_frontmatter(raw: &str) -> (Frontmatter, String) {
             yaml_raw
         };
 
-        let fm = match serde_yaml::from_str::<RawFrontmatter>(yaml_str) {
+        let fm = match serde_yaml_bw::from_str::<RawFrontmatter>(yaml_str) {
             Ok(raw_fm) => Frontmatter::from(raw_fm),
             Err(e) => {
                 eprintln!("warning: failed to parse YAML frontmatter: {e}");

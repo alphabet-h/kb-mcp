@@ -4,6 +4,18 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Internal
+- Migrated YAML parsing from `serde_yaml` 0.9 (deprecated and
+  unmaintained — alias-bomb guards rely on the upstream limits in
+  `unsafe-libyaml`) to `serde_yaml_bw` 2 ("YAML support for Serde
+  with an emphasis on panic-free parsing"). Frontmatter (`Markdown`
+  parser) and golden-YAML loading (`kb-mcp eval`) both move to the
+  new crate. The `Value` enum gains a tag field so the only API
+  delta is the pattern in the `RawFrontmatter` -> `Frontmatter`
+  conversion (`Value::String(s, _)`, `Value::Number(n, _)`).
+  Adds a smoke regression test that a YAML alias bomb does not
+  panic the parser.
+
 ## [0.4.3] - 2026-04-29
 
 ### Security
