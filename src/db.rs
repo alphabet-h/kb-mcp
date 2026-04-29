@@ -450,6 +450,14 @@ impl Database {
     /// Insert or update a document row. On update the old chunks (and their
     /// vec_chunks entries) are deleted so the caller can re-insert fresh ones.
     ///
+    /// The UPDATE branch performs four mutating statements (DELETE vec_chunks /
+    /// DELETE fts_chunks / DELETE chunks / UPDATE documents) which must be
+    /// applied atomically so that a partial failure does not leave dangling
+    /// vec / FTS rows. We wrap the body in a tx — but only when the caller is
+    /// not already inside one (autocommit-aware), so wrapping callers
+    /// (`begin_transaction()` users such as the indexer) can compose without
+    /// triggering "cannot start a transaction within a transaction".
+    ///
     /// Returns the document `id`.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_document(
@@ -466,6 +474,14 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let tags_json = serde_json::to_string(tags)?;
 
+        // Open a local tx only if we are in autocommit (no caller-managed tx).
+        // Drop guard rolls back automatically; we commit at the end on success.
+        let local_tx = if self.conn.is_autocommit() {
+            Some(self.conn.unchecked_transaction()?)
+        } else {
+            None
+        };
+
         // Check if document already exists
         use rusqlite::OptionalExtension;
         let existing_id: Option<i64> = self
@@ -477,7 +493,7 @@ impl Database {
             )
             .optional()?;
 
-        if let Some(doc_id) = existing_id {
+        let doc_id = if let Some(doc_id) = existing_id {
             // Delete old vector / FTS entries for chunks that belong to this document
             self.conn.execute(
                 "DELETE FROM vec_chunks WHERE chunk_id IN \
@@ -510,15 +526,20 @@ impl Database {
                     doc_id
                 ],
             )?;
-            Ok(doc_id)
+            doc_id
         } else {
             self.conn.execute(
                 "INSERT INTO documents (path, title, topic, category, depth, tags, date, content_hash, last_indexed)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![path, title, topic, category, depth, tags_json, date, content_hash, now],
             )?;
-            Ok(self.conn.last_insert_rowid())
+            self.conn.last_insert_rowid()
+        };
+
+        if let Some(tx) = local_tx {
+            tx.commit()?;
         }
+        Ok(doc_id)
     }
 
     /// Insert a chunk row **and** its corresponding vec_chunks embedding + FTS row.
@@ -528,6 +549,12 @@ impl Database {
     /// `quality_score` は the quality filterで使われる (0.0-1.0、
     /// `crate::quality::chunk_quality_score` で算出)。
     /// Returns the chunk `id`.
+    /// Insert a chunk row plus its `vec_chunks` embedding and `fts_chunks`
+    /// row. The three statements must commit together: a partial write would
+    /// leave a chunk visible to FTS but invisible to vector search, or vice
+    /// versa. The body is wrapped in an autocommit-aware tx — same composition
+    /// pattern as [`Self::upsert_document`] so a caller can group multiple
+    /// `insert_chunk` calls under one outer tx via `begin_transaction()`.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_chunk(
         &self,
@@ -540,6 +567,12 @@ impl Database {
     ) -> Result<i64> {
         // Rough token estimate: 1 token ~= 4 chars (English average)
         let token_count = (content.len() / 4) as i32;
+
+        let local_tx = if self.conn.is_autocommit() {
+            Some(self.conn.unchecked_transaction()?)
+        } else {
+            None
+        };
 
         self.conn.execute(
             "INSERT INTO chunks (document_id, chunk_index, heading, content, token_count, quality_score)
@@ -561,6 +594,9 @@ impl Database {
             params![chunk_id, heading, content],
         )?;
 
+        if let Some(tx) = local_tx {
+            tx.commit()?;
+        }
         Ok(chunk_id)
     }
 
@@ -1350,28 +1386,33 @@ impl Database {
     /// 複数の rename を **単一 transaction** で適用する (evaluator
     /// 指摘 High #2)。途中失敗したらすべて rollback されるので「部分 rename
     /// 残留」が発生しない。`pairs` が空なら no-op。
+    ///
+    /// 内部実装は手動 `BEGIN/COMMIT/ROLLBACK` ではなく
+    /// `Connection::unchecked_transaction()` を使用 (F-32)。Drop guard で
+    /// rollback が担保されるので、`?` early-return パスでも DB が中途半端な
+    /// state に置かれない。
     pub fn rename_documents_atomic(&self, pairs: &[(String, String)]) -> Result<()> {
         if pairs.is_empty() {
             return Ok(());
         }
-        self.conn.execute_batch("BEGIN")?;
-        let mut first_err: Option<anyhow::Error> = None;
+        let tx = self.conn.unchecked_transaction()?;
         for (old, new) in pairs {
-            if let Err(e) = self.rename_document(old, new) {
-                first_err = Some(e);
-                break;
-            }
+            self.rename_document(old, new)?; // Drop on tx rolls back on error
         }
-        if let Some(e) = first_err {
-            // 失敗が起きても ROLLBACK 自体は成功するはず。ROLLBACK 失敗時は
-            // 元のエラーの方が有用なのでそちらを優先して返す。
-            let _ = self.conn.execute_batch("ROLLBACK");
-            return Err(e);
-        }
-        self.conn
-            .execute_batch("COMMIT")
+        tx.commit()
             .context("rename_documents_atomic: COMMIT failed")?;
         Ok(())
+    }
+
+    /// 上位レイヤ (indexer / watcher) が「複数の `upsert_document` /
+    /// `insert_chunk` 呼び出しを 1 つの atomic 単位として扱いたい」時に
+    /// 使う tx ハンドル。返り値の `Transaction` を保持している間、各 db API
+    /// 呼び出しは同じ tx に participate する (autocommit-aware なので
+    /// `upsert_document` / `insert_chunk` は内側でネスト tx を張らない)。
+    ///
+    /// 通常の Drop は **rollback**。成功時は `tx.commit()` を必ず呼ぶこと。
+    pub fn begin_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(self.conn.unchecked_transaction()?)
     }
 }
 
@@ -1759,6 +1800,97 @@ mod tests {
     fn test_rename_documents_atomic_empty_pairs_is_noop() {
         let db = db_with_384();
         db.rename_documents_atomic(&[]).unwrap();
+    }
+
+    /// F-32 regression: dropping a `begin_transaction()` handle without
+    /// `commit()` must roll back every write performed under it (upsert +
+    /// insert_chunk). This is the contract the indexer relies on for
+    /// per-file atomicity — a partial failure mid-loop must restore the
+    /// previous DB state instead of leaving a doc with M < N chunks.
+    #[test]
+    fn test_begin_transaction_rolls_back_partial_writes_on_drop() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h_initial")
+            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("intro"),
+            "initial body",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
+        let docs_before = db.document_count().unwrap();
+        let chunks_before = db.chunk_count().unwrap();
+
+        {
+            let tx = db.begin_transaction().unwrap();
+            // UPDATE branch on existing path "a.md" — wipes old chunks/vec/fts
+            // and stages a new content_hash. Without commit, all of this must
+            // disappear when the tx is dropped.
+            db.upsert_document("a.md", Some("a"), None, None, None, &[], None, "h_NEW")
+                .unwrap();
+            db.insert_chunk(
+                doc_id,
+                0,
+                Some("new"),
+                "new body",
+                &dummy_embedding(0.2),
+                1.0,
+            )
+            .unwrap();
+            // tx dropped here without commit → rollback
+            drop(tx);
+        }
+
+        let map = db.all_path_hashes().unwrap();
+        assert_eq!(
+            map.get("a.md"),
+            Some(&"h_initial".to_string()),
+            "rollback should restore original content_hash"
+        );
+        assert_eq!(db.document_count().unwrap(), docs_before);
+        assert_eq!(db.chunk_count().unwrap(), chunks_before);
+    }
+
+    /// F-32: explicit `tx.commit()` persists writes — symmetric counterpart
+    /// to the rollback-on-drop test above.
+    #[test]
+    fn test_begin_transaction_commits_on_explicit_commit() {
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h_initial")
+            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("intro"),
+            "initial body",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
+
+        {
+            let tx = db.begin_transaction().unwrap();
+            db.upsert_document("a.md", Some("a"), None, None, None, &[], None, "h_NEW")
+                .unwrap();
+            db.insert_chunk(
+                doc_id,
+                0,
+                Some("new"),
+                "new body",
+                &dummy_embedding(0.2),
+                1.0,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let map = db.all_path_hashes().unwrap();
+        assert_eq!(map.get("a.md"), Some(&"h_NEW".to_string()));
     }
 
     #[test]

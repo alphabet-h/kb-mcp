@@ -326,6 +326,19 @@ fn index_single_disk_entry(
         // update が 0 行なら通常経路にフォールスルー (レース耐性)
     }
 
+    // Embed first, *outside* the DB tx — fastembed inference can take
+    // hundreds of ms (BGE-small) or seconds (BGE-M3) per file, and we don't
+    // want a long-lived write tx blocking concurrent readers in WAL mode.
+    let texts: Vec<&str> = parsed.chunks.iter().map(|c| c.content.as_str()).collect();
+    let embeddings = embedder
+        .embed_texts(&texts)
+        .with_context(|| format!("failed to embed chunks for {}", entry.rel))?;
+
+    // Per-file atomicity (F-32): wrap upsert_document + N x insert_chunk
+    // in a single tx so that a partial failure (e.g. vec_chunks dim
+    // mismatch on the 3rd chunk) rolls the whole file back instead of
+    // leaving a documents row with M < N chunks.
+    let tx = db.begin_transaction()?;
     let doc_id = db.upsert_document(
         &entry.rel,
         parsed.frontmatter.title.as_deref(),
@@ -336,11 +349,6 @@ fn index_single_disk_entry(
         parsed.frontmatter.date.as_deref(),
         &entry.hash,
     )?;
-
-    let texts: Vec<&str> = parsed.chunks.iter().map(|c| c.content.as_str()).collect();
-    let embeddings = embedder
-        .embed_texts(&texts)
-        .with_context(|| format!("failed to embed chunks for {}", entry.rel))?;
 
     for (chunk, embedding) in parsed.chunks.iter().zip(embeddings.iter()) {
         let score = quality::chunk_quality_score(chunk.heading.as_deref(), &chunk.content);
@@ -353,6 +361,7 @@ fn index_single_disk_entry(
             score,
         )?;
     }
+    tx.commit()?;
 
     Ok(SingleResult::Updated {
         chunks: parsed.chunks.len() as u32,

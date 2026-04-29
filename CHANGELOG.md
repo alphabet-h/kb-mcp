@@ -5,6 +5,32 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 ## [Unreleased]
 
 ### Internal
+- Hardened DB transaction protection across the three write paths flagged
+  by the 2026-04-29 audit (F-32):
+  - `Database::upsert_document` now wraps the UPDATE branch's four
+    statements (DELETE vec_chunks / DELETE fts_chunks / DELETE chunks /
+    UPDATE documents) in an autocommit-aware tx via
+    `Connection::unchecked_transaction()`. A failure on any of the four
+    statements no longer leaves dangling vec / FTS rows whose `chunks`
+    parent has already been removed.
+  - `Database::insert_chunk` likewise wraps its three INSERTs (chunks +
+    vec_chunks + fts_chunks) so a partial failure (e.g. embedding-dim
+    mismatch on the `vec_chunks` insert) cannot leave a chunk visible to
+    one search backend but invisible to the other.
+  - `Database::rename_documents_atomic` replaces the manual
+    `BEGIN`/`COMMIT`/`ROLLBACK` pair with `unchecked_transaction()` so
+    that any `?` early-return path is rolled back by the `Transaction`
+    Drop guard rather than relying on an explicit `ROLLBACK` call.
+  - `indexer::index_single_disk_entry` now wraps `upsert_document`
+    plus the per-chunk `insert_chunk` loop in a single tx via the new
+    `Database::begin_transaction()` handle — embedding inference still
+    runs *outside* the tx so a long-lived write tx does not block
+    concurrent WAL readers. A partial failure mid-loop now rolls the
+    whole file back instead of leaving a documents row paired with
+    M < N chunks. Two regression tests
+    (`test_begin_transaction_rolls_back_partial_writes_on_drop`,
+    `test_begin_transaction_commits_on_explicit_commit`) lock down the
+    Drop-rollback / commit symmetry.
 - Added `proptest` 1 as a dev-dependency and locked the f64 value-range
   invariants of the retrieval-quality metrics: `recall_at_k`,
   `ndcg_at_k`, `reciprocal_rank`, and `chunk_quality_score` are now
