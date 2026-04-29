@@ -4,6 +4,8 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-30
+
 ### Security
 - Hardened MCP `search` tool input boundaries (F-35):
   - `query` is now capped at 1 KiB. Larger queries are rejected with
@@ -333,7 +335,8 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.1...v0.4.2
