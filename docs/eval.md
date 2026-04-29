@@ -155,7 +155,31 @@ regression_threshold = 0.05    # default: 0.05
 
 CLI flags override config values. `--golden`, `--k 1,5,10`,
 `--model`, `--reranker`, `--format text|json`, `--no-history`, `--no-diff`,
-`--no-color`.
+`--no-color`, `--fail-on-regression`.
+
+### `--fail-on-regression` (CI gate)
+
+Exit with code 1 if any aggregate metric (`recall@k` for any k, `MRR`, or
+`ndcg@k` for any k) regressed from the previous **compatible** run by more
+than `regression_threshold` (default 0.05; tune via `[eval].regression_threshold`
+in `kb-mcp.toml`). "Compatible" means the previous run had the same
+fingerprint — `model`, `reranker`, `limit`, `k_values`, and the golden
+YAML's content hash. Updating the golden file therefore does **not** trigger
+a false regression on the next run; it just means the comparison is skipped.
+
+History is still written before the process exits, so the new run is
+recorded for the next comparison.
+
+Typical CI shape:
+
+```yaml
+- name: kb-mcp eval gate
+  run: kb-mcp eval --kb-path knowledge-base --fail-on-regression
+```
+
+The flag is a no-op when there is no previous run yet, when `--no-history`
+is set, when `--no-diff` is set (since the comparison is suppressed), or
+when the previous run's fingerprint differs.
 
 ## Troubleshooting
 
@@ -169,8 +193,6 @@ CLI flags override config values. `--golden`, `--k 1,5,10`,
 
 ## Non-goals (intentional)
 
-- **CI integration / failure exit codes**: `eval` only prints numbers. If you
-  want `--fail-on-regression`, that's a future feature
 - **Graded relevance (0 / 1 / 2)**: parsed tolerantly but ignored today
 - **Sweeps / matrices**: to compare models, run `eval` twice against two
   different indexed databases
