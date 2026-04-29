@@ -93,7 +93,7 @@ debounce_ms = 500
 # HTTP 時の mount path は /mcp 固定、/healthz が 200 を返す。CLI
 # `--transport http --port 3100` / `--bind 0.0.0.0:3100` で per-run override。
 # 既定 bind は 127.0.0.1:3100 (loopback)。0.0.0.0 は opt-in、本番公開する場合は
-# 将来追加予定の Bearer token 認証 (F18-11) が安定してから検討すること。
+# 認証層 (nginx + basic auth 等の前段リバースプロキシ) を必ず挟むこと。
 [transport]
 kind = "http"
 
@@ -110,7 +110,7 @@ bind = "127.0.0.1:3100"
 #k_values = [1, 5, 10]                  # 報告する k (default: [1, 5, 10])
 #regression_threshold = 0.05            # diff 色付けの閾値 (default: 0.05)
 
-# --- search (search ツールの追加設定、feature 26) ---
+# --- search (search ツール追加設定、v0.3.0+) ---
 # rank-based low_confidence 判定の閾値。top1.score / mean(top-N.score) <
 # ratio で flag が立つ。0.0 で判定無効。CLI `--min-confidence-ratio` /
 # MCP param `min_confidence_ratio` で per-query 上書き可。省略時は 1.5。

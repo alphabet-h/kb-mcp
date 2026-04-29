@@ -13,6 +13,27 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
   (Cursor, etc.) ignore the field. Each recipe README (en+ja) gains a
   note covering when to keep it on vs drop it (initial-startup latency
   trade-off, especially relevant for NAS-mounted KBs).
+- Audit-driven docs cleanup (en+ja):
+  - Fixed broken `serve` example code block in both READMEs
+    (line continuation collapsed onto one line, fence didn't close).
+  - `kb-mcp search --format json` examples now use `jq '.results[]'`
+    against the v0.3.0+ wrapper shape instead of the obsolete `jq '.[]'`
+    pattern; section description aligned with the wrapper documentation.
+  - Removed six dead anchor links (`#...feature-NN`) left over from the
+    v0.1.0 internal-marker stripping campaign.
+  - Removed remaining internal feature markers (`F18-11`, `feature 26`,
+    `Pre-feature-17`, `feature-26`) from `kb-mcp.toml.example`,
+    `README.md`, `docs/ARCHITECTURE.md` (en+ja).
+  - `examples/deployments/intranet-http/`: cache directory comment in
+    `kb-mcp.toml` corrected (the systemd unit does not create or chown
+    `/var/cache/fastembed`); README setup adds an explicit step to
+    `install -d -o kbmcp -g kbmcp /var/cache/fastembed` before first run.
+  - `kb-mcp index` description now lists the full default `exclude_dirs`
+    set instead of just `.obsidian/`.
+  - `kb-mcp validate --strict` documented as a no-op accepted for
+    forward compatibility.
+  - Fixed redundant "by default ... (the default behavior)" stutter in
+    en+ja `index` description.
 
 ## [0.4.2] - 2026-04-27
 
