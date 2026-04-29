@@ -142,7 +142,16 @@ pub fn resolve_effective_threshold(
         return 0.0;
     }
     match min_quality {
-        Some(v) => v.clamp(0.0, 1.0),
+        Some(v) if v.is_finite() => v.clamp(0.0, 1.0),
+        Some(_) => {
+            // NaN / +Inf / -Inf を渡されたら default に倒す。比較がそのまま NaN を
+            // 通すと < / >= が常に false → フィルタが事実上無効になり不可解な結果を返す。
+            tracing::warn!(
+                "min_quality={:?} is not finite; falling back to server default",
+                min_quality
+            );
+            server_default
+        }
         None => server_default,
     }
 }
@@ -288,6 +297,25 @@ mod tests {
 
         // どちらもなしなら server default
         assert_eq!(resolve_effective_threshold(false, None, 0.3), 0.3);
+    }
+
+    /// Regression: NaN / Inf を渡されたら default に倒す (silent NaN 比較を避ける)。
+    #[test]
+    fn test_resolve_effective_threshold_nan_falls_back_to_default() {
+        assert_eq!(
+            resolve_effective_threshold(false, Some(f32::NAN), 0.42),
+            0.42
+        );
+        assert_eq!(
+            resolve_effective_threshold(false, Some(f32::INFINITY), 0.42),
+            0.42
+        );
+        assert_eq!(
+            resolve_effective_threshold(false, Some(f32::NEG_INFINITY), 0.42),
+            0.42
+        );
+        // include_low_quality=true は NaN でも 0.0 (override 最優先)
+        assert_eq!(resolve_effective_threshold(true, Some(f32::NAN), 0.42), 0.0);
     }
 
     #[test]

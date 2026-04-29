@@ -105,12 +105,20 @@ pub fn recall_at_k(expected: &[ExpectedHit], top: &[HitRecord], k: usize) -> f64
 }
 
 /// MRR 用: 最初にヒットした expected の rank の逆数。無ければ 0.0。
+/// rank は 1-origin を期待。万一 rank=0 が渡された場合は 0.0 を返し
+/// 1.0/0.0 = inf 汚染を防ぐ (HitRecord は pub なので外部経路の防衛線として残す)。
 pub fn reciprocal_rank(expected: &[ExpectedHit], top: &[HitRecord]) -> f64 {
     if expected.is_empty() || top.is_empty() {
         return 0.0;
     }
     for h in top {
         if expected.iter().any(|e| is_hit(e, h)) {
+            if h.rank == 0 {
+                tracing::warn!(
+                    "reciprocal_rank: encountered HitRecord with rank=0 (must be 1-origin); returning 0.0 to avoid inf"
+                );
+                return 0.0;
+            }
             return 1.0 / h.rank as f64;
         }
     }
@@ -326,8 +334,10 @@ pub struct RunOpts {
 
 /// JSON 形式で 1 run を整形する。`previous` が渡され fingerprint 互換なら `diff` を付ける。
 pub fn format_json(run: &EvalRun, previous: Option<&EvalRun>) -> serde_json::Value {
+    // serde_json は f64 の Inf / NaN をシリアライズできず Err を返す。過去 history に
+    // それらが混入していた場合に panic するのを避け、null に倒す。
     let prev_val = previous
-        .map(|p| serde_json::to_value(p).unwrap())
+        .and_then(|p| serde_json::to_value(p).ok())
         .unwrap_or(serde_json::Value::Null);
     let diff_val = match previous {
         Some(p) if p.fingerprint.golden_hash == run.fingerprint.golden_hash => {
@@ -797,6 +807,17 @@ mod tests {
     #[test]
     fn test_reciprocal_rank_empty() {
         assert_eq!(reciprocal_rank(&[], &[]), 0.0);
+    }
+
+    /// Regression: rank=0 が万一渡されても 1.0/0.0 = inf にせず 0.0 を返す。
+    /// HitRecord が pub なので外部経路防衛線として残す。
+    #[test]
+    fn test_reciprocal_rank_rank_zero_returns_zero_not_inf() {
+        let expected = vec![exp("a.md", None)];
+        let top = vec![hit(0, "a.md", None)];
+        let r = reciprocal_rank(&expected, &top);
+        assert_eq!(r, 0.0);
+        assert!(r.is_finite());
     }
 
     #[test]
