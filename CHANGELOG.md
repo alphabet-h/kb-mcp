@@ -44,6 +44,21 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
   out for "eval regression detection in CI".
 
 ### Internal
+- Watcher backpressure (F-36): replaced
+  `tokio::sync::mpsc::unbounded_channel` with
+  `mpsc::channel(64)` for the bridge between
+  `notify-debouncer-full` (std thread) and the tokio
+  consumer task. The debouncer callback now uses
+  `try_send`; on `Full` it logs a warn and drops the
+  batch instead of growing the queue without bound. This
+  caps watcher RAM usage at "64 batches" regardless of
+  how fast the filesystem fires events, and turns "watcher
+  is silently lagging" into a visible log line. Closes the
+  audit-flagged "unbounded watcher channel" cross-cutting
+  issue. Adaptive debounce / path-level coalescing remain
+  out of scope for this PR (notify-debouncer-full does not
+  expose a runtime debounce-window setter, and per-path
+  coalescing is already done by the debouncer itself).
 - Added `.github/workflows/nightly.yml` (F-38). Runs daily at UTC
   04:00 (and on `workflow_dispatch`) with two jobs:
   - `ignored-tests`: `cargo test -- --include-ignored` on

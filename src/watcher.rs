@@ -117,7 +117,14 @@ pub async fn run_watch_loop(state: WatcherState) -> Result<()> {
         return Ok(());
     }
 
-    let (tx_async, mut rx_async) = mpsc::unbounded_channel::<Vec<DebouncedEvent>>();
+    // F-36: bounded channel で event flood 時のメモリ無制限増を防ぐ。
+    // 1 element = debounce 窓内の events 塊 (DebouncedEvent ベクトル) なので、
+    // 64 batch ぶん buffer すれば通常 1 秒未満の handle_events 処理待ちは
+    // 吸収できる。それを超える backlog は handle_events 側 (embedder/db lock
+    // を取って同期処理) が遅延の原因なので、新 batch を drop + warn して
+    // 「何か詰まっている」が visible に出るようにする。
+    const WATCHER_CHANNEL_CAPACITY: usize = 64;
+    let (tx_async, mut rx_async) = mpsc::channel::<Vec<DebouncedEvent>>(WATCHER_CHANNEL_CAPACITY);
     let debounce = Duration::from_millis(state.config.debounce_ms);
     let kb_watch_path = state.kb_path.clone();
 
@@ -138,8 +145,26 @@ pub async fn run_watch_loop(state: WatcherState) -> Result<()> {
                     None,
                     move |res: notify_debouncer_full::DebounceEventResult| match res {
                         Ok(events) => {
-                            if tx_clone.send(events).is_err() {
-                                // receiver (tokio task) drop → 静かに終了
+                            // F-36: bounded channel なので送信は try_send
+                            // (debouncer callback は std thread = blocking_send
+                            // が呼べないため)。Full は handle_events 側の
+                            // 詰まりを意味するので、drop + warn で可視化する。
+                            // 同 batch で次回 callback 時に events は再生成され
+                            // ない (debouncer の固定 windowing) ので、ここで
+                            // drop した変更は観測できないが、tail-drop は
+                            // memory の観点で確定の上限が出る。
+                            match tx_clone.try_send(events) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    eprintln!(
+                                        "watcher: event channel full (capacity {WATCHER_CHANNEL_CAPACITY}); \
+                                         dropping batch — handle_events is too slow or blocked. \
+                                         Consider increasing kb-mcp resources or running rebuild_index manually."
+                                    );
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    // receiver (tokio task) drop → 静かに終了
+                                }
                             }
                         }
                         Err(errs) => {
@@ -658,5 +683,56 @@ mod tests {
             vec![PathBuf::from("/tmp/a.md")],
         );
         assert!(matches!(classify(&evt), Classified::Ignore));
+    }
+
+    // ---------------------------------------------------------------------
+    // F-36: bounded channel backpressure semantics
+    // ---------------------------------------------------------------------
+
+    /// `tokio::sync::mpsc::channel(N)` の挙動を直接 test する。
+    /// `unbounded_channel` 時代に依存していた「無限に send できる」前提が
+    /// もう成立しないことの確認。capacity 1 の channel に 2 連続 try_send
+    /// を打つと 2 件目は `Full` になる。
+    #[tokio::test]
+    async fn test_bounded_channel_try_send_returns_full_at_capacity() {
+        use tokio::sync::mpsc;
+        let (tx, _rx) = mpsc::channel::<u8>(1);
+        assert!(tx.try_send(1).is_ok());
+        match tx.try_send(2) {
+            Err(mpsc::error::TrySendError::Full(_)) => {}
+            other => panic!("expected Full, got {other:?}"),
+        }
+    }
+
+    /// recv で 1 件抜けば後続の try_send が再度通る。F-36 では「flood
+    /// 直後に hot 期間が終わって receiver が追いつけば降伏しない」ことを
+    /// 担保する性質。
+    #[tokio::test]
+    async fn test_bounded_channel_recovers_after_drain() {
+        use tokio::sync::mpsc;
+        let (tx, mut rx) = mpsc::channel::<u8>(1);
+        tx.try_send(1).unwrap();
+        // ここでは Full
+        assert!(matches!(
+            tx.try_send(2),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        // 1 件 drain
+        assert_eq!(rx.recv().await, Some(1));
+        // 容量回復、2 件目が通る
+        assert!(tx.try_send(2).is_ok());
+    }
+
+    /// receiver が drop されたら try_send は `Closed` を返す (debouncer
+    /// callback がアプリ shutdown 後に静かに死ぬための signal)。
+    #[tokio::test]
+    async fn test_bounded_channel_closed_when_receiver_dropped() {
+        use tokio::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<u8>(4);
+        drop(rx);
+        match tx.try_send(1) {
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+            other => panic!("expected Closed, got {other:?}"),
+        }
     }
 }

@@ -528,6 +528,7 @@ Security notes:
 - **Coexists with the PostToolUse hook**. Both paths lock the same `Mutex<Database>` / `Mutex<Embedder>`, so concurrent triggers are serialized at the Rust layer and are idempotent.
 - **Extension-aware**. The watcher shares the Parser registry with `rebuild_index`, so only files whose extension is enabled in `[parsers].enabled` are re-indexed; other events are dropped.
 - **Resilience**. Errors inside the watcher task are logged to stderr (not silently dropped) and the MCP server keeps running. Local disk is assumed — inotify on WSL / SMB / network shares is not guaranteed.
+- **Backpressure (v0.5.1+)**. The bridge from the debouncer to the indexer task uses a bounded 64-batch channel; if the consumer cannot keep up (e.g. embedder is paused), excess batches are dropped with a warn log instead of growing the queue indefinitely. Run `rebuild_index` manually after the burst to recover any missed events.
 
 ### Working around HuggingFace TLS failures on first download
 
