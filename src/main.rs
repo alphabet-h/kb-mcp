@@ -301,6 +301,13 @@ enum Commands {
         /// Disable ANSI color (auto-disabled when stdout is not a TTY)
         #[arg(long = "no-color", default_value_t = false)]
         no_color: bool,
+        /// Exit with code 1 if any aggregate metric (recall@k / MRR /
+        /// nDCG@k) regressed from the previous compatible run by more
+        /// than `regression_threshold` (default 0.05). Compatible =
+        /// same fingerprint (model / reranker / k_values / golden_hash).
+        /// History is still written before exit. Useful for CI gates.
+        #[arg(long = "fail-on-regression", default_value_t = false)]
+        fail_on_regression: bool,
     },
 }
 
@@ -670,6 +677,7 @@ fn main() -> anyhow::Result<()> {
             no_history,
             no_diff,
             no_color,
+            fail_on_regression,
         } => {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model_choice = model.or(cfg.model).unwrap_or_default();
@@ -727,10 +735,39 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // F-40: --fail-on-regression は履歴保存より後に判定したいが、
+            // run を h.push_front で move する前に regression check を済ませる
+            // 必要がある。以下の手順:
+            //   1. now ⇄ previous で regression 判定 (run / previous は両方
+            //      ここでは borrow できる)
+            //   2. 履歴を save (no_history でなければ)
+            //   3. 判定結果に応じて exit
+            // previous_compatible で fingerprint 不一致 (golden_hash 変更等)
+            // のときは判定対象外 = false (CI を fail させない)。
+            let regression_detected = if fail_on_regression {
+                let prev_compat = if no_history {
+                    None
+                } else {
+                    history.previous_compatible(&run)
+                };
+                prev_compat.is_some_and(|p| eval::is_regression(&run, p, regression_threshold))
+            } else {
+                false
+            };
+
             if !no_history {
                 let mut h = history;
                 h.push_front(run, history_size);
                 h.save(&history_path)?;
+            }
+
+            if regression_detected {
+                eprintln!(
+                    "kb-mcp eval: retrieval-quality regression detected (delta > {regression_threshold:.3} \
+                     on at least one of recall@k / MRR / nDCG@k). Exiting with code 1 because \
+                     --fail-on-regression was set."
+                );
+                std::process::exit(1);
             }
         }
     }

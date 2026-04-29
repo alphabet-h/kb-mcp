@@ -297,6 +297,17 @@ impl History {
         self.runs.front()
     }
 
+    /// 直前の run のうち、`fingerprint` が `now` と互換なものを返す。
+    /// `is_regression` の前提として「同じ条件 (model / reranker / k_values
+    /// / golden_hash 等) で取った数値だけ比較する」ことを保証するための
+    /// helper。fingerprint が違えば apple-to-orange 比較になるので
+    /// regression 判定対象外。
+    pub fn previous_compatible(&self, now: &EvalRun) -> Option<&EvalRun> {
+        self.runs
+            .front()
+            .filter(|p| p.fingerprint == now.fingerprint)
+    }
+
     /// atomic rename で書き出す。
     pub fn save(&self, path: &Path) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(self).context("failed to serialize eval history")?;
@@ -314,6 +325,54 @@ impl History {
         })?;
         Ok(())
     }
+}
+
+// ---------- Regression detection ----------
+
+/// retrieval 品質が直前 run から退化したか判定する。F-40 で `kb-mcp eval
+/// --fail-on-regression` を CI に組み込めるようにするための core ロジック。
+///
+/// 「退化」の定義: 集計指標 (recall@k 各 k / MRR / nDCG@k 各 k) のうち
+/// **少なくとも 1 つ** が `prev_v - now_v > threshold` を満たすこと。
+/// 改善は当然 false。同値や僅かな低下 (threshold 内) も false。
+///
+/// 値が NaN/Inf の混入経路は v0.4.3 以降ガード済 (proptest invariants で
+/// `[0.0, 1.0]` 固定) だが、保険として `prev` 側で NaN/Inf を含む場合は
+/// 「比較不能」とみなして false (= 安全側、CI を fail にしない) を返す。
+///
+/// `now` と `prev` は **fingerprint が一致** していることを呼び出し側で
+/// 確認済の前提 ([`History::previous_compatible`] を参照)。fingerprint
+/// 違いで誤検出を起こさないための分業。
+pub fn is_regression(now: &EvalRun, prev: &EvalRun, threshold: f64) -> bool {
+    // recall@k: 各 k で比較
+    for (k, now_v) in &now.aggregate.recall_at_k {
+        let prev_v = prev.aggregate.recall_at_k.get(k).copied().unwrap_or(0.0);
+        if !prev_v.is_finite() || !now_v.is_finite() {
+            continue;
+        }
+        if prev_v - now_v > threshold {
+            return true;
+        }
+    }
+
+    // MRR
+    let (now_mrr, prev_mrr) = (now.aggregate.mrr, prev.aggregate.mrr);
+    if now_mrr.is_finite() && prev_mrr.is_finite() && prev_mrr - now_mrr > threshold {
+        return true;
+    }
+
+    // nDCG@k: 各 k で比較
+    for (k, now_v) in &now.aggregate.ndcg_at_k {
+        let prev_v = prev.aggregate.ndcg_at_k.get(k).copied().unwrap_or(0.0);
+        if !prev_v.is_finite() || !now_v.is_finite() {
+            continue;
+        }
+        if prev_v - now_v > threshold {
+            return true;
+        }
+    }
+
+    false
 }
 
 // ---------- Options ----------
@@ -641,6 +700,7 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     #[test]
@@ -1270,5 +1330,121 @@ mod tests {
         let agg = aggregate_metrics(&[q_empty, q_ok], &[1]);
         assert_eq!(agg.query_count, 1);
         assert!((agg.recall_at_k[&1] - 1.0).abs() < 1e-9);
+    }
+
+    // ------------------------------------------------------------------
+    // F-40: regression detection helpers
+    // ------------------------------------------------------------------
+
+    /// Build a synthetic `EvalRun` with the given aggregate values. Other
+    /// fields are minimum viable so equality / fingerprint logic in callers
+    /// is exercised, but per_query is left empty.
+    fn synthetic_run(
+        recall: BTreeMap<usize, f64>,
+        mrr: f64,
+        ndcg: BTreeMap<usize, f64>,
+        golden_hash: &str,
+    ) -> EvalRun {
+        EvalRun {
+            timestamp: Utc::now(),
+            fingerprint: ConfigFingerprint {
+                model: "bge-small-en-v1.5".into(),
+                reranker: None,
+                limit: 10,
+                k_values: recall.keys().copied().collect(),
+                golden_hash: golden_hash.into(),
+            },
+            per_query: vec![],
+            aggregate: AggregateMetrics {
+                recall_at_k: recall,
+                mrr,
+                ndcg_at_k: ndcg,
+                query_count: 0,
+            },
+        }
+    }
+
+    fn map_one(k: usize, v: f64) -> BTreeMap<usize, f64> {
+        let mut m = BTreeMap::new();
+        m.insert(k, v);
+        m
+    }
+
+    /// 改善: prev=0.7, now=0.8 → regression false。
+    #[test]
+    fn test_is_regression_improvement_returns_false() {
+        let prev = synthetic_run(map_one(5, 0.7), 0.6, map_one(10, 0.5), "h");
+        let now = synthetic_run(map_one(5, 0.8), 0.7, map_one(10, 0.6), "h");
+        assert!(!is_regression(&now, &prev, 0.05));
+    }
+
+    /// 同値: prev == now → regression false。
+    #[test]
+    fn test_is_regression_no_change_returns_false() {
+        let prev = synthetic_run(map_one(5, 0.7), 0.6, map_one(10, 0.5), "h");
+        let now = synthetic_run(map_one(5, 0.7), 0.6, map_one(10, 0.5), "h");
+        assert!(!is_regression(&now, &prev, 0.05));
+    }
+
+    /// threshold 内の僅かな低下 (0.7 → 0.66、threshold 0.05) → false。
+    #[test]
+    fn test_is_regression_within_threshold_returns_false() {
+        let prev = synthetic_run(map_one(5, 0.7), 0.6, map_one(10, 0.5), "h");
+        let now = synthetic_run(map_one(5, 0.66), 0.6, map_one(10, 0.5), "h");
+        assert!(!is_regression(&now, &prev, 0.05));
+    }
+
+    /// recall@k で threshold 超え (0.8 → 0.6) → true。
+    #[test]
+    fn test_is_regression_recall_drop_returns_true() {
+        let prev = synthetic_run(map_one(5, 0.8), 0.6, map_one(10, 0.5), "h");
+        let now = synthetic_run(map_one(5, 0.6), 0.6, map_one(10, 0.5), "h");
+        assert!(is_regression(&now, &prev, 0.05));
+    }
+
+    /// MRR で threshold 超え → true (recall / nDCG は不変)。
+    #[test]
+    fn test_is_regression_mrr_drop_returns_true() {
+        let prev = synthetic_run(map_one(5, 0.7), 0.9, map_one(10, 0.5), "h");
+        let now = synthetic_run(map_one(5, 0.7), 0.8, map_one(10, 0.5), "h");
+        assert!(is_regression(&now, &prev, 0.05));
+    }
+
+    /// nDCG@k で threshold 超え → true (recall / MRR は不変)。
+    #[test]
+    fn test_is_regression_ndcg_drop_returns_true() {
+        let prev = synthetic_run(map_one(5, 0.7), 0.6, map_one(10, 0.9), "h");
+        let now = synthetic_run(map_one(5, 0.7), 0.6, map_one(10, 0.7), "h");
+        assert!(is_regression(&now, &prev, 0.05));
+    }
+
+    /// NaN/Inf を含む場合は比較不能 = false (CI を fail にしない安全側)。
+    /// proptest で値域は固定されているが防御的に確認。
+    #[test]
+    fn test_is_regression_non_finite_returns_false() {
+        let prev = synthetic_run(map_one(5, f64::NAN), 0.6, map_one(10, 0.5), "h");
+        let now = synthetic_run(map_one(5, 0.0), 0.6, map_one(10, 0.5), "h");
+        assert!(!is_regression(&now, &prev, 0.05));
+    }
+
+    /// History::previous_compatible: fingerprint 一致 → Some。
+    #[test]
+    fn test_previous_compatible_matching_fingerprint() {
+        let mut h = History::default();
+        let prev = synthetic_run(map_one(5, 0.7), 0.6, map_one(10, 0.5), "golden_xyz");
+        let now = synthetic_run(map_one(5, 0.6), 0.6, map_one(10, 0.5), "golden_xyz");
+        h.push_front(prev, 10);
+        assert!(h.previous_compatible(&now).is_some());
+    }
+
+    /// History::previous_compatible: fingerprint 違い (golden_hash 変更) → None。
+    /// CI 文脈では「golden YAML を更新したら勝手に regression 扱いになる」を回避する。
+    #[test]
+    fn test_previous_compatible_mismatched_fingerprint_returns_none() {
+        let mut h = History::default();
+        let prev = synthetic_run(map_one(5, 0.9), 0.9, map_one(10, 0.9), "golden_OLD");
+        let now = synthetic_run(map_one(5, 0.5), 0.5, map_one(10, 0.5), "golden_NEW");
+        h.push_front(prev, 10);
+        assert!(h.previous_compatible(&now).is_none());
     }
 }

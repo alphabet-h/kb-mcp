@@ -4,6 +4,22 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Added
+- `kb-mcp eval --fail-on-regression` (F-40). Exit with code 1 if
+  any aggregate metric (`recall@k` for any k, `MRR`, or `ndcg@k`
+  for any k) regressed from the previous **compatible** run by
+  more than `regression_threshold` (default 0.05, set via
+  `[eval].regression_threshold` in `kb-mcp.toml`). "Compatible"
+  means the previous run shares the same fingerprint (model /
+  reranker / limit / k_values / golden_hash), so updating the
+  golden YAML does *not* spuriously trigger a regression — the
+  comparison is just skipped on the next run. History is still
+  written before the process exits, so the new run is recorded
+  for the *next* comparison. The flag is a no-op when there is
+  no previous run, when `--no-history` / `--no-diff` is set, or
+  when fingerprints differ. Closes the F-38 follow-up scope split
+  out for "eval regression detection in CI".
+
 ### Internal
 - Added `.github/workflows/nightly.yml` (F-38). Runs daily at UTC
   04:00 (and on `workflow_dispatch`) with two jobs:

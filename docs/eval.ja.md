@@ -146,7 +146,30 @@ regression_threshold = 0.05    # 既定: 0.05
 ```
 
 CLI フラグが config より優先: `--golden`, `--k 1,5,10`, `--model`, `--reranker`,
-`--format text|json`, `--no-history`, `--no-diff`, `--no-color`。
+`--format text|json`, `--no-history`, `--no-diff`, `--no-color`,
+`--fail-on-regression`。
+
+### `--fail-on-regression` (CI gate)
+
+集計指標 (`recall@k` の各 k / `MRR` / `ndcg@k` の各 k) のうち少なくとも 1 つが
+**直前の compatible run** から `regression_threshold` (既定 0.05、`kb-mcp.toml`
+の `[eval].regression_threshold` で調整) を超えて退化していた場合、exit code 1
+で終了する。"compatible" = 直前 run の fingerprint (`model` / `reranker` /
+`limit` / `k_values` / golden YAML の content hash) が一致していること。
+golden YAML を更新した直後の run は fingerprint 不一致で比較対象外となるので、
+golden 改訂が誤検知に化けることはない。
+
+履歴は exit より前に書き出されるので、今回の run は次回比較用に保存される。
+
+CI 例:
+
+```yaml
+- name: kb-mcp eval gate
+  run: kb-mcp eval --kb-path knowledge-base --fail-on-regression
+```
+
+このフラグは「直前 run が無い」「`--no-history` を渡している」「`--no-diff`
+を渡している (比較自体抑止)」「fingerprint 不一致」のいずれでも no-op になる。
 
 ## トラブルシューティング
 
@@ -160,8 +183,6 @@ CLI フラグが config より優先: `--golden`, `--k 1,5,10`, `--model`, `--re
 
 ## 非スコープ (意図的)
 
-- **CI 連携 / 失敗 exit code**: `eval` は数値を出すだけ。`--fail-on-regression`
-  は将来別 feature
 - **Graded relevance (0 / 1 / 2)**: parse は寛容だが現状は無視
 - **Sweep / Matrix**: モデル比較は別 DB を 2 つ作って 2 回走らせる運用
 - **必須化**: `eval` は `index` / `serve` / `search` の挙動を 1 バイトも変えない
