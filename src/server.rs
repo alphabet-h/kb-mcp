@@ -193,8 +193,8 @@ struct IndexStats {
     duration_ms: u64,
 }
 
-#[derive(Serialize)]
-struct ErrorResponse {
+#[derive(Serialize, Debug)]
+pub(crate) struct ErrorResponse {
     error: String,
 }
 
@@ -326,9 +326,17 @@ impl KbServer {
 
         let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
 
-        let effective_ratio = params
-            .min_confidence_ratio
-            .unwrap_or(self.min_confidence_ratio);
+        let effective_ratio = match params.min_confidence_ratio {
+            Some(v) if v.is_finite() => v.max(0.0),
+            Some(_) => {
+                tracing::warn!(
+                    "min_confidence_ratio={:?} is not finite; falling back to server default",
+                    params.min_confidence_ratio
+                );
+                self.min_confidence_ratio
+            }
+            None => self.min_confidence_ratio,
+        };
         let low_confidence = compute_low_confidence(&scores, effective_ratio);
 
         let mut hits: Vec<SearchHit> = results.into_iter().map(Into::into).collect();
@@ -387,31 +395,18 @@ impl KbServer {
         description = "Get the full content and metadata of a document by its relative path within knowledge-base/."
     )]
     async fn get_document(&self, Parameters(params): Parameters<GetDocumentParams>) -> String {
-        let file_path = self.kb_path.join(&params.path);
-
-        // Path traversal prevention: ensure resolved path stays inside kb_path
-        let canonical = match file_path.canonicalize() {
+        let canonical = match validate_get_document_path(
+            &self.kb_path,
+            &params.path,
+            &self.parser_registry,
+            GET_DOCUMENT_MAX_BYTES,
+        ) {
             Ok(p) => p,
-            Err(_) => {
-                return serde_json::to_string_pretty(&ErrorResponse {
-                    error: format!(
-                        "File not found: {}. Path should be relative to knowledge-base/ (e.g. \"deep-dive/mcp/overview.md\").",
-                        params.path
-                    ),
-                })
-                .unwrap_or_default();
-            }
+            Err(e) => return serde_json::to_string_pretty(&e).unwrap_or_default(),
         };
-        if !canonical.starts_with(&self.kb_path) {
-            return serde_json::to_string_pretty(&ErrorResponse {
-                error: "Access denied: path is outside the knowledge base.".to_string(),
-            })
-            .unwrap_or_default();
-        }
-
+        let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
         match std::fs::read_to_string(&canonical) {
             Ok(raw) => {
-                let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
                 let resp = build_document_response(&self.parser_registry, &params.path, ext, raw);
                 serde_json::to_string_pretty(&resp).unwrap_or_default()
             }
@@ -732,6 +727,94 @@ pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crat
 /// `get_document` ツール用に、拡張子に対応する Parser で
 /// frontmatter (title/date/topic/tags) を抽出し DocumentResponse を組む。
 /// 純粋関数化してテスト可能にしている。
+/// `get_document` の最大バイト数。1 MiB を超える文書は read_to_string
+/// 一括読みでのメモリ膨張・レスポンス過大を避けるため拒否する。
+pub(crate) const GET_DOCUMENT_MAX_BYTES: u64 = 1024 * 1024;
+
+/// `get_document` のパス検証 + size cap。成功時は canonical な絶対パスを返す。
+/// 拒否時は `ErrorResponse` を返し、呼び出し側が JSON 化する。
+///
+/// 防御の順序:
+/// 1. **symlink reject** — `canonicalize` の前に拾う必要がある
+/// 2. **canonicalize + starts_with(kb_path)** — `..` 抜け道を defeat
+/// 3. **extension membership** — indexer と同じ拡張子セットに限定
+///    (`.git/config` や excluded_dirs 配下の bypass を遮断)
+/// 4. **size cap** — RAM-OOM を防ぐ
+pub(crate) fn validate_get_document_path(
+    kb_path: &std::path::Path,
+    rel_path: &str,
+    registry: &Registry,
+    max_bytes: u64,
+) -> std::result::Result<PathBuf, ErrorResponse> {
+    let file_path = kb_path.join(rel_path);
+
+    // 1. Symlink reject (canonicalize の前に判定)
+    match std::fs::symlink_metadata(&file_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(ErrorResponse {
+                error: "Access denied: symlinks are not allowed.".to_string(),
+            });
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return Err(ErrorResponse {
+                error: format!(
+                    "File not found: {rel_path}. Path should be relative to knowledge-base/ (e.g. \"deep-dive/mcp/overview.md\")."
+                ),
+            });
+        }
+    }
+
+    // 2. Path traversal prevention
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(ErrorResponse {
+                error: format!(
+                    "File not found: {rel_path}. Path should be relative to knowledge-base/ (e.g. \"deep-dive/mcp/overview.md\")."
+                ),
+            });
+        }
+    };
+    if !canonical.starts_with(kb_path) {
+        return Err(ErrorResponse {
+            error: "Access denied: path is outside the knowledge base.".to_string(),
+        });
+    }
+
+    // 3. Extension membership check
+    let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !registry.has_extension(ext) {
+        return Err(ErrorResponse {
+            error: format!(
+                "Access denied: extension {ext:?} is not in the indexed parser registry. Allowed: {:?}",
+                registry.extensions()
+            ),
+        });
+    }
+
+    // 4. Size cap
+    match std::fs::metadata(&canonical) {
+        Ok(meta) if meta.len() > max_bytes => {
+            return Err(ErrorResponse {
+                error: format!(
+                    "File too large: {} bytes (max {} bytes).",
+                    meta.len(),
+                    max_bytes
+                ),
+            });
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(ErrorResponse {
+                error: format!("Failed to stat file: {e}"),
+            });
+        }
+    }
+
+    Ok(canonical)
+}
+
 ///
 /// 登録されていない拡張子はフォールバックで Markdown parser を使う (pre-
 /// feature-20 と同じ挙動)。`.txt` はファイル名から title を derive するため
@@ -1256,5 +1339,94 @@ mod tests {
         // ratio=0.0 -> 常に false
         let scores = [0.3_f32, 0.3, 0.3];
         assert!(!compute_low_confidence(&scores, 0.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_get_document_path: F-28 hardening
+    // -----------------------------------------------------------------------
+
+    fn md_only_registry() -> Registry {
+        Registry::defaults()
+    }
+
+    #[test]
+    fn test_validate_get_document_path_normal_md_passes() {
+        let kb = TempKb::new("gd-ok");
+        kb.write("docs/a.md", "# A\nbody\n");
+        let r = validate_get_document_path(&kb.path, "docs/a.md", &md_only_registry(), 1024 * 1024);
+        assert!(r.is_ok(), "normal .md should pass: {r:?}");
+    }
+
+    #[test]
+    fn test_validate_get_document_path_rejects_extension_outside_registry() {
+        let kb = TempKb::new("gd-ext");
+        // .git/config を作って read 可能にしてみる
+        kb.write(".git/config", "[user]\n  email = test@example.com\n");
+        let err =
+            validate_get_document_path(&kb.path, ".git/config", &md_only_registry(), 1024 * 1024)
+                .unwrap_err();
+        assert!(
+            err.error.contains("not in the indexed parser registry"),
+            "expected extension reject, got: {}",
+            err.error
+        );
+    }
+
+    #[test]
+    fn test_validate_get_document_path_rejects_oversized_file() {
+        let kb = TempKb::new("gd-size");
+        // max を 1 KiB にして 2 KiB のファイルで超過させる
+        let big = "a".repeat(2 * 1024);
+        kb.write("big.md", &big);
+        let err =
+            validate_get_document_path(&kb.path, "big.md", &md_only_registry(), 1024).unwrap_err();
+        assert!(
+            err.error.contains("File too large"),
+            "expected size reject, got: {}",
+            err.error
+        );
+    }
+
+    #[test]
+    fn test_validate_get_document_path_rejects_traversal() {
+        let kb = TempKb::new("gd-trav");
+        // kb_path 外側にファイル作成
+        let outside = kb.path.parent().unwrap().join(format!(
+            "kb-mcp-srvtest-outside-gd-{}-{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&outside, "secret").unwrap();
+        let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let err = validate_get_document_path(&kb.path, &rel, &md_only_registry(), 1024 * 1024)
+            .unwrap_err();
+        // Either "outside the knowledge base" (canonicalize succeeded) or
+        // "File not found" (canonicalize failed because traversal escaped before existing).
+        assert!(
+            err.error.contains("outside the knowledge base")
+                || err.error.contains("File not found"),
+            "expected traversal reject, got: {}",
+            err.error
+        );
+        let _ = fs::remove_file(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_get_document_path_rejects_symlink() {
+        let kb = TempKb::new("gd-sym");
+        let target = kb.write("target.md", "# target\n");
+        let link = kb.path.join("link.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = validate_get_document_path(&kb.path, "link.md", &md_only_registry(), 1024 * 1024)
+            .unwrap_err();
+        assert!(
+            err.error.contains("symlinks are not allowed"),
+            "expected symlink reject, got: {}",
+            err.error
+        );
     }
 }

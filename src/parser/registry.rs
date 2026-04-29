@@ -60,6 +60,11 @@ impl Registry {
     pub fn extensions(&self) -> Vec<&'static str> {
         self.parsers.iter().map(|p| p.extension()).collect()
     }
+
+    /// True if `ext` (without leading dot, lowercase recommended) is registered.
+    pub fn has_extension(&self, ext: &str) -> bool {
+        self.parsers.iter().any(|p| p.extension() == ext)
+    }
 }
 
 impl Default for Registry {

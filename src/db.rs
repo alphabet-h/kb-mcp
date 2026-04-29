@@ -1070,25 +1070,25 @@ impl Database {
 
     /// List all indexed topics grouped by (category, topic).
     pub fn list_topics(&self) -> Result<Vec<TopicInfo>> {
+        // タイトルは json_group_array で集めて JSON 配列として受ける。
+        // 旧実装は GROUP_CONCAT(title, '||') + split を使っていたが、
+        // タイトル中に "||" を含む doc が紛れると誤分割していた。
         let sql = "
             SELECT category, topic,
                    COUNT(*) AS file_count,
                    MAX(last_indexed) AS last_updated,
-                   GROUP_CONCAT(title, '||') AS titles
+                   json_group_array(title) AS titles_json
             FROM documents
             GROUP BY category, topic
             ORDER BY category, topic
         ";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
-            let titles_raw: Option<String> = row.get(4)?;
-            let titles = titles_raw
-                .map(|s| {
-                    s.split("||")
-                        .filter(|t| !t.is_empty())
-                        .map(String::from)
-                        .collect()
-                })
+            let titles_json: Option<String> = row.get(4)?;
+            let titles: Vec<String> = titles_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<Option<String>>>(s).ok())
+                .map(|v| v.into_iter().flatten().collect())
                 .unwrap_or_default();
             Ok(TopicInfo {
                 category: row.get(0)?,
@@ -2411,6 +2411,55 @@ mod tests {
         assert!(mcp.titles.contains(&"MCP Features".to_string()));
 
         println!("test_list_topics: OK");
+    }
+
+    /// Regression for F-30: title that contains the legacy `||` separator
+    /// must not be split. Prior implementation used GROUP_CONCAT(title, '||')
+    /// + .split("||"), which silently fragmented such titles.
+    #[test]
+    fn test_list_topics_title_with_double_pipe_is_not_split() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_document(
+            "deep-dive/x/a.md",
+            Some("foo || bar"),
+            Some("x"),
+            Some("deep-dive"),
+            None,
+            &[],
+            Some("2026-04-29"),
+            "h1",
+        )
+        .unwrap();
+        db.upsert_document(
+            "deep-dive/x/b.md",
+            Some("plain title"),
+            Some("x"),
+            Some("deep-dive"),
+            None,
+            &[],
+            Some("2026-04-29"),
+            "h2",
+        )
+        .unwrap();
+
+        let topics = db.list_topics().unwrap();
+        let group = topics
+            .iter()
+            .find(|t| t.topic.as_deref() == Some("x"))
+            .expect("group exists");
+        assert_eq!(group.file_count, 2);
+        assert_eq!(
+            group.titles.len(),
+            2,
+            "expected 2 titles, got {:?}",
+            group.titles
+        );
+        assert!(
+            group.titles.contains(&"foo || bar".to_string()),
+            "title with || was fragmented: {:?}",
+            group.titles
+        );
+        assert!(group.titles.contains(&"plain title".to_string()));
     }
 
     #[test]

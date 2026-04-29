@@ -4,6 +4,35 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Security
+- `get_document` MCP tool now rejects symlinks, restricts the file
+  extension to the registered parser set, and caps file size at 1 MiB.
+  Closes a pre-existing read primitive whereby a connected MCP client
+  could call `get_document {path: ".git/config"}` (or any other
+  non-indexed file under `kb_path`, including paths under
+  `exclude_dirs`) and have the server return its contents — the prior
+  defense was only a `kb_path`-prefix check on the canonicalized path,
+  which is necessary but not sufficient because `canonicalize` resolves
+  symlinks and the prefix check does not enforce the indexer's own
+  scoping (extension whitelist, dir exclusions). The size cap mitigates
+  a trivial RAM-OOM where one request reads a multi-GB file into a
+  string buffer.
+
+### Fixed
+- `kb-mcp eval` becomes more robust against non-finite f64 values:
+  - `reciprocal_rank` guards rank==0 → returns `0.0` (was `1.0/0.0
+    = inf`, poisoning aggregate MRR; warn-logged when triggered).
+  - `format_json` no longer panics on a previous `EvalRun` whose
+    serialization fails (e.g. NaN/Inf survived from older history).
+- `min_quality` and `min_confidence_ratio` MCP search params now
+  reject NaN / ±Inf and fall back to the configured server defaults.
+  Previously NaN flowed through `clamp(0.0, 1.0)` unchanged (NaN
+  comparisons are all false), silently disabling the quality filter
+  or low-confidence judgment depending on the path.
+- `list_topics` MCP tool no longer fragments titles that contain the
+  substring `||`. The aggregator now uses `json_group_array(title)`
+  instead of `GROUP_CONCAT(title, '||') + .split("||")`.
+
 ### Documentation
 - `examples/deployments/{personal,nas-shared,intranet-http}/.mcp.json`
   now set `"alwaysLoad": true` on the kb-mcp server entry. This is a
