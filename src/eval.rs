@@ -900,6 +900,102 @@ mod tests {
         assert!(score <= 1.0 + 1e-9, "nDCG must not exceed 1.0, got {score}");
     }
 
+    // -----------------------------------------------------------------------
+    // F-37: f64 invariant property tests
+    // recall_at_k / ndcg_at_k は binary relevance metric なので、入力に
+    // 関わらず必ず [0.0, 1.0] の値域を持つ。proptest で多様な expected /
+    // top の組合せを投げて値域違反 (nDCG > 1.0 級の regression) を機械的に
+    // catch する。
+    // -----------------------------------------------------------------------
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 256,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// recall_at_k の値域 invariant: 任意の expected / top / k に対して
+        /// 結果は [0.0, 1.0] に収まり、有限値である。
+        #[test]
+        fn prop_recall_at_k_in_unit_range(
+            expected_paths in proptest::collection::vec("[a-z]{1,4}\\.md", 0..6),
+            top_paths in proptest::collection::vec("[a-z]{1,4}\\.md", 0..12),
+            k in 0usize..15,
+        ) {
+            let expected: Vec<ExpectedHit> = expected_paths
+                .iter()
+                .map(|p| exp(p, None))
+                .collect();
+            let top: Vec<HitRecord> = top_paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| hit(i + 1, p, None))
+                .collect();
+            let score = recall_at_k(&expected, &top, k);
+            proptest::prop_assert!(
+                score.is_finite() && (0.0..=1.0).contains(&score),
+                "recall@{} must be in [0.0, 1.0] and finite, got {}",
+                k,
+                score
+            );
+        }
+
+        /// ndcg_at_k の値域 invariant: 任意の expected / top / k に対して
+        /// 結果は [0.0, 1.0] に収まり、有限値である。同 path 多 chunk
+        /// (multi-heading) のシナリオでも DCG が IDCG を超えないことを
+        /// 含意する (v0.4.2 で fix した regression の永続防御)。
+        #[test]
+        fn prop_ndcg_at_k_in_unit_range(
+            expected_paths in proptest::collection::vec("[a-z]{1,4}\\.md", 0..6),
+            top_entries in proptest::collection::vec(
+                ("[a-z]{1,4}\\.md", proptest::option::of("[A-Z]{1,4}")),
+                0..12,
+            ),
+            k in 0usize..15,
+        ) {
+            let expected: Vec<ExpectedHit> = expected_paths
+                .iter()
+                .map(|p| exp(p, None))
+                .collect();
+            let top: Vec<HitRecord> = top_entries
+                .iter()
+                .enumerate()
+                .map(|(i, (p, h))| hit(i + 1, p, h.as_deref()))
+                .collect();
+            let score = ndcg_at_k(&expected, &top, k);
+            proptest::prop_assert!(
+                score.is_finite() && (0.0..=1.0).contains(&score),
+                "nDCG@{} must be in [0.0, 1.0] and finite, got {}",
+                k,
+                score
+            );
+        }
+
+        /// reciprocal_rank の値域 invariant: 任意入力に対して [0.0, 1.0]
+        /// に収まり、有限値である (rank=0 は内部 guard で 0.0 に倒れる)。
+        #[test]
+        fn prop_reciprocal_rank_in_unit_range(
+            expected_paths in proptest::collection::vec("[a-z]{1,4}\\.md", 0..6),
+            top_paths in proptest::collection::vec("[a-z]{1,4}\\.md", 0..12),
+        ) {
+            let expected: Vec<ExpectedHit> = expected_paths
+                .iter()
+                .map(|p| exp(p, None))
+                .collect();
+            let top: Vec<HitRecord> = top_paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| hit(i + 1, p, None))
+                .collect();
+            let rr = reciprocal_rank(&expected, &top);
+            proptest::prop_assert!(
+                rr.is_finite() && (0.0..=1.0).contains(&rr),
+                "reciprocal_rank must be in [0.0, 1.0] and finite, got {}",
+                rr
+            );
+        }
+    }
+
     #[test]
     fn test_compute_query_metrics() {
         let expected = vec![exp("a.md", None), exp("b.md", None)];
