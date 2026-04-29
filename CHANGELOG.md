@@ -4,6 +4,29 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Security
+- Hardened MCP `search` tool input boundaries (F-35):
+  - `query` is now capped at 1 KiB. Larger queries are rejected with
+    a clear `ErrorResponse` instead of being silently truncated by
+    the embedder / FTS5 layer downstream. This makes response shape
+    predictable and removes a `query × content` O(N×M) cost vector
+    from `compute_match_spans`.
+  - `compute_match_spans` skips content larger than 256 KiB
+    (`None` return) — typical chunks are heading-sized (a few KiB),
+    but a malformed indexer state could expose pathological chunks.
+  - `compute_match_spans` caps the returned span count at 100 per
+    chunk. A query like `"a"` against a long string used to return
+    one span per occurrence; now the count saturates so the JSON
+    response stays bounded.
+
+  These limits are constants (`SEARCH_QUERY_MAX_BYTES`,
+  `MATCH_SPAN_CONTENT_MAX_BYTES`, `MATCH_SPAN_MAX_COUNT` in
+  `src/server.rs`) and are not configurable today — they exist to
+  bound *abuse*, not legitimate use. The 1 KiB query cap matches
+  the typical MCP client embedding budget; chunks that legitimately
+  hit the 256 KiB ceiling are already over the FTS / embedding
+  practical horizon.
+
 ### Added
 - `kb-mcp eval --fail-on-regression` (F-40). Exit with code 1 if
   any aggregate metric (`recall@k` for any k, `MRR`, or `ndcg@k`

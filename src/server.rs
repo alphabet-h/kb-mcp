@@ -242,6 +242,21 @@ impl KbServer {
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(5);
 
+        // F-35: query length cap (1 KiB)。上限超えは early reject。
+        // embedder / FTS5 layer の内部 truncate に任せる手もあるが、上流で
+        // reject した方が「なぜ結果が変なのか」分かりやすく、`compute_match_spans`
+        // の O(N×M) cost も query 側から抑制できる。
+        if params.query.len() > SEARCH_QUERY_MAX_BYTES {
+            return serde_json::to_string_pretty(&ErrorResponse {
+                error: format!(
+                    "query is too large: {} bytes (max {SEARCH_QUERY_MAX_BYTES} bytes). \
+                     For long-form retrieval, slice the query or use multiple smaller calls.",
+                    params.query.len()
+                ),
+            })
+            .unwrap_or_default();
+        }
+
         // path_globs を事前 compile。エラー時は ErrorResponse を返却。
         let cpg = match params.path_globs.as_ref() {
             Some(globs) => match compile_path_globs(globs) {
@@ -678,13 +693,24 @@ pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
     (top1 / mean) < min_ratio
 }
 
+/// `compute_match_spans` が計算対象とする content の最大バイト数 (256 KiB)。
+/// 通常の chunk は heading 単位で数 KiB だが、frontmatter のみ巨大ファイル等
+/// 異常入力で O(N×M) になり得るため定義域を切る。F-35。
+pub(crate) const MATCH_SPAN_CONTENT_MAX_BYTES: usize = 256 * 1024;
+
+/// 1 chunk あたりが返す span の最大件数。一致が大量に出る query (例: 1 文字
+/// term × 大き目 content) で span 配列が肥大するのを抑える。F-35。
+pub(crate) const MATCH_SPAN_MAX_COUNT: usize = 100;
+
 /// query を whitespace で分割し、全 term が ASCII の場合のみ chunk 内で
 /// case-insensitive な substring 検索を行う。byte offset (UTF-8 char boundary 保証) を返す。
 ///
 /// 戻り値:
-/// - `None` — query 全体に non-ASCII を 1 つでも含む / 空 query (= 計算しない)
+/// - `None` — query 全体に non-ASCII を 1 つでも含む / 空 query / content
+///   が `MATCH_SPAN_CONTENT_MAX_BYTES` を超える (= 計算しない)
 /// - `Some(vec![])` — 計算したが一致なし
-/// - `Some(spans)` — 計算済みでマッチあり (start byte 順にソート + 重複除去)
+/// - `Some(spans)` — 計算済みでマッチあり (start byte 順にソート + 重複除去、
+///   `MATCH_SPAN_MAX_COUNT` 件で打ち切り)
 ///
 /// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
 pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crate::db::MatchSpan>> {
@@ -699,9 +725,16 @@ pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crat
     if terms.iter().any(|t| !t.is_ascii()) {
         return None;
     }
+
+    // F-35: content size cap。通常 chunk (見出し単位、数 KiB) は影響なし、
+    // 異常な巨大入力に対する O(N×M) ガード。
+    if content.len() > MATCH_SPAN_CONTENT_MAX_BYTES {
+        return None;
+    }
+
     let content_lower = content.to_ascii_lowercase();
     let mut spans: Vec<crate::db::MatchSpan> = Vec::new();
-    for term in &terms {
+    'outer: for term in &terms {
         let term_lower = term.to_ascii_lowercase();
         if term_lower.is_empty() {
             continue;
@@ -717,6 +750,12 @@ pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crat
                 "ASCII-only invariant broke: span ({start}, {end}) not on char boundary in content"
             );
             spans.push(crate::db::MatchSpan { start, end });
+            // F-35: span 数の上限。dedup 前にカウントする (小さい cap=100 に
+            // 対して dedup 後でも 100 を保つには push 段階で抑制で十分、
+            // dedup によって減ることはあっても増えない)。
+            if spans.len() >= MATCH_SPAN_MAX_COUNT {
+                break 'outer;
+            }
         }
     }
     spans.sort_by_key(|s| (s.start, s.end));
@@ -730,6 +769,12 @@ pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crat
 /// `get_document` の最大バイト数。1 MiB を超える文書は read_to_string
 /// 一括読みでのメモリ膨張・レスポンス過大を避けるため拒否する。
 pub(crate) const GET_DOCUMENT_MAX_BYTES: u64 = 1024 * 1024;
+
+/// `search` MCP tool が受理する query 文字列の最大バイト数 (1 KiB)。
+/// 上限超えは ErrorResponse で reject する。embedder / FTS5 layer は内部で
+/// truncate するが、上流で reject した方がレスポンスが予測可能になり、
+/// `compute_match_spans` の O(N×M) を query 側からも抑制できる。F-35。
+pub(crate) const SEARCH_QUERY_MAX_BYTES: usize = 1024;
 
 /// `get_document` のパス検証 + size cap。成功時は canonical な絶対パスを返す。
 /// 拒否時は `ErrorResponse` を返し、呼び出し側が JSON 化する。
@@ -1297,6 +1342,47 @@ mod tests {
     fn test_compute_match_spans_no_match_returns_empty_vec() {
         let spans = compute_match_spans("nonexistent", "rust").unwrap();
         assert_eq!(spans.len(), 0);
+    }
+
+    /// F-35: content size cap。`MATCH_SPAN_CONTENT_MAX_BYTES` を超える content
+    /// は計算対象外として `None` を返す (= 計算未実施扱い)。
+    #[test]
+    fn test_compute_match_spans_oversize_content_returns_none() {
+        let huge_content = "rust ".repeat(MATCH_SPAN_CONTENT_MAX_BYTES); // 5x cap 以上
+        let spans = compute_match_spans("rust", &huge_content);
+        assert!(spans.is_none());
+    }
+
+    /// F-35: content がちょうど cap 以下なら計算する (境界値)。
+    #[test]
+    fn test_compute_match_spans_at_cap_content_succeeds() {
+        // 全部 'a' で cap ジャストを作る。query "a" は無数にヒットするが、
+        // span 数 cap (`MATCH_SPAN_MAX_COUNT`) で打ち切られることを次の test で確認。
+        let content = "a".repeat(MATCH_SPAN_CONTENT_MAX_BYTES);
+        let spans = compute_match_spans("a", &content);
+        assert!(spans.is_some(), "exactly at cap should be processed");
+    }
+
+    /// F-35: span 数の上限。1 文字 term × 巨大 content で出る大量一致を
+    /// `MATCH_SPAN_MAX_COUNT` で打ち切る。
+    #[test]
+    fn test_compute_match_spans_count_capped() {
+        // 'a' を MATCH_SPAN_MAX_COUNT * 5 個並べる (素朴に伸ばすと cap 超え
+        // するので、cap 以内に収める)。
+        let count = MATCH_SPAN_MAX_COUNT * 5;
+        assert!(
+            count <= MATCH_SPAN_CONTENT_MAX_BYTES,
+            "test setup precondition"
+        );
+        let content = "a".repeat(count);
+        let spans = compute_match_spans("a", &content).unwrap();
+        // dedup で減ることはあるが、cap (= 100) を超えないことだけ保証する。
+        assert!(
+            spans.len() <= MATCH_SPAN_MAX_COUNT,
+            "spans.len()={} should be <= cap={}",
+            spans.len(),
+            MATCH_SPAN_MAX_COUNT
+        );
     }
 
     // -----------------------------------------------------------------------
