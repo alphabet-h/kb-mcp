@@ -4,6 +4,19 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Internal
+- Added `tests/common/` shared module (F-39 part 1). New
+  integration tests can `mod common;` and reuse
+  `common::temp::TempRoot` (flat scratch dir) and
+  `common::temp::TempKbLayout` (`root/kb/` two-level layout
+  for tests where the kb-mcp DB sibling needs to be reaped on
+  Drop). Replaces seven hand-rolled `TempKb` / `TempDir`
+  structs scattered across the existing integration tests —
+  per the audit note, those existing tests are intentionally
+  *not* rewritten in this PR (additive only). `tests/common_helpers.rs`
+  is the entry-point test crate that fires the 5 inline unit
+  tests of the helpers themselves.
+
 ## [0.6.0] - 2026-04-30
 
 ### Security
