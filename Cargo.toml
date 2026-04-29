@@ -46,6 +46,19 @@ shellexpand = "3"
 # Property-based testing for f64 invariant guards (recall_at_k / ndcg_at_k /
 # chunk_quality_score の値域 [0.0, 1.0] を proptest で固定)。
 proptest = "1"
+# [F-39 PR-B] criterion-based benchmarking infrastructure. The benches under
+# `benches/` are gated to the binary's *external* surface only (subprocess /
+# pure-function level), since kb-mcp is a binary crate with no lib target.
+# `default-features = false` skips the `rayon`-driven HTML report machinery,
+# trading ~30s of compile time per first build for (no HTML; we already use
+# the JSON output for trend tracking).
+criterion = { version = "0.5", default-features = false }
+
+# Each `[[bench]]` entry below MUST set `harness = false` because criterion
+# brings its own harness. `name` matches the file under `benches/`.
+[[bench]]
+name = "string_ops"
+harness = false
 
 # The profile that 'dist' will build with
 [profile.dist]
