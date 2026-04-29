@@ -166,4 +166,32 @@ mod tests {
         assert_eq!(doc.frontmatter.topic.as_deref(), Some("mcp"));
         assert_eq!(doc.frontmatter.depth.as_deref(), Some("1"));
     }
+
+    /// Regression for F-34: YAML alias bomb は serde_yaml_bw の panic-free
+    /// パース挙動下で安全に処理されること (panic / OOM しない)。
+    /// 旧 serde_yaml 0.9.34 は max_aliases 制限が無く expansion で大量メモリを
+    /// 食う余地があった。serde_yaml_bw は depth/alias 系の制限を持つため、
+    /// このサイズなら Err 返却もしくは bounded な Ok で帰ってくる。
+    /// 本 test の意図は「panic しない」のスモーク確認。
+    #[test]
+    fn test_frontmatter_yaml_alias_bomb_is_safe() {
+        // 5 階層 × fan-out 8 = 32768 expanded elements 相当の bomb (穏やか目)
+        let bomb = r#"---
+title: bomb
+tags:
+  - &a x
+  - &b [*a, *a, *a, *a, *a, *a, *a, *a]
+  - &c [*b, *b, *b, *b, *b, *b, *b, *b]
+  - &d [*c, *c, *c, *c, *c, *c, *c, *c]
+  - &e [*d, *d, *d, *d, *d, *d, *d, *d]
+---
+body
+"#;
+        // 「panic しない」だけを assert する。エラーを返してフォールバックでも OK、
+        // 何かしら frontmatter / body が組み立てられても OK。
+        let doc = parse(bomb);
+        // body は本文として返ってくる (frontmatter の解析失敗時は default に倒れる仕様)
+        let _ = doc.frontmatter;
+        let _ = doc.chunks;
+    }
 }

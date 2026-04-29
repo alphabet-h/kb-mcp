@@ -55,7 +55,7 @@ impl GoldenSet {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read golden file: {}", path.display()))?;
-        let gs: Self = serde_yaml::from_str(&text)
+        let gs: Self = serde_yaml_bw::from_str(&text)
             .with_context(|| format!("failed to parse golden file: {}", path.display()))?;
         Ok(gs)
     }
@@ -542,7 +542,7 @@ pub fn default_history_path(kb_path: &Path) -> PathBuf {
 pub fn run(opts: &RunOpts) -> Result<EvalRun> {
     let golden_bytes = std::fs::read(&opts.golden_path)
         .with_context(|| format!("failed to read golden file: {}", opts.golden_path.display()))?;
-    let gs: GoldenSet = serde_yaml::from_slice(&golden_bytes).with_context(|| {
+    let gs: GoldenSet = serde_yaml_bw::from_slice(&golden_bytes).with_context(|| {
         format!(
             "failed to parse golden file: {}",
             opts.golden_path.display()
