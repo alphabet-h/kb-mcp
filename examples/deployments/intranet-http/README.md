@@ -125,6 +125,16 @@ If you need authentication today, the canonical recipe is:
 Bind kb-mcp to `127.0.0.1:3100` in `kb-mcp.toml`, configure nginx to
 proxy `/mcp` and `/healthz` with `proxy_set_header Host $host` etc.
 
+### `alwaysLoad: true` (client-side)
+
+The example client `.mcp.json` sets `"alwaysLoad": true`. This is a
+Claude Code v2.1.121+ option that forces kb-mcp's tools to be present
+at initial load instead of going through the tool-search shortlist.
+Recommended for RAG (always-available search). Heavy lifting happens
+server-side, so client-side startup cost is negligible — safe to keep
+enabled for HTTP transport. Other MCP clients (Cursor, etc.) ignore
+the field.
+
 ## When to step up to another recipe
 
 - Authentication isn't optional → you've already outgrown this recipe;

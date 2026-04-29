@@ -119,6 +119,15 @@ opt-in、そして運用責任は利用者にある。
 `kb-mcp.toml` で `127.0.0.1:3100` に bind し、nginx で `/mcp` と `/healthz`
 を `proxy_set_header Host $host` 等とともに proxy。
 
+### `alwaysLoad: true` (クライアント側)
+
+サンプルの client `.mcp.json` には `"alwaysLoad": true` を入れている。これは
+Claude Code v2.1.121+ のオプションで、tool-search ショートリストを介さず initial
+load で kb-mcp のツールを必ず含める。RAG 用途 (常時検索可能) では推奨。重い処理は
+サーバ側で行われるため、HTTP transport ではクライアント側起動コストは無視できる
+レベル — 有効のままで問題ない。他 MCP クライアント (Cursor 等) は未知フィールドと
+して無視する。
+
 ## 次のレシピへの移行サイン
 
 - 認証が必須になった → 本レシピを既に超えている。手前に認証付き reverse

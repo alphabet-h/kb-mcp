@@ -109,6 +109,11 @@ KB と SQLite インデックスを NAS (NFS / SMB / CIFS) 上に置く構成。
 - **モデル DL** は依然として各マシン独立。`FASTEMBED_CACHE_DIR` を共有 path に
   向けるなら **そのマシンのローカル disk** に限る。NAS 上に向けると初回 load が
   極端に遅くなり、ホスト間で embedder ロードがシリアライズされる
+- **`alwaysLoad: true`** はサンプル `.mcp.json` に入れている Claude Code v2.1.121+
+  のオプション。initial load で kb-mcp のツールを必ず含める。RAG 用途では便利だが、
+  NAS マウントの KB は初回起動コスト (slow disk + 初回モデル DL) が大きくなりがち
+  なので、起動レイテンシを優先したい場合は外す選択肢もある。他 MCP クライアントは
+  未知フィールドとして無視
 
 ## 次のレシピへの移行サイン
 

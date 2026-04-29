@@ -121,6 +121,12 @@ read-only and run kb-mcp serve locally pointing at the mounted path.
   if it lives on local disk for that machine; pointing it at the NAS
   produces extremely slow first-load and serializes embedder loads
   across hosts.
+- **`alwaysLoad: true`** in the example `.mcp.json` is a Claude Code
+  v2.1.121+ option that forces kb-mcp's tools to be present at initial
+  load. Useful for RAG ("search anytime"). With NAS-mounted KBs the
+  first-startup cost can be larger than personal (slow disk + initial
+  model download), so consider dropping it if startup latency matters
+  more than tool-availability. Other MCP clients ignore the field.
 
 ## When to step up to another recipe
 

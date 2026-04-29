@@ -42,6 +42,7 @@ Claude Code は stdio 経由で kb-mcp を起動する。
 - **PostToolUse hook** はオプション、watcher と相補的 — [`examples/hooks/`](../../hooks/) 参照。watcher が手動編集をカバーするので、hook の価値は「Claude 自身がファイルを書いた直後にゼロレイテンシで再構築したい」場合に限られる
 - **Reranker** はロードのみで既定 off。MCP の `search` 呼び出しに `rerank: true` を渡して per-query で有効化する想定 (CPU で ~300-700 ms のレイテンシ税は毎回払うほどでない)
 - **1 サーバ : 1 クライアント**。stdio は 1 接続のみ — 個人用途なら十分。複数クライアントが必要なら [`intranet-http/`](../intranet-http/) へ
+- **`alwaysLoad: true`** はサンプル `.mcp.json` に入れている Claude Code v2.1.121+ のオプション。tool-search ショートリストを介さず initial load で kb-mcp のツールを必ず含めるようにする。RAG 用途 (「いつでも検索したい」) では推奨。初回起動コスト (モデル DL / index open) を抑えたい / クライアントが v2.1.121 未満なら削除可。他 MCP クライアントは未知フィールドとして無視
 
 ## 次のレシピへの移行サイン
 
