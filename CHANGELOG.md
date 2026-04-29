@@ -5,6 +5,21 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 ## [Unreleased]
 
 ### Internal
+- Added criterion benchmark infrastructure under `benches/`
+  (F-39 part 2). `criterion = "0.5"` with `default-features =
+  false` (skips the rayon-driven HTML report machinery to
+  shave first-build compile time). The first bench file,
+  `benches/string_ops.rs`, measures `to_ascii_lowercase` on
+  a 4 KiB ASCII chunk and on an empty string — representative
+  of `compute_match_spans`'s inner loop and a stable baseline
+  for spotting hot-path regressions in the stdlib / compiler.
+  Real index-throughput and search-latency benches are
+  deferred to a follow-up because kb-mcp is a binary crate
+  with no `[lib]` target; bridging that requires either
+  promoting a sliver of the crate to `[lib]` or driving the
+  released binary as a subprocess. Both are out of scope for
+  this PR — the goal here is to prove the harness wires up and
+  give future benches a copy-paste pattern.
 - Added `tests/common/` shared module (F-39 part 1). New
   integration tests can `mod common;` and reuse
   `common::temp::TempRoot` (flat scratch dir) and
