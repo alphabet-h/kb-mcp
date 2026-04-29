@@ -89,6 +89,7 @@ kind = "http"
 
 [transport.http]
 bind = "127.0.0.1:3100"
+# allowed_hosts = ["kb.example.lan", "192.168.1.10"]  # opt-in for LAN exposure (v0.5.0+)
 
 # Optional: `kb-mcp eval` (retrieval quality evaluation, power-user feature).
 # You only need this section if you run `kb-mcp eval` for tuning or
@@ -514,6 +515,7 @@ The server mounts the MCP endpoint at `/mcp` and exposes `/healthz` for probes. 
 Security notes:
 - Default bind is `127.0.0.1:3100` (loopback). Use `--bind 0.0.0.0:3100` only on trusted networks — **kb-mcp has no built-in authentication yet**.
 - rmcp's Streamable HTTP layer enforces Host header validation (loopback only by default) to prevent DNS rebinding attacks.
+- For LAN / intranet exposure, set `[transport.http].allowed_hosts` in `kb-mcp.toml` to your public hostnames / IPs (e.g. `["kb.example.lan", "192.168.1.10"]`). Binding to a non-loopback address with the default loopback-only allow-list means external requests are 403'd by Host validation; kb-mcp emits a `tracing::warn` at startup when this misconfiguration is detected. An empty `allowed_hosts = []` disables the check entirely (rmcp's `disable_allowed_hosts` semantics) — operator-acknowledged opt-out, not recommended for public deployments.
 - Mutex-based serialization inside the server means HTTP concurrent requests are still processed sequentially at the embedder / DB level (~10 qps expected for `search`). Heavy parallelism is a future enhancement.
 
 ### Live-sync via file watcher

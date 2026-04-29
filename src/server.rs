@@ -1022,10 +1022,13 @@ pub async fn run_server(
 
     let result = match transport {
         crate::transport::Transport::Stdio => crate::transport::stdio::run_stdio(&shared).await,
-        crate::transport::Transport::Http { addr } => {
+        crate::transport::Transport::Http {
+            addr,
+            allowed_hosts,
+        } => {
             // move shared to http runner (no clone needed — stdio branch
             // consumes it only by reference and is mutually exclusive).
-            crate::transport::http::run_http(addr, shared).await
+            crate::transport::http::run_http(addr, allowed_hosts, shared).await
         }
     };
     watcher_handle.abort();
