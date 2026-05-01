@@ -4,6 +4,24 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Documentation
+- New `examples/deployments/personal-http/` recipe (closes
+  feature-ideas.md H-8). Targets the case where a single user
+  opens multiple Claude Code / Cursor sessions in parallel on
+  one machine — the stdio recipe spawns one kb-mcp child per
+  session (peak RAM = N × ~2.3 GB on BGE-M3, plus N file
+  watchers on the same dir, plus DB writer contention if one
+  session does `index --force`). The new recipe runs **one**
+  daemon as a loopback HTTP service on `127.0.0.1:3100`; every
+  session connects via Streamable HTTP, so one embedder + one
+  DB + one watcher regardless of session count. Ships with a
+  loopback-only `kb-mcp.toml`, a client-side `.mcp.json`
+  template, and OS launcher units for all three platforms
+  (Linux systemd **user** unit, macOS launchd LaunchAgent,
+  Windows Task Scheduler XML). Selection guide at
+  `examples/deployments/README{,.ja}.md` updated 3 patterns →
+  4 patterns; main README en+ja updated to match.
+
 ## [0.6.1] - 2026-05-01
 
 ### Internal
