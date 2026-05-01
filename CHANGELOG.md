@@ -5,6 +5,23 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 ## [Unreleased]
 
 ### Internal
+- Bumped GitHub Actions to Node.js 24-runtime versions ahead
+  of the 2026-06-02 default cutover (where the runner forces
+  Node.js 24 on actions still pinned to Node.js 20):
+  - `actions/checkout@v5` → `@v6` in `ci.yml` and
+    `nightly.yml` (`release.yml` was already on `@v6`).
+  - `actions/cache@v4` → `@v5` in `nightly.yml` — this is
+    the action that was actively emitting the deprecation
+    annotation on every nightly run.
+  - `Swatinem/rust-cache@v2` (floating) needs no change —
+    upstream landed `node24` in v2.9.0 and the major-tag
+    pin auto-tracks it.
+  - `dtolnay/rust-toolchain@stable` is a composite action
+    (no JS runtime), so the Node.js deprecation does not
+    apply.
+  Cuts the deprecation warn surface to zero while staying
+  on standard major-tag pins for everything that still
+  supports the convention.
 - Added criterion benchmark infrastructure under `benches/`
   (F-39 part 2). `criterion = "0.5"` with `default-features =
   false` (skips the rayon-driven HTML report machinery to
