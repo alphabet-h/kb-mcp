@@ -274,7 +274,7 @@ Starting in v0.3.0 the `search` MCP tool returns a wrapper object instead of a r
 
 `results[].match_spans` are byte offsets into `content` for ASCII queries, so MCP clients can quote the source text accurately. `low_confidence` is a rank-based flag (`top1.score / mean(top-N.score) < min_confidence_ratio`); the threshold defaults to `1.5` and can be tuned via `[search].min_confidence_ratio` in `kb-mcp.toml` or `--min-confidence-ratio` per query.
 
-Input bounds (defensive, v0.5.1+): `query` is capped at 1 KiB; longer inputs are rejected with an `ErrorResponse`. `match_spans` is computed only for chunks under 256 KiB and capped at 100 spans per chunk. These exist to bound abuse, not legitimate use — typical chunks are well under the ceilings.
+Input bounds (defensive, v0.6.0+): `query` is capped at 1 KiB; longer inputs are rejected with an `ErrorResponse`. `match_spans` is computed only for chunks under 256 KiB and capped at 100 spans per chunk. These exist to bound abuse, not legitimate use — typical chunks are well under the ceilings.
 
 The `search` tool / CLI also gained these filters in v0.3.0:
 
@@ -356,6 +356,8 @@ kb-mcp eval --kb-path knowledge-base --reranker bge-v2-m3
 ```
 
 Output: aggregate metrics + per-query rows for regressions / misses only. JSON (`--format json`) exposes the full per-query detail. History lives at `<kb_path>/.kb-mcp-eval-history.json` and keeps the last 10 runs for diff display.
+
+For CI: pass `--fail-on-regression` (v0.6.0+) to exit with code 1 when any aggregate metric (`recall@k` / `MRR` / `ndcg@k`) regressed from the previous **fingerprint-compatible** run by more than `regression_threshold` (default 0.05). Updating the golden YAML changes the hash, so the next run skips the comparison rather than triggering a false positive. Details: [docs/eval.md](./docs/eval.md).
 
 See [docs/eval.md](docs/eval.md) for the golden YAML reference, metric definitions, diff output guide, and troubleshooting.
 

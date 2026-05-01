@@ -21,6 +21,23 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
   in either path.
 
 ### Documentation
+- Doc-sync sweep (post-v0.6.1, found while auditing the doc tree
+  against recent feature merges):
+  - `CLAUDE.md`: the subcommand listing was missing `eval`
+    (added in v0.2.0). Restored to `index / status / serve /
+    search / graph / validate / eval`. ARCHITECTURE.md and
+    README already had it.
+  - `README.md`: input-bounds note in the search section had
+    `(defensive, v0.5.1+)` (a forward-looking marker that
+    pre-dated the actual landing in v0.6.0). Pinned to
+    `(defensive, v0.6.0+)` to match what shipped. The Japanese
+    side was correct already.
+  - `README.{md,ja.md}`: the eval section now mentions
+    `--fail-on-regression` (v0.6.0+) with the
+    fingerprint-compatibility one-liner. Detail still lives in
+    `docs/eval.{md,ja.md}` — just one extra line each in the
+    README so users grepping for "fail-on-regression" land
+    somewhere informative.
 - New `examples/deployments/personal-http/` recipe (closes
   feature-ideas.md H-8). Targets the case where a single user
   opens multiple Claude Code / Cursor sessions in parallel on
