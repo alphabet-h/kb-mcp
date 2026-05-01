@@ -119,16 +119,61 @@ tail -f /tmp/kb-mcp.out /tmp/kb-mcp.err
 
 #### Windows (Task Scheduler, AT_LOGON)
 
+Two options. The PowerShell cmdlet path is the **recommended** one — it
+avoids two known pitfalls of the legacy `schtasks /Create /XML` flow.
+
+**Recommended: `Register-ScheduledTask` (PowerShell)**
+
+```powershell
+$action = New-ScheduledTaskAction `
+    -Execute   'C:\Users\you\.cargo\bin\kb-mcp.exe' `
+    -Argument  'serve' `
+    -WorkingDirectory 'C:\Users\you\kb-mcp'
+$trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings  = New-ScheduledTaskSettingsSet `
+    -RestartInterval     (New-TimeSpan -Minutes 1) `
+    -RestartCount         3 `
+    -ExecutionTimeLimit  (New-TimeSpan -Seconds 0)   # = unlimited
+$principal = New-ScheduledTaskPrincipal `
+    -UserId    $env:USERNAME `
+    -LogonType Interactive `
+    -RunLevel  Limited
+Register-ScheduledTask `
+    -TaskName  'kb-mcp' `
+    -Action    $action `
+    -Trigger   $trigger `
+    -Settings  $settings `
+    -Principal $principal `
+    -Force
+Start-ScheduledTask -TaskName 'kb-mcp'   # start now
+```
+
+Verify / stop / uninstall:
+
+```powershell
+Get-ScheduledTask        -TaskName 'kb-mcp'
+Stop-ScheduledTask       -TaskName 'kb-mcp'
+Unregister-ScheduledTask -TaskName 'kb-mcp' -Confirm:$false
+```
+
+**Alternative: `schtasks /Create /XML` (legacy)**
+
 ```powershell
 # Edit kb-mcp-task.xml (Command path + WorkingDirectory) before importing
 schtasks /Create /TN "kb-mcp" /XML examples\deployments\personal-http\kb-mcp-task.xml
-schtasks /Run /TN "kb-mcp"   # start now without waiting for next logon
+schtasks /Run    /TN "kb-mcp"   # start now without waiting for next logon
 ```
 
-To verify: `schtasks /Query /TN "kb-mcp" /V /FO LIST`. To uninstall:
-`schtasks /Delete /TN "kb-mcp" /F`. If you need the daemon running
-before any user logs in, switch to [nssm](https://nssm.cc/) which
-registers kb-mcp as a real Windows service (admin required).
+> ⚠️ The XML import path can fail with **"Access denied"** even though
+> no admin privileges are required for AT_LOGON tasks in their own user
+> namespace. Cause appears to be a Principal-resolution quirk of the
+> legacy `schtasks` implementation. If you hit this, fall back to the
+> PowerShell `Register-ScheduledTask` snippet above — same end result,
+> no admin needed.
+
+If you need the daemon running before any user logs in, switch to
+[nssm](https://nssm.cc/) which registers kb-mcp as a real Windows
+service (admin required).
 
 ### Step 4 — Health check
 

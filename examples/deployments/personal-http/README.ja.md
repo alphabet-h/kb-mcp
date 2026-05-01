@@ -115,16 +115,60 @@ tail -f /tmp/kb-mcp.out /tmp/kb-mcp.err
 
 #### Windows (Task Scheduler, AT_LOGON)
 
+選択肢は 2 つ。**推奨は PowerShell cmdlet 経由** — 旧来の
+`schtasks /Create /XML` で踏みやすい罠 2 件 (Interval の最小値、
+Principal 解決の "アクセス拒否") を回避できる。
+
+**推奨: `Register-ScheduledTask` (PowerShell)**
+
+```powershell
+$action = New-ScheduledTaskAction `
+    -Execute   'C:\Users\you\.cargo\bin\kb-mcp.exe' `
+    -Argument  'serve' `
+    -WorkingDirectory 'C:\Users\you\kb-mcp'
+$trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings  = New-ScheduledTaskSettingsSet `
+    -RestartInterval     (New-TimeSpan -Minutes 1) `
+    -RestartCount         3 `
+    -ExecutionTimeLimit  (New-TimeSpan -Seconds 0)   # = 0 で無制限
+$principal = New-ScheduledTaskPrincipal `
+    -UserId    $env:USERNAME `
+    -LogonType Interactive `
+    -RunLevel  Limited
+Register-ScheduledTask `
+    -TaskName  'kb-mcp' `
+    -Action    $action `
+    -Trigger   $trigger `
+    -Settings  $settings `
+    -Principal $principal `
+    -Force
+Start-ScheduledTask -TaskName 'kb-mcp'   # 即起動 (次回ログオン待ち不要)
+```
+
+確認 / 停止 / アンインストール:
+
+```powershell
+Get-ScheduledTask        -TaskName 'kb-mcp'
+Stop-ScheduledTask       -TaskName 'kb-mcp'
+Unregister-ScheduledTask -TaskName 'kb-mcp' -Confirm:$false
+```
+
+**代替: `schtasks /Create /XML` (旧来)**
+
 ```powershell
 # kb-mcp-task.xml の Command パスと WorkingDirectory を編集してから import
 schtasks /Create /TN "kb-mcp" /XML examples\deployments\personal-http\kb-mcp-task.xml
-schtasks /Run /TN "kb-mcp"   # 次回ログオン待たずに即起動
+schtasks /Run    /TN "kb-mcp"   # 次回ログオン待たずに即起動
 ```
 
-確認: `schtasks /Query /TN "kb-mcp" /V /FO LIST`。アンインストール:
-`schtasks /Delete /TN "kb-mcp" /F`。**ユーザがログオンする前** にデーモンを
-動かす必要があれば [nssm](https://nssm.cc/) で本物の Windows サービスとして
-登録する (admin 必要)。
+> ⚠️ XML import は AT_LOGON で admin 権限不要のはずなのに **"アクセスが
+> 拒否されました"** で失敗するケースがある (旧来 `schtasks` 実装の Principal
+> 解決の癖と推定)。詰まったら上の PowerShell `Register-ScheduledTask`
+> snippet にフォールバック。同じ結果が admin 権限なしで得られる。
+
+**ユーザがログオンする前** にデーモンを動かす必要があれば
+[nssm](https://nssm.cc/) で本物の Windows サービスとして登録する
+(admin 必要)。
 
 ### Step 4 — ヘルスチェック
 
