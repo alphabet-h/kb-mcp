@@ -361,7 +361,7 @@ Golden YAML のリファレンス、指標の詳細説明、diff 出力の読み
 
 ## Claude Code / Cursor への接続
 
-> **デプロイ用の完全なレシピは** [`examples/deployments/`](./examples/deployments/) **を参照**。3 パターン (個人ローカル / NAS 共有 = 1 writer + 多 read-only / 社内 HTTP サーバ = 1 サーバ + 多クライアント) で `kb-mcp.toml` / `.mcp.json` / systemd unit までセットで揃えてある。下のスニペットはそれらのレシピの中核を成す stdio エントリポイント。
+> **デプロイ用の完全なレシピは** [`examples/deployments/`](./examples/deployments/) **を参照**。4 パターン (個人 stdio / 個人 http = 1 マシン上で複数 Claude Code 並行用の loopback daemon / NAS 共有 = 1 writer + 多 read-only / 社内 HTTP サーバ = 1 サーバ + 多クライアント) で `kb-mcp.toml` / `.mcp.json` / systemd unit までセットで揃えてある。下のスニペットはそれらのレシピの中核を成す stdio エントリポイント。
 
 プロジェクトルート (またはクライアント対応の MCP 設定場所) の `.mcp.json` に以下を追加:
 
