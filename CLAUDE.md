@@ -24,7 +24,7 @@ Windows では `kb-mcp.exe` になる。ONNX runtime (`ort-sys`) は静的リン
 
 ## 主要サブコマンド
 
-`index` / `status` / `serve` / `search` / `graph` / `validate`。フラグの詳細、`kb-mcp.toml` 設定、`.mcp.json` 接続例は README を参照。
+`index` / `status` / `serve` / `search` / `graph` / `validate` / `eval`。フラグの詳細、`kb-mcp.toml` 設定、`.mcp.json` 接続例は README を参照。
 
 ## 運用の細則
 
