@@ -63,7 +63,13 @@
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Hidden>false</Hidden>
     <RestartOnFailure>
-      <Interval>PT5S</Interval>
+      <!--
+        Windows Task Scheduler requires Interval >= PT1M (1 minute).
+        Earlier values like PT5S are accepted by the XML schema but rejected
+        at registration time with:
+          "(66,24):Interval:PT5S — value not allowed or out of range".
+      -->
+      <Interval>PT1M</Interval>
       <Count>3</Count>
     </RestartOnFailure>
     <Priority>7</Priority>

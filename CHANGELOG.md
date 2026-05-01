@@ -4,6 +4,22 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Fixed
+- `examples/deployments/personal-http/kb-mcp-task.xml`:
+  `RestartOnFailure.Interval` was set to `PT5S` (5 seconds), but
+  Windows Task Scheduler rejects anything below `PT1M` at registration
+  time with "value not allowed or out of range". Bumped to `PT1M`
+  with an inline comment explaining the constraint. Found while
+  walking through the recipe on a real Windows install.
+- `examples/deployments/personal-http/README.{md,ja.md}`:
+  added a `Register-ScheduledTask` (PowerShell) flow as the
+  **recommended** Windows install path. The legacy
+  `schtasks /Create /XML` flow is kept as the alternative because
+  it can fail with a misleading "Access denied" even on AT_LOGON
+  tasks in the user's own namespace (Principal-resolution quirk
+  in the legacy implementation). Same end result, no admin needed
+  in either path.
+
 ### Documentation
 - New `examples/deployments/personal-http/` recipe (closes
   feature-ideas.md H-8). Targets the case where a single user
