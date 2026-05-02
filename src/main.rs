@@ -5,6 +5,7 @@ pub mod eval;
 pub mod graph;
 pub mod indexer;
 pub mod markdown;
+pub mod mmr;
 pub mod parser;
 pub mod quality;
 pub mod schema;
@@ -13,7 +14,7 @@ pub mod transport;
 pub mod watcher;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use config::Config;
 use embedder::{ModelChoice, RerankerChoice};
 use std::path::{Path, PathBuf};
@@ -216,99 +217,151 @@ enum Commands {
     /// One-shot search from the command line (no MCP transport).
     /// Useful for shell scripts / skill bins where invoking the binary
     /// directly is simpler than talking MCP stdio.
-    Search {
-        /// Search query text (positional)
-        query: String,
-        /// Path to the knowledge-base directory
-        #[arg(long)]
-        kb_path: Option<PathBuf>,
-        /// Embedding model (must match the index; defaults to config or built-in)
-        #[arg(long, value_enum)]
-        model: Option<ModelChoice>,
-        /// Optional cross-encoder reranker. Adds 300-700ms but improves precision.
-        #[arg(long, value_enum)]
-        reranker: Option<RerankerChoice>,
-        /// Max results to return
-        #[arg(long, default_value_t = 5)]
-        limit: u32,
-        /// Filter by category (e.g. "deep-dive", "ai-news")
-        #[arg(long)]
-        category: Option<String>,
-        /// Filter by topic (e.g. "mcp", "chromadb")
-        #[arg(long)]
-        topic: Option<String>,
-        /// Output format: json (machine-readable) or text (LLM-friendly)
-        #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
-        format: SearchFormat,
-        /// Override quality filter threshold (0.0-1.0). Defaults to the
-        /// `[quality_filter].threshold` in kb-mcp.toml (0.3 if unset).
-        #[arg(long = "min-quality")]
-        min_quality: Option<f32>,
-        /// Disable the quality filter for this query (shorthand for
-        /// `--min-quality 0.0`).
-        #[arg(long = "include-low-quality", default_value_t = false)]
-        include_low_quality: bool,
-        /// path glob (`!`-prefix で除外)。複数指定可。例: `--path-glob "docs/**"`
-        #[arg(long = "path-glob", value_delimiter = ',')]
-        path_globs: Vec<String>,
-        /// tags_any (OR)。複数指定可。例: `--tag-any rust,async`
-        #[arg(long = "tag-any", value_delimiter = ',')]
-        tags_any: Vec<String>,
-        /// tags_all (AND)。複数指定可。
-        #[arg(long = "tag-all", value_delimiter = ',')]
-        tags_all: Vec<String>,
-        /// date filter 下限 (YYYY-MM-DD or RFC3339, lex 比較)
-        #[arg(long = "date-from")]
-        date_from: Option<String>,
-        /// date filter 上限 (両端含む)
-        #[arg(long = "date-to")]
-        date_to: Option<String>,
-        /// rank-based low_confidence ratio (default: 1.5、0.0 で判定無効)
-        #[arg(long = "min-confidence-ratio")]
-        min_confidence_ratio: Option<f32>,
-    },
+    Search(SearchCliArgs),
     /// Evaluate retrieval quality against a golden query set (optional, power-user feature).
     /// Reports recall@k / MRR / nDCG@k and diffs against the previous run.
     /// Details: docs/eval.md
-    Eval {
-        /// Path to the knowledge-base directory
-        #[arg(long)]
-        kb_path: Option<PathBuf>,
-        /// Override golden file path. Default: <kb_path>/.kb-mcp-eval.yml or [eval].golden.
-        #[arg(long)]
-        golden: Option<PathBuf>,
-        /// Embedding model (must match the index)
-        #[arg(long, value_enum)]
-        model: Option<ModelChoice>,
-        /// Optional cross-encoder reranker for this run.
-        #[arg(long, value_enum)]
-        reranker: Option<RerankerChoice>,
-        /// Comma-separated k list (default: [eval].k_values or 1,5,10)
-        #[arg(long, value_delimiter = ',')]
-        k: Option<Vec<usize>>,
-        /// Max hits to fetch per query (default: max of k list)
-        #[arg(long)]
-        limit: Option<u32>,
-        /// Output format
-        #[arg(long, value_enum, default_value_t = EvalFormat::Text)]
-        format: EvalFormat,
-        /// Disable reading/writing the history file (one-off run, no diff)
-        #[arg(long = "no-history", default_value_t = false)]
-        no_history: bool,
-        /// Skip diff display even if history exists
-        #[arg(long = "no-diff", default_value_t = false)]
-        no_diff: bool,
-        /// Disable ANSI color (auto-disabled when stdout is not a TTY)
-        #[arg(long = "no-color", default_value_t = false)]
-        no_color: bool,
-        /// Exit with code 1 if any aggregate metric (recall@k / MRR /
-        /// nDCG@k) regressed from the previous compatible run by more
-        /// than `regression_threshold` (default 0.05). Compatible =
-        /// same fingerprint (model / reranker / k_values / golden_hash).
-        /// History is still written before exit. Useful for CI gates.
-        #[arg(long = "fail-on-regression", default_value_t = false)]
-        fail_on_regression: bool,
-    },
+    Eval(EvalCliArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct SearchCliArgs {
+    /// Search query text (positional)
+    pub(crate) query: String,
+    /// Path to the knowledge-base directory
+    #[arg(long)]
+    pub(crate) kb_path: Option<PathBuf>,
+    /// Embedding model (must match the index; defaults to config or built-in)
+    #[arg(long, value_enum)]
+    pub(crate) model: Option<ModelChoice>,
+    /// Optional cross-encoder reranker. Adds 300-700ms but improves precision.
+    #[arg(long, value_enum)]
+    pub(crate) reranker: Option<RerankerChoice>,
+    /// Max results to return
+    #[arg(long, default_value_t = 5)]
+    pub(crate) limit: u32,
+    /// Filter by category (e.g. "deep-dive", "ai-news")
+    #[arg(long)]
+    pub(crate) category: Option<String>,
+    /// Filter by topic (e.g. "mcp", "chromadb")
+    #[arg(long)]
+    pub(crate) topic: Option<String>,
+    /// Output format: json (machine-readable) or text (LLM-friendly)
+    #[arg(long, value_enum, default_value_t = SearchFormat::Json)]
+    pub(crate) format: SearchFormat,
+    /// Override quality filter threshold (0.0-1.0). Defaults to the
+    /// `[quality_filter].threshold` in kb-mcp.toml (0.3 if unset).
+    #[arg(long = "min-quality")]
+    pub(crate) min_quality: Option<f32>,
+    /// Disable the quality filter for this query (shorthand for
+    /// `--min-quality 0.0`).
+    #[arg(long = "include-low-quality", default_value_t = false)]
+    pub(crate) include_low_quality: bool,
+    /// path glob (`!`-prefix で除外)。複数指定可。例: `--path-glob "docs/**"`
+    #[arg(long = "path-glob", value_delimiter = ',')]
+    pub(crate) path_globs: Vec<String>,
+    /// tags_any (OR)。複数指定可。例: `--tag-any rust,async`
+    #[arg(long = "tag-any", value_delimiter = ',')]
+    pub(crate) tags_any: Vec<String>,
+    /// tags_all (AND)。複数指定可。
+    #[arg(long = "tag-all", value_delimiter = ',')]
+    pub(crate) tags_all: Vec<String>,
+    /// date filter 下限 (YYYY-MM-DD or RFC3339, lex 比較)
+    #[arg(long = "date-from")]
+    pub(crate) date_from: Option<String>,
+    /// date filter 上限 (両端含む)
+    #[arg(long = "date-to")]
+    pub(crate) date_to: Option<String>,
+    /// rank-based low_confidence ratio (default: 1.5、0.0 で判定無効)
+    #[arg(long = "min-confidence-ratio")]
+    pub(crate) min_confidence_ratio: Option<f32>,
+    /// Enable MMR re-ranking (overrides kb-mcp.toml [search.mmr].enabled).
+    #[arg(long, value_parser = clap::value_parser!(bool))]
+    pub(crate) mmr: Option<bool>,
+    /// MMR lambda (relevance vs diversity tradeoff). 0.0..=1.0.
+    #[arg(long)]
+    pub(crate) mmr_lambda: Option<f32>,
+    /// MMR same-document penalty. 0.0..=1.0.
+    #[arg(long)]
+    pub(crate) mmr_same_doc_penalty: Option<f32>,
+    /// Enable Parent retriever (content expansion).
+    #[arg(long, value_parser = clap::value_parser!(bool))]
+    pub(crate) parent_retriever: Option<bool>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct EvalCliArgs {
+    /// Path to the knowledge-base directory
+    #[arg(long)]
+    pub(crate) kb_path: Option<PathBuf>,
+    /// Override golden file path. Default: <kb_path>/.kb-mcp-eval.yml or [eval].golden.
+    #[arg(long)]
+    pub(crate) golden: Option<PathBuf>,
+    /// Embedding model (must match the index)
+    #[arg(long, value_enum)]
+    pub(crate) model: Option<ModelChoice>,
+    /// Optional cross-encoder reranker for this run.
+    #[arg(long, value_enum)]
+    pub(crate) reranker: Option<RerankerChoice>,
+    /// Comma-separated k list (default: [eval].k_values or 1,5,10)
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) k: Option<Vec<usize>>,
+    /// Max hits to fetch per query (default: max of k list)
+    #[arg(long)]
+    pub(crate) limit: Option<u32>,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = EvalFormat::Text)]
+    pub(crate) format: EvalFormat,
+    /// Disable reading/writing the history file (one-off run, no diff)
+    #[arg(long = "no-history", default_value_t = false)]
+    pub(crate) no_history: bool,
+    /// Skip diff display even if history exists
+    #[arg(long = "no-diff", default_value_t = false)]
+    pub(crate) no_diff: bool,
+    /// Disable ANSI color (auto-disabled when stdout is not a TTY)
+    #[arg(long = "no-color", default_value_t = false)]
+    pub(crate) no_color: bool,
+    /// Exit with code 1 if any aggregate metric (recall@k / MRR /
+    /// nDCG@k) regressed from the previous compatible run by more
+    /// than `regression_threshold` (default 0.05). Compatible =
+    /// same fingerprint (model / reranker / k_values / golden_hash).
+    /// History is still written before exit. Useful for CI gates.
+    #[arg(long = "fail-on-regression", default_value_t = false)]
+    pub(crate) fail_on_regression: bool,
+    /// Enable MMR re-ranking (overrides kb-mcp.toml [search.mmr].enabled).
+    #[arg(long, value_parser = clap::value_parser!(bool))]
+    pub(crate) mmr: Option<bool>,
+    /// MMR lambda (relevance vs diversity tradeoff). 0.0..=1.0.
+    #[arg(long)]
+    pub(crate) mmr_lambda: Option<f32>,
+    /// MMR same-document penalty. 0.0..=1.0.
+    #[arg(long)]
+    pub(crate) mmr_same_doc_penalty: Option<f32>,
+    /// Enable Parent retriever (content expansion).
+    #[arg(long, value_parser = clap::value_parser!(bool))]
+    pub(crate) parent_retriever: Option<bool>,
+}
+
+impl From<&SearchCliArgs> for crate::config::SearchOverrides {
+    fn from(a: &SearchCliArgs) -> Self {
+        Self {
+            mmr: a.mmr,
+            mmr_lambda: a.mmr_lambda,
+            mmr_same_doc_penalty: a.mmr_same_doc_penalty,
+            parent_retriever: a.parent_retriever,
+        }
+    }
+}
+
+impl From<&EvalCliArgs> for crate::config::SearchOverrides {
+    fn from(a: &EvalCliArgs) -> Self {
+        Self {
+            mmr: a.mmr,
+            mmr_lambda: a.mmr_lambda,
+            mmr_same_doc_penalty: a.mmr_same_doc_penalty,
+            parent_retriever: a.parent_retriever,
+        }
+    }
 }
 
 /// Resolve the database path from a knowledge-base directory.
@@ -404,6 +457,11 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|s| s.min_confidence_ratio)
                 .unwrap_or(1.5);
 
+            // [search] セクション全体のスナップショット。MMR / parent_retriever
+            // の effective config は MCP `search` ツールの per-call で resolve するため、
+            // serve 起動時にここから clone して KbServer に保持する。
+            let search_config = cfg.search.clone().unwrap_or_default();
+
             // evaluator 指摘 High #2: `--bind` / `--port` が指定されているのに
             // 実効 transport が Stdio なら silent ignore は footgun なので reject。
             if matches!(resolved_transport, transport::Transport::Stdio)
@@ -430,6 +488,7 @@ fn main() -> anyhow::Result<()> {
                     watch_config,
                     resolved_transport,
                     min_confidence_ratio,
+                    search_config,
                 )
                 .await
             })?;
@@ -502,24 +561,35 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Commands::Search {
-            query,
-            kb_path,
-            model,
-            reranker,
-            limit,
-            category,
-            topic,
-            format,
-            min_quality,
-            include_low_quality,
-            path_globs,
-            tags_any,
-            tags_all,
-            date_from,
-            date_to,
-            min_confidence_ratio,
-        } => {
+        Commands::Search(args) => {
+            // Build overrides BEFORE destructuring `args` so that the `&args`
+            // borrow is short-lived (we still need owned fields below).
+            let overrides: crate::config::SearchOverrides = (&args).into();
+
+            let SearchCliArgs {
+                query,
+                kb_path,
+                model,
+                reranker,
+                limit,
+                category,
+                topic,
+                format,
+                min_quality,
+                include_low_quality,
+                path_globs,
+                tags_any,
+                tags_all,
+                date_from,
+                date_to,
+                min_confidence_ratio,
+                // MMR / parent-retriever flags are wired through `overrides` above.
+                mmr: _,
+                mmr_lambda: _,
+                mmr_same_doc_penalty: _,
+                parent_retriever: _,
+            } = args;
+
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
             let reranker_choice = reranker.or(cfg.reranker).unwrap_or_default();
@@ -561,24 +631,29 @@ fn main() -> anyhow::Result<()> {
                 date_to: date_to.as_deref(),
             };
 
-            let results = if reranker_choice.is_enabled() {
-                let candidates = db.search_hybrid_candidates(
-                    &query,
-                    &query_embedding,
-                    limit.saturating_mul(5).max(50),
-                    &filters,
-                )?;
-                if let Some(mut r) = embedder::Reranker::try_new(reranker_choice)? {
-                    r.rerank_candidates(&query, candidates, limit)?
-                } else {
-                    db.search_hybrid(&query, &query_embedding, limit, &filters)?
-                }
+            // Both CLI and MCP go through the shared MMR-aware pipeline so the
+            // `--mmr` / `--mmr-lambda` / `--mmr-same-doc-penalty` /
+            // `--parent-retriever` flags actually take effect for CLI callers.
+            let toml_search = cfg.search.clone().unwrap_or_default();
+            let mut reranker_obj: Option<embedder::Reranker> = if reranker_choice.is_enabled() {
+                embedder::Reranker::try_new(reranker_choice)?
             } else {
-                db.search_hybrid(&query, &query_embedding, limit, &filters)?
+                None
             };
+            let pipeline = server::run_search_pipeline(
+                &db,
+                reranker_obj.as_mut(),
+                &query,
+                &query_embedding,
+                limit,
+                &filters,
+                &overrides,
+                &toml_search,
+            )?;
+            let results: Vec<db::SearchResult> = pipeline.into_iter().map(|(_, sr)| sr).collect();
 
             let effective_ratio = min_confidence_ratio
-                .or_else(|| cfg.search.as_ref().and_then(|s| s.min_confidence_ratio))
+                .or(toml_search.min_confidence_ratio)
                 .unwrap_or(1.5);
 
             print_search_results(
@@ -666,19 +741,30 @@ fn main() -> anyhow::Result<()> {
             )?;
             std::process::exit(exit);
         }
-        Commands::Eval {
-            kb_path,
-            golden,
-            model,
-            reranker,
-            k,
-            limit,
-            format,
-            no_history,
-            no_diff,
-            no_color,
-            fail_on_regression,
-        } => {
+        Commands::Eval(args) => {
+            // Build overrides BEFORE destructuring `args` so the `&args` borrow
+            // is short-lived (we still need owned fields below).
+            let overrides: crate::config::SearchOverrides = (&args).into();
+
+            let EvalCliArgs {
+                kb_path,
+                golden,
+                model,
+                reranker,
+                k,
+                limit,
+                format,
+                no_history,
+                no_diff,
+                no_color,
+                fail_on_regression,
+                // MMR / parent-retriever flags are wired through `overrides` above.
+                mmr: _,
+                mmr_lambda: _,
+                mmr_same_doc_penalty: _,
+                parent_retriever: _,
+            } = args;
+
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model_choice = model.or(cfg.model).unwrap_or_default();
             let reranker_choice = reranker.or(cfg.reranker).unwrap_or_default();
@@ -704,6 +790,8 @@ fn main() -> anyhow::Result<()> {
                 write_history: !no_history,
                 history_size,
                 regression_threshold,
+                overrides,
+                search_config: cfg.search.clone().unwrap_or_default(),
             };
 
             let run = eval::run(&opts)?;
@@ -1108,5 +1196,161 @@ fn strip_null_keys(value: serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(cleaned)
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default-ish `SearchCliArgs` for tests that only care about the MMR /
+    /// parent-retriever fields. The other fields use cheap zero-ish values.
+    fn search_args_default() -> SearchCliArgs {
+        SearchCliArgs {
+            query: String::new(),
+            kb_path: None,
+            model: None,
+            reranker: None,
+            limit: 5,
+            category: None,
+            topic: None,
+            format: SearchFormat::Json,
+            min_quality: None,
+            include_low_quality: false,
+            path_globs: Vec::new(),
+            tags_any: Vec::new(),
+            tags_all: Vec::new(),
+            date_from: None,
+            date_to: None,
+            min_confidence_ratio: None,
+            mmr: None,
+            mmr_lambda: None,
+            mmr_same_doc_penalty: None,
+            parent_retriever: None,
+        }
+    }
+
+    fn eval_args_default() -> EvalCliArgs {
+        EvalCliArgs {
+            kb_path: None,
+            golden: None,
+            model: None,
+            reranker: None,
+            k: None,
+            limit: None,
+            format: EvalFormat::Text,
+            no_history: false,
+            no_diff: false,
+            no_color: false,
+            fail_on_regression: false,
+            mmr: None,
+            mmr_lambda: None,
+            mmr_same_doc_penalty: None,
+            parent_retriever: None,
+        }
+    }
+
+    #[test]
+    fn test_search_cli_args_into_overrides_all_none() {
+        let args = search_args_default();
+        let o: crate::config::SearchOverrides = (&args).into();
+        assert_eq!(o.mmr, None);
+        assert_eq!(o.mmr_lambda, None);
+        assert_eq!(o.mmr_same_doc_penalty, None);
+        assert_eq!(o.parent_retriever, None);
+    }
+
+    #[test]
+    fn test_search_cli_args_into_overrides_populated() {
+        let args = SearchCliArgs {
+            mmr: Some(true),
+            mmr_lambda: Some(0.5),
+            mmr_same_doc_penalty: Some(0.2),
+            parent_retriever: Some(true),
+            ..search_args_default()
+        };
+        let o: crate::config::SearchOverrides = (&args).into();
+        assert_eq!(o.mmr, Some(true));
+        assert_eq!(o.mmr_lambda, Some(0.5));
+        assert_eq!(o.mmr_same_doc_penalty, Some(0.2));
+        assert_eq!(o.parent_retriever, Some(true));
+    }
+
+    #[test]
+    fn test_eval_cli_args_into_overrides_all_none() {
+        let args = eval_args_default();
+        let o: crate::config::SearchOverrides = (&args).into();
+        assert_eq!(o.mmr, None);
+        assert_eq!(o.mmr_lambda, None);
+        assert_eq!(o.mmr_same_doc_penalty, None);
+        assert_eq!(o.parent_retriever, None);
+    }
+
+    #[test]
+    fn test_eval_cli_args_into_overrides_populated() {
+        let args = EvalCliArgs {
+            mmr: Some(false),
+            mmr_lambda: Some(0.7),
+            mmr_same_doc_penalty: Some(0.1),
+            parent_retriever: Some(false),
+            ..eval_args_default()
+        };
+        let o: crate::config::SearchOverrides = (&args).into();
+        assert_eq!(o.mmr, Some(false));
+        assert_eq!(o.mmr_lambda, Some(0.7));
+        assert_eq!(o.mmr_same_doc_penalty, Some(0.1));
+        assert_eq!(o.parent_retriever, Some(false));
+    }
+
+    #[test]
+    fn test_search_cli_clap_parses_mmr_flags() {
+        // Smoke-test that clap actually wires the new flags (catch typos
+        // in #[arg(long)] vs field names).
+        let cli = Cli::try_parse_from([
+            "kb-mcp",
+            "search",
+            "hello",
+            "--mmr",
+            "true",
+            "--mmr-lambda",
+            "0.4",
+            "--mmr-same-doc-penalty",
+            "0.25",
+            "--parent-retriever",
+            "true",
+        ])
+        .expect("clap should parse MMR flags on the search subcommand");
+        match cli.command {
+            Commands::Search(a) => {
+                assert_eq!(a.mmr, Some(true));
+                assert_eq!(a.mmr_lambda, Some(0.4));
+                assert_eq!(a.mmr_same_doc_penalty, Some(0.25));
+                assert_eq!(a.parent_retriever, Some(true));
+            }
+            _ => panic!("expected Search subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_eval_cli_clap_parses_mmr_flags() {
+        let cli = Cli::try_parse_from([
+            "kb-mcp",
+            "eval",
+            "--mmr",
+            "false",
+            "--mmr-lambda",
+            "0.6",
+            "--parent-retriever",
+            "false",
+        ])
+        .expect("clap should parse MMR flags on the eval subcommand");
+        match cli.command {
+            Commands::Eval(a) => {
+                assert_eq!(a.mmr, Some(false));
+                assert_eq!(a.mmr_lambda, Some(0.6));
+                assert_eq!(a.parent_retriever, Some(false));
+            }
+            _ => panic!("expected Eval subcommand"),
+        }
     }
 }

@@ -245,6 +245,23 @@ impl Reranker {
         candidates: Vec<(i64, SearchResult)>,
         limit: u32,
     ) -> Result<Vec<SearchResult>> {
+        Ok(self
+            .rerank_candidates_with_ids(query, candidates, limit)?
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect())
+    }
+
+    /// `rerank_candidates` と同じ結果を `(chunk_id, SearchResult)` で返す版。
+    /// MMR の relevance 入力に chunk_id を保持したまま渡したいユースケース
+    /// (feature-28 Task 2.9) で使う。`rerank_candidates` はこれに委譲する形に
+    /// なっており、挙動は完全一致 (score / 順序とも同一)。
+    pub fn rerank_candidates_with_ids(
+        &mut self,
+        query: &str,
+        candidates: Vec<(i64, SearchResult)>,
+        limit: u32,
+    ) -> Result<Vec<(i64, SearchResult)>> {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -252,13 +269,13 @@ impl Reranker {
         let rerank_results = self.model.rerank(query, documents, false, None)?;
 
         // rerank_results は score 降順でソート済み。index は documents (= candidates) の位置。
-        let mut out: Vec<SearchResult> = Vec::with_capacity(limit as usize);
+        let mut out: Vec<(i64, SearchResult)> = Vec::with_capacity(limit as usize);
         for r in rerank_results.into_iter().take(limit as usize) {
-            let Some((_, mut row)) = candidates.get(r.index).cloned() else {
+            let Some((id, mut row)) = candidates.get(r.index).cloned() else {
                 continue;
             };
             row.score = r.score;
-            out.push(row);
+            out.push((id, row));
         }
         Ok(out)
     }

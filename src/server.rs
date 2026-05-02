@@ -48,6 +48,10 @@ pub struct KbServer {
     /// `search` ツール既定の rank-based low_confidence ratio 閾値。
     /// 0.0 = 判定無効。SearchParams.min_confidence_ratio が指定されたら override。
     min_confidence_ratio: f32,
+    /// `[search]` セクション (toml) のスナップショット。MMR / parent_retriever
+    /// の per-call override 解決時に `SearchOverrides::resolve(&search_config)`
+    /// で参照する。toml に section が無ければ `SearchConfig::default()` (MMR off)。
+    search_config: crate::config::SearchConfig,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -99,6 +103,36 @@ struct SearchParams {
     /// `null` falls back to the server default (`kb-mcp.toml` / CLI);
     /// `0.0` disables the cutoff for this query.
     min_confidence_ratio: Option<f32>,
+
+    // ----- MMR / Parent retriever (per-call overrides) -----
+    /// MMR re-ranking. None なら kb-mcp.toml [search.mmr].enabled を使用。
+    /// per-call で true/false を指定すると toml をオーバーライド。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mmr: Option<bool>,
+
+    /// MMR の lambda override (relevance vs diversity)。0.0..=1.0 outside reject。
+    /// None なら toml [search.mmr].lambda を使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mmr_lambda: Option<f32>,
+
+    /// MMR の same-doc penalty override。0.0..=1.0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mmr_same_doc_penalty: Option<f32>,
+
+    /// Parent retriever (content display expansion)。None なら toml に従う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_retriever: Option<bool>,
+}
+
+impl From<&SearchParams> for crate::config::SearchOverrides {
+    fn from(p: &SearchParams) -> Self {
+        Self {
+            mmr: p.mmr,
+            mmr_lambda: p.mmr_lambda,
+            mmr_same_doc_penalty: p.mmr_same_doc_penalty,
+            parent_retriever: p.parent_retriever,
+        }
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -242,6 +276,27 @@ impl KbServer {
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(5);
 
+        // feature-28 Task 2.7: per-call MMR override の範囲チェック。
+        // 1.5 / -0.1 等の outside-range は MCP boundary で early reject し、
+        // resolve / mmr_select に届ける前に弾く。NaN も `(0.0..=1.0).contains`
+        // が false になるので同経路で reject される。
+        if let Some(l) = params.mmr_lambda
+            && !(0.0..=1.0).contains(&l)
+        {
+            return serde_json::to_string_pretty(&ErrorResponse {
+                error: format!("mmr_lambda out of range: {l} (must be 0.0..=1.0)"),
+            })
+            .unwrap_or_default();
+        }
+        if let Some(p) = params.mmr_same_doc_penalty
+            && !(0.0..=1.0).contains(&p)
+        {
+            return serde_json::to_string_pretty(&ErrorResponse {
+                error: format!("mmr_same_doc_penalty out of range: {p} (must be 0.0..=1.0)"),
+            })
+            .unwrap_or_default();
+        }
+
         // F-35: query length cap (1 KiB)。上限超えは early reject。
         // embedder / FTS5 layer の内部 truncate に任せる手もあるが、上流で
         // reject した方が「なぜ結果が変なのか」分かりやすく、`compute_match_spans`
@@ -309,28 +364,34 @@ impl KbServer {
             date_to: params.date_to.as_deref(),
         };
 
+        // feature-28 Task 2.9: MMR / parent_retriever の effective config を解決し、
+        // 共有の MMR-aware パイプラインに渡す。per-call mmr_lambda /
+        // mmr_same_doc_penalty の range check は上で済ませてあるが、
+        // run_search_pipeline 側でも belt-and-suspenders で再検証される。
+        let overrides: crate::config::SearchOverrides = (&params).into();
+
         let db = self.db.lock().unwrap();
-        let search_outcome: anyhow::Result<Vec<crate::db::SearchResult>> = if use_rerank {
-            match db.search_hybrid_candidates(
-                &params.query,
-                &query_embedding,
-                limit.saturating_mul(5).max(50),
-                &filters,
-            ) {
-                Ok(cands) => {
-                    let r = reranker_guard
-                        .as_mut()
-                        .expect("reranker Some checked above");
-                    r.rerank_candidates(&params.query, cands, limit)
-                }
-                Err(e) => Err(e),
-            }
+        let reranker_arg: Option<&mut Reranker> = if use_rerank {
+            Some(
+                reranker_guard
+                    .as_mut()
+                    .expect("reranker Some checked above"),
+            )
         } else {
-            db.search_hybrid(&params.query, &query_embedding, limit, &filters)
+            None
         };
 
-        let results = match search_outcome {
-            Ok(rs) => rs,
+        let after_mmr = match run_search_pipeline(
+            &db,
+            reranker_arg,
+            &params.query,
+            &query_embedding,
+            limit,
+            &filters,
+            &overrides,
+            &self.search_config,
+        ) {
+            Ok(r) => r,
             Err(e) => {
                 return serde_json::to_string_pretty(&ErrorResponse {
                     error: format!("Search failed: {e}. Try running rebuild_index first."),
@@ -338,6 +399,10 @@ impl KbServer {
                 .unwrap_or_default();
             }
         };
+
+        // chunk_id を剥がして既存パイプラインに合流。
+        let results: Vec<crate::db::SearchResult> =
+            after_mmr.into_iter().map(|(_, sr)| sr).collect();
 
         let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
 
@@ -618,6 +683,170 @@ impl KbServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Shared MMR-aware search pipeline. Used by:
+/// - MCP `SearchTool::search` (server.rs)
+/// - CLI `kb-mcp search` (main.rs)
+/// - CLI `kb-mcp eval` (eval.rs)
+///
+/// Steps:
+/// 1. RRF candidate pool (unbounded if MMR on, overfetch if reranker on,
+///    bounded `limit` otherwise — invariant #3: MMR off + reranker off
+///    matches the legacy `db.search_hybrid(.., limit, ..)` path bit-exactly).
+/// 2. Optional cross-encoder reranker (`rerank_candidates_with_ids` to
+///    preserve chunk_id for downstream MMR).
+/// 3. Optional MMR diversification (`mmr_select`) with min-max relevance
+///    normalization (`mmr.rs` contract: relevance in `[0, 1]`).
+///
+/// Returns `Vec<(chunk_id, SearchResult)>` so callers can apply their own
+/// final formatting (match_spans, JSON wrapper, eval metrics, etc.).
+///
+/// Range validation for `mmr_lambda` / `mmr_same_doc_penalty` is performed
+/// here so that all 3 callers reject `1.5` / `-0.1` / `NaN` consistently.
+/// Caller-side early reject (e.g. for a richer error response shape) is OK
+/// — this is belt-and-suspenders.
+#[allow(clippy::too_many_arguments)] // 8 cohesive inputs; struct-of-args adds noise without grouping
+pub(crate) fn run_search_pipeline(
+    db: &Database,
+    reranker: Option<&mut Reranker>,
+    query: &str,
+    query_embedding: &[f32],
+    limit: u32,
+    filters: &crate::db::SearchFilters<'_>,
+    overrides: &crate::config::SearchOverrides,
+    toml_search: &crate::config::SearchConfig,
+) -> anyhow::Result<Vec<(i64, crate::db::SearchResult)>> {
+    // Range validation. NaN は `(0.0..=1.0).contains` が false なので同経路で reject。
+    if let Some(l) = overrides.mmr_lambda
+        && !(0.0..=1.0).contains(&l)
+    {
+        anyhow::bail!("mmr_lambda out of range: {l} (must be 0.0..=1.0)");
+    }
+    if let Some(p) = overrides.mmr_same_doc_penalty
+        && !(0.0..=1.0).contains(&p)
+    {
+        anyhow::bail!("mmr_same_doc_penalty out of range: {p} (must be 0.0..=1.0)");
+    }
+
+    let resolved = overrides.resolve(toml_search);
+    let use_rerank = reranker.is_some();
+
+    // 1. RRF candidate pool. MMR on → unbounded (MMR が候補プール全件から
+    //    多様化選抜、user の `limit` を反映して overfetch を計算)、reranker
+    //    on → overfetch (`limit*5.max(50)`)、どちらも off → 最小コストで
+    //    `limit` 件 (invariant #3 の bit-exact path)。
+    let mmr_pool_size = limit.saturating_mul(5).max(50);
+    let candidates_pool: Vec<(i64, crate::db::SearchResult)> = if resolved.mmr_enabled {
+        db.search_hybrid_candidates_unbounded(query, query_embedding, mmr_pool_size, filters)?
+    } else if use_rerank {
+        db.search_hybrid_candidates(
+            query,
+            query_embedding,
+            limit.saturating_mul(5).max(50),
+            filters,
+        )?
+    } else {
+        db.search_hybrid_candidates(query, query_embedding, limit, filters)?
+    };
+
+    // 2. Optional reranker。MMR off の reranker 入力 limit は `limit` (元の挙動
+    //    保持)、MMR on のときは MMR 側が select するので候補プール全体を保持
+    //    する。**P1 fix**: ここで `u32::MAX` を渡すと `Vec::with_capacity(u32::MAX)`
+    //    で OOM 直行するので、候補プールサイズを上限とする
+    //    (`limit*5.max(50)` で実用上 limit に追従)。
+    let reranker_input_limit = if resolved.mmr_enabled {
+        candidates_pool.len() as u32
+    } else {
+        limit
+    };
+    let reranked: Vec<(i64, crate::db::SearchResult)> = match reranker {
+        Some(r) => r.rerank_candidates_with_ids(query, candidates_pool, reranker_input_limit)?,
+        None => candidates_pool,
+    };
+
+    // 3. MMR re-rank (on の時のみ)。off なら reranked の先頭 `limit` 件を返す
+    //    (= 既存挙動 bit-exact)。
+    if !resolved.mmr_enabled {
+        return Ok(reranked.into_iter().take(limit as usize).collect());
+    }
+
+    // MmrCandidate を構築するため chunk_id 群の embedding を一括取得し、
+    // path → documents.id を chunk ごとに 1 SELECT 引く (≤ 50 件で許容コスト)。
+    let chunk_ids: Vec<i64> = reranked.iter().map(|(id, _)| *id).collect();
+    let emb_map = {
+        use anyhow::Context;
+        db.fetch_embeddings_by_chunk_ids(&chunk_ids)
+            .context("MMR fetch_embeddings_by_chunk_ids failed")?
+    };
+
+    let mut mmr_cands: Vec<crate::mmr::MmrCandidate> = reranked
+        .iter()
+        .filter_map(|(id, sr)| {
+            let emb = emb_map.get(id).cloned()?;
+            // path 引きの document_id 解決失敗 (削除済 race 等) は 0 を入れて
+            // degrade。same_doc_penalty が誤解釈になるが panic / drop よりは
+            // 安全 (MMR は best-effort 多様化)。
+            let doc_id = db
+                .lookup_document_id_by_path(&sr.path)
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            Some(crate::mmr::MmrCandidate {
+                chunk_id: *id,
+                document_id: doc_id,
+                embedding: emb,
+                relevance_score: sr.score,
+            })
+        })
+        .collect();
+
+    // mmr.rs の contract: relevance_score は [0, 1] に正規化済み前提。
+    // RRF スコアは ~0.01-0.03、cross-encoder スコアは ~[-10, 10] の arbitrary
+    // range を取るため、ここで pool 内 min-max 正規化する。
+    if !mmr_cands.is_empty() {
+        let (min_rel, max_rel) = mmr_cands
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), c| {
+                (lo.min(c.relevance_score), hi.max(c.relevance_score))
+            });
+        let range = max_rel - min_rel;
+        if range > f32::EPSILON {
+            for c in &mut mmr_cands {
+                c.relevance_score = (c.relevance_score - min_rel) / range;
+            }
+        } else {
+            for c in &mut mmr_cands {
+                c.relevance_score = 0.0;
+            }
+        }
+    }
+
+    let selected = crate::mmr::mmr_select(
+        &mmr_cands,
+        query_embedding,
+        resolved.mmr_lambda,
+        resolved.mmr_same_doc_penalty,
+        limit as usize,
+    );
+
+    // mmr_cands と reranked は filter_map で skip した chunk_id が
+    // mmr_cands に存在しないので、selected の i (mmr_cands index) から
+    // chunk_id を引いて reranked に当てる方が安全。
+    let by_id: std::collections::HashMap<i64, &(i64, crate::db::SearchResult)> =
+        reranked.iter().map(|t| (t.0, t)).collect();
+    let after_mmr: Vec<(i64, crate::db::SearchResult)> = selected
+        .into_iter()
+        .filter_map(|i| {
+            let cid = mmr_cands.get(i)?.chunk_id;
+            by_id.get(&cid).map(|t| (*t).clone())
+        })
+        .collect();
+
+    // 4. Parent retriever は Task 3.x で実装。ここでは noop。
+    let _ = resolved.parent_retriever_enabled;
+
+    Ok(after_mmr)
+}
+
 /// Convert the user-facing `path_globs` input
 /// (e.g. `["docs/**", "!docs/draft/**"]`) into a [`crate::db::CompiledPathGlobs`].
 ///
@@ -676,9 +905,15 @@ pub(crate) fn compile_path_globs(
 /// - `scores.len() < 2` のとき false (比較対象なし)
 /// - `mean(scores) <= 0.0` のとき false (フォールバック)
 /// - `min_ratio == 0.0` のとき false (判定無効)
-/// - `top1 / mean(scores) < min_ratio` のとき true
+/// - `max(scores) / mean(scores) < min_ratio` のとき true
 ///
-/// `scores` は score 降順を前提 (`scores[0]` が top1)。
+/// `scores` は順序非依存。relevance ピークは「ranking 順序ではなく score
+/// 自体の最大値」で決定する。MMR (diversity 補正) 後の hits は score 降順
+/// ではなく selection order に並ぶため、`scores[0]` を top1 とみなす旧実装
+/// では低 confidence 判定が壊れていた (codex review の指摘)。`max` で取る
+/// 実装は MMR off / on どちらでも同一結果を返す (NaN は std::f32 の
+/// `partial_cmp` 順守、`fold(NEG_INFINITY, f32::max)` で安定)。
+///
 /// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
 pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
     if scores.len() < 2 || min_ratio == 0.0 {
@@ -689,7 +924,7 @@ pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
     if mean <= 0.0 {
         return false;
     }
-    let top1 = scores[0]; // results は score 降順を前提
+    let top1 = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     (top1 / mean) < min_ratio
 }
 
@@ -982,6 +1217,9 @@ pub struct KbServerShared {
     pub best_practice_templates: Vec<String>,
     pub parser_registry: Arc<Registry>,
     pub min_confidence_ratio: f32,
+    /// `[search]` セクション (toml) のスナップショット。serve 起動時に Config
+    /// から取り出し、shutdown まで不変。`KbServer::from_shared` で clone する。
+    pub search_config: crate::config::SearchConfig,
 }
 
 impl KbServer {
@@ -1000,6 +1238,7 @@ impl KbServer {
             best_practice_templates: shared.best_practice_templates.clone(),
             parser_registry: Arc::clone(&shared.parser_registry),
             min_confidence_ratio: shared.min_confidence_ratio,
+            search_config: shared.search_config.clone(),
             tool_router: KbServer::tool_router(),
         }
     }
@@ -1020,6 +1259,7 @@ pub async fn run_server(
     watch_config: crate::watcher::WatchConfig,
     transport: crate::transport::Transport,
     min_confidence_ratio: f32,
+    search_config: crate::config::SearchConfig,
 ) -> Result<()> {
     let db_path = crate::resolve_db_path(kb_path);
     let db = Database::open(&db_path.to_string_lossy())?;
@@ -1047,6 +1287,7 @@ pub async fn run_server(
         best_practice_templates,
         parser_registry: Arc::new(parser_registry),
         min_confidence_ratio,
+        search_config,
     };
 
     // watcher をバックグラウンドで並走。
@@ -1430,6 +1671,23 @@ mod tests {
         assert!(!compute_low_confidence(&scores, 0.0));
     }
 
+    #[test]
+    fn test_compute_low_confidence_order_independent_for_mmr() {
+        // MMR (diversity 補正) 後は selection 順 ≠ score 降順。
+        // 旧実装は scores[0] を top1 とみなしていたため、低 score の chunk
+        // が先頭に来ると false positive / negative を起こした。
+        // codex review の指摘: PR #36 の compute_low_confidence は順序非依存
+        // (max(scores) を使う) であるべき。
+        let sorted = [0.9_f32, 0.5, 0.4]; // score 降順 (MMR off の典型)
+        let mmr_reordered = [0.5_f32, 0.9, 0.4]; // MMR で diversity 順に並び替え
+        // 同じスコア集合なので結果は一致するはず
+        assert_eq!(
+            compute_low_confidence(&sorted, 1.5),
+            compute_low_confidence(&mmr_reordered, 1.5),
+            "compute_low_confidence must be order-independent (MMR safety)"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // validate_get_document_path: F-28 hardening
     // -----------------------------------------------------------------------
@@ -1516,6 +1774,126 @@ mod tests {
             err.error.contains("symlinks are not allowed"),
             "expected symlink reject, got: {}",
             err.error
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // feature-28 Task 2.7: SearchParams MMR fields + From<&SearchParams>
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_search_params_from_default_overrides_to_none() {
+        let p = SearchParams::default();
+        let o: crate::config::SearchOverrides = (&p).into();
+        assert_eq!(o.mmr, None);
+        assert_eq!(o.mmr_lambda, None);
+        assert_eq!(o.mmr_same_doc_penalty, None);
+        assert_eq!(o.parent_retriever, None);
+    }
+
+    #[test]
+    fn test_search_params_from_with_overrides() {
+        let p = SearchParams {
+            mmr: Some(true),
+            mmr_lambda: Some(0.5),
+            ..SearchParams::default()
+        };
+        let o: crate::config::SearchOverrides = (&p).into();
+        assert_eq!(o.mmr, Some(true));
+        assert_eq!(o.mmr_lambda, Some(0.5));
+        assert_eq!(o.mmr_same_doc_penalty, None);
+        assert_eq!(o.parent_retriever, None);
+    }
+
+    #[test]
+    fn test_search_params_from_full_overrides() {
+        // 全フィールド個別に指定したケースが From で漏れず通ることを確認。
+        let p = SearchParams {
+            mmr: Some(false),
+            mmr_lambda: Some(0.25),
+            mmr_same_doc_penalty: Some(0.75),
+            parent_retriever: Some(true),
+            ..SearchParams::default()
+        };
+        let o: crate::config::SearchOverrides = (&p).into();
+        assert_eq!(o.mmr, Some(false));
+        assert_eq!(o.mmr_lambda, Some(0.25));
+        assert_eq!(o.mmr_same_doc_penalty, Some(0.75));
+        assert_eq!(o.parent_retriever, Some(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // run_search_pipeline: shared MMR-aware pipeline used by MCP / CLI / eval
+    // -----------------------------------------------------------------------
+
+    /// Range validation must fire **before** any DB access — so an
+    /// invalid `mmr_lambda` is rejected even when the helper is called with
+    /// an empty in-memory DB. This is the unit-level proof that CLI flags
+    /// reach the helper: the CLI binds `--mmr-lambda` into
+    /// `SearchOverrides.mmr_lambda` and the helper validates here. If the
+    /// flag were silently dropped (= the previous P2 bug), an out-of-range
+    /// value would never produce an error.
+    #[test]
+    fn test_run_search_pipeline_rejects_lambda_out_of_range() {
+        let db = crate::db::Database::open_in_memory().expect("in-memory db");
+        let overrides = crate::config::SearchOverrides {
+            mmr: Some(true),
+            mmr_lambda: Some(1.5),
+            mmr_same_doc_penalty: None,
+            parent_retriever: None,
+        };
+        let toml = crate::config::SearchConfig::default();
+        let filters = crate::db::SearchFilters::default();
+        let qe = vec![0.0_f32; 384];
+        let err = run_search_pipeline(&db, None, "q", &qe, 5, &filters, &overrides, &toml)
+            .expect_err("out-of-range lambda must error");
+        assert!(
+            err.to_string().contains("mmr_lambda out of range"),
+            "expected mmr_lambda out-of-range error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_run_search_pipeline_rejects_same_doc_penalty_out_of_range() {
+        let db = crate::db::Database::open_in_memory().expect("in-memory db");
+        let overrides = crate::config::SearchOverrides {
+            mmr: Some(true),
+            mmr_lambda: None,
+            mmr_same_doc_penalty: Some(-0.1),
+            parent_retriever: None,
+        };
+        let toml = crate::config::SearchConfig::default();
+        let filters = crate::db::SearchFilters::default();
+        let qe = vec![0.0_f32; 384];
+        let err = run_search_pipeline(&db, None, "q", &qe, 5, &filters, &overrides, &toml)
+            .expect_err("out-of-range penalty must error");
+        assert!(
+            err.to_string()
+                .contains("mmr_same_doc_penalty out of range"),
+            "expected mmr_same_doc_penalty out-of-range error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_run_search_pipeline_rejects_nan_lambda() {
+        // NaN is treated identically to out-of-range (the (0.0..=1.0).contains
+        // predicate returns false for NaN). Belt-and-suspenders: the MCP
+        // boundary also rejects, but the helper must reject for CLI/eval.
+        let db = crate::db::Database::open_in_memory().expect("in-memory db");
+        let overrides = crate::config::SearchOverrides {
+            mmr: Some(true),
+            mmr_lambda: Some(f32::NAN),
+            mmr_same_doc_penalty: None,
+            parent_retriever: None,
+        };
+        let toml = crate::config::SearchConfig::default();
+        let filters = crate::db::SearchFilters::default();
+        let qe = vec![0.0_f32; 384];
+        let err = run_search_pipeline(&db, None, "q", &qe, 5, &filters, &overrides, &toml)
+            .expect_err("NaN lambda must error");
+        assert!(
+            err.to_string().contains("mmr_lambda out of range"),
+            "expected NaN lambda to be reported as out-of-range, got: {err}"
         );
     }
 }

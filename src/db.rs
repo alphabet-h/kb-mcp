@@ -16,6 +16,13 @@ const FILTER_OVERFETCH_CAP: u32 = 10_000;
 const FTS_BM25_HEADING_WEIGHT: f32 = 2.0;
 const FTS_BM25_CONTENT_WEIGHT: f32 = 1.0;
 
+/// `fetch_embeddings_by_chunk_ids` の IN 句 batch サイズ。
+/// SQLite `SQLITE_MAX_VARIABLE_NUMBER` は modern SQLite で 32766 だが、
+/// 余裕を持たせ + prepared statement の準備コストとのバランスで 500 を採用。
+/// 典型的な MMR pool (≤ 500) では 1 round-trip で済み、高 limit (limit=10000
+/// で pool=50000 等) でも 100 回程度の round-trip で完了する。
+const EMBEDDING_FETCH_BATCH: usize = 500;
+
 // ---------------------------------------------------------------------------
 // Public result types
 // ---------------------------------------------------------------------------
@@ -277,6 +284,37 @@ fn ensure_vec_extension() {
 /// helpers.
 pub struct Database {
     conn: Connection,
+}
+
+/// RRF score の HashMap と row HashMap を受け取り、score DESC + id ASC の
+/// 順序で `Vec<(i64, SearchResult)>` を返す。`limit=Some(n)` で上位 n 件に
+/// truncate、`None` なら全件返す (MMR-off bypass / `_unbounded` で利用)。
+///
+/// HashMap iteration の非決定性に依存しないよう、tie-break で id を使い
+/// プラットフォーム / 入力順に依存しない出力を保証する (invariant #1)。
+fn rrf_topk(
+    mut scores: HashMap<i64, f32>,
+    mut rows: HashMap<i64, SearchResult>,
+    limit: Option<u32>,
+) -> Vec<(i64, SearchResult)> {
+    let mut merged: Vec<(i64, f32)> = scores.drain().collect();
+    merged.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    if let Some(n) = limit {
+        merged.truncate(n as usize);
+    }
+    merged
+        .into_iter()
+        .filter_map(|(id, rrf)| {
+            rows.remove(&id).map(|mut r| {
+                r.score = rrf;
+                (id, r)
+            })
+        })
+        .collect()
 }
 
 impl Database {
@@ -793,6 +831,78 @@ impl Database {
         }
     }
 
+    /// 指定 `chunk_ids` 群の embedding を一括取得する。`get_chunk_embedding` の
+    /// IN 句版で、MMR の候補プール (RRF で得た FTS 単独 hit + vec 単独 hit の
+    /// merge 結果) に対して pairwise 類似度を計算するときに使う。
+    ///
+    /// SQL の IN 句は順序非保証なので、戻り値は `HashMap<i64, Vec<f32>>` で
+    /// 返し、呼び出し側で reorder すること。
+    ///
+    /// 存在しない `chunk_id` は単に結果から除外される (エラーにしない)。index
+    /// 中の race / 削除済 chunk_id を query に含む可能性があるので silently
+    /// skip が望ましい。
+    ///
+    /// **SQLite host parameter limit**: `SQLITE_MAX_VARIABLE_NUMBER` は modern
+    /// SQLite (3.32+) で 32766。bundled SQLite 3.47+ でもこの値が default。
+    /// 高 limit MMR (例: `--limit 10000` で pool = 50000 chunk_ids) で IN 句が
+    /// この上限を超えるため、内部で [`EMBEDDING_FETCH_BATCH`] (= 500) ごとに
+    /// 分割して複数 query を発行する。500 は SQLite の上限に十分余裕を持た
+    /// せつつ、典型的な MMR pool (≤ 500) では 1 round-trip で済む値。
+    pub fn fetch_embeddings_by_chunk_ids(
+        &self,
+        chunk_ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<f32>>> {
+        if chunk_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut out = HashMap::with_capacity(chunk_ids.len());
+        for batch in chunk_ids.chunks(EMBEDDING_FETCH_BATCH) {
+            // IN 句のプレースホルダを動的生成 (?1, ?2, ...)
+            let placeholders: String = (1..=batch.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT chunk_id, vec_to_json(embedding) \
+                 FROM vec_chunks WHERE chunk_id IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params_iter: Vec<&dyn rusqlite::ToSql> =
+                batch.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(rusqlite::params_from_iter(params_iter), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for r in rows {
+                let (id, json) = r?;
+                let emb: Vec<f32> = serde_json::from_str(&json)
+                    .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
+                out.insert(id, emb);
+            }
+        }
+        Ok(out)
+    }
+
+    /// `documents.path` から `documents.id` を引く軽量 lookup。
+    /// MMR の `same_doc_penalty` 計算で chunk → document_id を解決するために使う。
+    /// 不存在なら `Ok(None)`。
+    ///
+    /// 計算量は path カラムへの index 引き 1 回。MMR の候補プール (≤ 50 件) に
+    /// 対して chunk ごとに呼ばれるが、in-memory cache が効くため実測コストは低い。
+    /// 将来 hot path 化したら `Vec<&str>` 入力 → `HashMap<String, i64>` 出力に
+    /// バッチ化するか、search_hybrid_candidates の戻り値型に document_id を
+    /// 同梱する案あり (feature-28 plan Step 2 の note 参照)。
+    pub fn lookup_document_id_by_path(&self, path: &str) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM documents WHERE path = ?1",
+                rusqlite::params![path],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Delete a document and all associated chunks / vectors / FTS rows.
     pub fn delete_document(&self, path: &str) -> Result<()> {
         // Delete vector entries first (no FK from virtual table)
@@ -1003,20 +1113,43 @@ impl Database {
             rows.entry(chunk_id).or_insert(row);
         }
 
-        let mut merged: Vec<(i64, f32)> = scores.into_iter().collect();
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        merged.truncate(limit as usize);
+        Ok(rrf_topk(scores, rows, Some(limit)))
+    }
 
-        let results = merged
-            .into_iter()
-            .filter_map(|(id, rrf)| {
-                rows.remove(&id).map(|mut r| {
-                    r.score = rrf;
-                    (id, r)
-                })
-            })
-            .collect();
-        Ok(results)
+    /// `search_hybrid_candidates` と同じ RRF を計算するが、最終 truncate を
+    /// せず候補プール全件を返す。MMR の候補プール用。
+    ///
+    /// 既存 `search_hybrid_candidates` の戻り値型 `Vec<(i64, SearchResult)>`
+    /// と互換 (truncate しないだけの違い)。candidates 取得幅は呼び出し側が
+    /// `desired_candidates` で指定する (典型: `limit.saturating_mul(5).max(50)`、
+    /// = bounded 側の overfetch ロジックと同じ)。
+    ///
+    /// MMR の場合、`top-k` が大きい (e.g. user が limit=100 を要求した) ケースに
+    /// 対応するため、固定 50 ハードキャップは置かない。呼び出し側が pool size を
+    /// 決める責務を持つ。
+    pub fn search_hybrid_candidates_unbounded(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        desired_candidates: u32,
+        filters: &SearchFilters<'_>,
+    ) -> Result<Vec<(i64, SearchResult)>> {
+        let candidates = desired_candidates.max(50);
+        let vec_hits = self.search_vec_candidates(query_embedding, candidates, filters)?;
+        let fts_hits = self.search_fts_candidates(query_text, candidates, filters)?;
+
+        let mut scores: HashMap<i64, f32> = HashMap::new();
+        let mut rows: HashMap<i64, SearchResult> = HashMap::new();
+        for (rank, (chunk_id, row)) in vec_hits.into_iter().enumerate() {
+            *scores.entry(chunk_id).or_insert(0.0) += 1.0 / (RRF_K + (rank as f32) + 1.0);
+            rows.entry(chunk_id).or_insert(row);
+        }
+        for (rank, (chunk_id, row)) in fts_hits.into_iter().enumerate() {
+            *scores.entry(chunk_id).or_insert(0.0) += 1.0 / (RRF_K + (rank as f32) + 1.0);
+            rows.entry(chunk_id).or_insert(row);
+        }
+
+        Ok(rrf_topk(scores, rows, None))
     }
 
     /// RRF 用: ベクトル検索の候補を `(chunk_id, SearchResult)` で返す。
@@ -2085,6 +2218,146 @@ mod tests {
     }
 
     #[test]
+    fn test_fetch_embeddings_by_chunk_ids_returns_hashmap() {
+        let db = db_with_384();
+        let doc1 = db
+            .upsert_document("a.md", None, None, None, None, &[], None, "h_a")
+            .unwrap();
+        let c1 = db
+            .insert_chunk(
+                doc1,
+                0,
+                Some("h1"),
+                None,
+                "alpha",
+                &dummy_embedding(0.1),
+                1.0,
+            )
+            .unwrap();
+        let c2 = db
+            .insert_chunk(
+                doc1,
+                1,
+                Some("h2"),
+                None,
+                "beta",
+                &dummy_embedding(0.2),
+                1.0,
+            )
+            .unwrap();
+        let doc2 = db
+            .upsert_document("b.md", None, None, None, None, &[], None, "h_b")
+            .unwrap();
+        let c3 = db
+            .insert_chunk(
+                doc2,
+                0,
+                Some("h3"),
+                None,
+                "gamma",
+                &dummy_embedding(0.3),
+                1.0,
+            )
+            .unwrap();
+
+        let ids = vec![c1, c2, c3];
+        let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+        assert_eq!(result.len(), 3);
+        assert!(result.contains_key(&c1));
+        assert!(result.contains_key(&c2));
+        assert!(result.contains_key(&c3));
+
+        // 各 embedding が 384 次元
+        for emb in result.values() {
+            assert_eq!(emb.len(), 384);
+        }
+
+        // Sanity: 値が正しく往復していること (insert 時の dummy_embedding 値に一致)
+        assert!((result[&c1][0] - 0.1).abs() < 1e-5);
+        assert!((result[&c2][0] - 0.2).abs() < 1e-5);
+        assert!((result[&c3][0] - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fetch_embeddings_by_chunk_ids_skips_missing() {
+        let db = db_with_384();
+        let doc1 = db
+            .upsert_document("a.md", None, None, None, None, &[], None, "h_a")
+            .unwrap();
+        let c1 = db
+            .insert_chunk(
+                doc1,
+                0,
+                Some("h1"),
+                None,
+                "alpha",
+                &dummy_embedding(0.1),
+                1.0,
+            )
+            .unwrap();
+
+        let ids = vec![c1, 9999, 10000];
+        let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+        assert_eq!(result.len(), 1, "missing ids should be silently skipped");
+        assert!(result.contains_key(&c1));
+    }
+
+    #[test]
+    fn test_fetch_embeddings_by_chunk_ids_empty_input() {
+        let db = db_with_384();
+        let result = db.fetch_embeddings_by_chunk_ids(&[]).expect("fetch");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_fetch_embeddings_by_chunk_ids_batches_above_sqlite_limit() {
+        // SQLITE_MAX_VARIABLE_NUMBER (32766) を超える chunk_ids でも batch
+        // 分割で正常動作することを確認 (codex review #5 の regression guard)。
+        // 600 chunks (= EMBEDDING_FETCH_BATCH=500 を 1 batch 超える) を作る。
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document(
+                "/big.md",
+                Some("big"),
+                Some("topic"),
+                None,
+                None,
+                &[],
+                None,
+                "h",
+            )
+            .expect("upsert");
+        let n = 600;
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let cid = db
+                .insert_chunk(
+                    doc_id,
+                    i as i32,
+                    Some("h"),
+                    None,
+                    "c",
+                    &dummy_embedding((i as f32) * 0.001),
+                    1.0,
+                )
+                .expect("insert");
+            ids.push(cid);
+        }
+        let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+        assert_eq!(
+            result.len(),
+            n,
+            "all {n} embeddings should be returned across batches"
+        );
+        for &id in &ids {
+            assert!(
+                result.contains_key(&id),
+                "chunk_id {id} missing from batched fetch"
+            );
+        }
+    }
+
+    #[test]
     fn test_fts_table_created_on_init() {
         let db = Database::open_in_memory().unwrap();
         let name: String = db
@@ -2326,6 +2599,92 @@ mod tests {
         // 返ってきた chunk_id は insert 時の id と一致
         let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
         assert!(ids.contains(&c1) || ids.contains(&c2));
+    }
+
+    #[test]
+    fn test_search_hybrid_candidates_unbounded_returns_full_pool() {
+        // 5+ docs / 多 chunks の小さな KB を作り、`_unbounded` が
+        // bounded (limit=2) より多くの候補を返すことを確認する。
+        // MMR の候補プール用 API なので truncate されないのが要件。
+        let db = db_with_384();
+
+        let mut chunk_ids: Vec<i64> = Vec::new();
+        for i in 0..5 {
+            let path = format!("doc_{i}.md");
+            let doc_id = db
+                .upsert_document(
+                    &path,
+                    Some("d"),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    &format!("h_{i}"),
+                )
+                .unwrap();
+            // chunk 1: keyword を含む (FTS hit)
+            let c_a = db
+                .insert_chunk(
+                    doc_id,
+                    0,
+                    None,
+                    None,
+                    &format!("alpha keyword text doc {i}"),
+                    &dummy_embedding(0.1 + (i as f32) * 0.01),
+                    1.0,
+                )
+                .unwrap();
+            chunk_ids.push(c_a);
+            // 2 doc 目以降にもう 1 chunk 追加 → 合計 7+ chunks
+            if i >= 2 {
+                let c_b = db
+                    .insert_chunk(
+                        doc_id,
+                        1,
+                        None,
+                        None,
+                        &format!("secondary chunk content {i}"),
+                        &dummy_embedding(0.5 + (i as f32) * 0.01),
+                        1.0,
+                    )
+                    .unwrap();
+                chunk_ids.push(c_b);
+            }
+        }
+        assert!(chunk_ids.len() >= 7, "fixture should have 7+ chunks");
+
+        let query_emb = dummy_embedding(0.1);
+        let query_text = "keyword";
+        let filters = SearchFilters::default();
+
+        let bounded = db
+            .search_hybrid_candidates(query_text, &query_emb, 2, &filters)
+            .unwrap();
+        let unbounded = db
+            .search_hybrid_candidates_unbounded(query_text, &query_emb, 50, &filters)
+            .unwrap();
+
+        assert!(
+            bounded.len() <= 2,
+            "bounded must respect limit=2 (got {})",
+            bounded.len()
+        );
+        assert!(
+            unbounded.len() >= bounded.len(),
+            "unbounded should return >= bounded: bounded={} unbounded={}",
+            bounded.len(),
+            unbounded.len()
+        );
+        // 候補プール全件: 上記 fixture では vec_chunks が 7+ 件あるので
+        // unbounded は 2 件超を返すはず (limit 解除の差分が出ること)。
+        assert!(
+            unbounded.len() > bounded.len(),
+            "unbounded should strictly exceed bounded with this fixture: \
+             bounded={} unbounded={}",
+            bounded.len(),
+            unbounded.len()
+        );
     }
 
     #[test]
@@ -3229,5 +3588,63 @@ mod tests {
             )
             .expect("select level");
         assert_eq!(level, None);
+    }
+
+    #[test]
+    fn test_rrf_topk_tie_break_score_desc_id_asc() {
+        // 同じ score を持つ複数 chunk_id がある場合、id ASC で安定 sort される
+        use std::collections::HashMap;
+        let mut scores: HashMap<i64, f32> = HashMap::new();
+        scores.insert(3, 0.5);
+        scores.insert(1, 0.5);
+        scores.insert(2, 0.7); // top
+        scores.insert(5, 0.5);
+        let mut rows: HashMap<i64, SearchResult> = HashMap::new();
+        for &id in &[1, 2, 3, 5] {
+            rows.insert(
+                id,
+                SearchResult {
+                    score: 0.0,
+                    content: format!("c{id}"),
+                    heading: None,
+                    path: format!("p{id}"),
+                    title: None,
+                    topic: None,
+                    date: None,
+                    tags: vec![],
+                },
+            );
+        }
+        let result = rrf_topk(scores, rows, Some(10));
+        let ids: Vec<i64> = result.iter().map(|(id, _)| *id).collect();
+        // top: id=2 (0.7), 同 score 0.5 は id ASC = 1, 3, 5
+        assert_eq!(ids, vec![2, 1, 3, 5]);
+    }
+
+    #[test]
+    fn test_rrf_topk_no_truncation_when_limit_none() {
+        use std::collections::HashMap;
+        let mut scores: HashMap<i64, f32> = HashMap::new();
+        for id in 1..=10 {
+            scores.insert(id, 1.0 / id as f32);
+        }
+        let mut rows: HashMap<i64, SearchResult> = HashMap::new();
+        for id in 1..=10 {
+            rows.insert(
+                id,
+                SearchResult {
+                    score: 0.0,
+                    content: format!("c{id}"),
+                    heading: None,
+                    path: format!("p{id}"),
+                    title: None,
+                    topic: None,
+                    date: None,
+                    tags: vec![],
+                },
+            );
+        }
+        let result = rrf_topk(scores, rows, None);
+        assert_eq!(result.len(), 10, "limit=None should not truncate");
     }
 }

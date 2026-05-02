@@ -127,3 +127,11 @@ bind = "127.0.0.1:3100"
 # セクション自体を丸ごと削除してよい (既定値で動作する)。
 [search]
 #min_confidence_ratio = 1.5             # default: 1.5
+
+# [search.mmr] (optional)
+# Maximal Marginal Relevance: post-rerank diversity correction.
+# When unsure, leave defaults.
+[search.mmr]
+#enabled = false
+#lambda = 0.7              # 1.0 = no diversity (MMR off equiv); < 0.5 leans exploration
+#same_doc_penalty = 0.0    # > 0 deduplicates same-document chunks; 0 = pure MMR
