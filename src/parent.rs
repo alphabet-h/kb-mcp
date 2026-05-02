@@ -43,7 +43,7 @@ pub fn expand_parent(
         .unwrap_or(false);
 
     if is_small {
-        expand_whole_document(hit, doc_id, db, params)
+        expand_whole_document(hit, doc_id, chunk_idx, db, params)
     } else {
         expand_adjacent(hit, doc_id, chunk_idx, db, params)
     }
@@ -54,12 +54,33 @@ fn expand_adjacent(
     doc_id: i64,
     chunk_idx: i64,
     db: &Database,
-    _params: ParentRetrieverParams,
+    params: ParentRetrieverParams,
 ) -> anyhow::Result<SearchHit> {
     let neighbors = db.fetch_chunks_by_index_range(doc_id, chunk_idx - 1, chunk_idx + 1)?;
     if neighbors.is_empty() {
         return Ok(hit);
     }
+    // max_expanded_tokens cap (Task 3.4 invariant #1):
+    // adjacent neighbor 群の token_count 合計が cap を超えるなら拡張を放棄し、
+    // hit chunk のみを返す (Adjacent { from = to = chunk_idx })。
+    // token_count = None (legacy 行で NULL) は 0 扱い (保守的)。
+    // 負の i64 が紛れた時のため `.max(0)` で clamp してから u32 化する。
+    let total_tokens: u32 = neighbors
+        .iter()
+        .map(|c| c.token_count.unwrap_or(0).max(0) as u32)
+        .sum();
+    if total_tokens > params.max_expanded_tokens {
+        if let Some(c) = neighbors.into_iter().find(|c| c.chunk_index == chunk_idx) {
+            hit.content = c.content;
+            hit.match_spans = None;
+            hit.expanded_from = Some(ExpandedRange::Adjacent {
+                from_index: chunk_idx as usize,
+                to_index: chunk_idx as usize,
+            });
+        }
+        return Ok(hit);
+    }
+
     let mut sorted = neighbors;
     sorted.sort_by_key(|c| c.chunk_index);
     let from_idx = sorted
@@ -92,10 +113,11 @@ fn expand_adjacent(
 }
 
 fn expand_whole_document(
-    mut hit: SearchHit,
+    hit: SearchHit,
     doc_id: i64,
+    chunk_idx: i64,
     db: &Database,
-    _params: ParentRetrieverParams,
+    params: ParentRetrieverParams,
 ) -> anyhow::Result<SearchHit> {
     // i64::MAX で「上限なし」range fetch (= 同 doc 全 chunks)。
     // quality_filter は parent retriever expansion では適用しない (spec
@@ -105,12 +127,24 @@ fn expand_whole_document(
     if chunks.is_empty() {
         return Ok(hit);
     }
+    // max_expanded_tokens cap (Task 3.4 invariant #1):
+    // 全 doc 連結が cap を超えるなら adjacent merge にフォールバックする。
+    // adjacent merge 自身も同 cap を持つので、最終的には hit chunk のみまで
+    // 縮退し得る (= cap 超過時の strong guarantee)。
+    let total_tokens: u32 = chunks
+        .iter()
+        .map(|c| c.token_count.unwrap_or(0).max(0) as u32)
+        .sum();
+    if total_tokens > params.max_expanded_tokens {
+        return expand_adjacent(hit, doc_id, chunk_idx, db, params);
+    }
     let total_chunks = chunks.len();
     let merged: String = chunks
         .iter()
         .map(|c| c.content.clone())
         .collect::<Vec<_>>()
         .join("\n\n");
+    let mut hit = hit;
     hit.content = merged;
     // adjacent merge と同様に defensive クリア。呼び出し側 (run_search_pipeline)
     // が拡張後 content に対して compute_match_spans を再計算する責務。
@@ -402,5 +436,143 @@ mod tests {
                 .contains("another low quality body content"),
             "low quality neighbor (right) should be included as context"
         );
+    }
+
+    /// max_expanded_tokens cap: 巨大 chunk (token_count ~5000 each) で
+    /// max_expanded = 2000 のとき、adjacent merge は cap を超えるので
+    /// hit chunk のみ返す (Adjacent {from_index = to_index = chunk_idx})。
+    #[test]
+    fn test_parent_max_expanded_caps_at_threshold() {
+        let tmp = tempdir_for_test();
+        let path = tmp.0.join("test.db");
+        let db = Database::open(path.to_str().unwrap()).expect("open");
+        db.verify_embedding_meta("bge-small-en-v1.5", 384)
+            .expect("vec_chunks");
+        let doc_id = db
+            .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
+            .expect("upsert");
+        // 各 chunk content を ~20000 byte (= token_count ~5000) にする。
+        let big_body = format!("big {}", "body content body content ".repeat(800));
+        let _c0 = db
+            .insert_chunk(
+                doc_id,
+                0,
+                Some("h0"),
+                None,
+                &big_body,
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c0");
+        let c1 = db
+            .insert_chunk(
+                doc_id,
+                1,
+                Some("h1"),
+                None,
+                &big_body,
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c1");
+        let _c2 = db
+            .insert_chunk(
+                doc_id,
+                2,
+                Some("h2"),
+                None,
+                &big_body,
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c2");
+
+        let hit = make_hit("/doc.md", "big body");
+        let p = ParentRetrieverParams {
+            whole_doc_threshold_tokens: 100,
+            max_expanded_tokens: 2000,
+        };
+        let expanded = expand_parent(hit, c1, &db, p).expect("expand");
+        // adjacent 3 chunks の合計 = ~15000 token > max=2000、cap で hit chunk のみ
+        match expanded.expanded_from {
+            Some(ExpandedRange::Adjacent {
+                from_index: 1,
+                to_index: 1,
+            }) => {}
+            other => panic!("expected Adjacent {{1,1}} (cap reduced), got {other:?}"),
+        }
+    }
+
+    /// NULL chunk_level (legacy DB 行) でも adjacent merge が機能することを確認 (invariant #7 guard)。
+    /// この test は実際には現実装で既に PASS する (adjacent merge は level を読まない)。
+    /// regression guard として残す。
+    #[test]
+    fn test_parent_null_level_falls_back_to_adjacent() {
+        let tmp = tempdir_for_test();
+        let path = tmp.0.join("test.db");
+        let db = Database::open(path.to_str().unwrap()).expect("open");
+        db.verify_embedding_meta("bge-small-en-v1.5", 384)
+            .expect("vec_chunks");
+        let doc_id = db
+            .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
+            .expect("upsert");
+        // 全 chunk で level = None (= NULL) を明示的に渡す
+        let body = format!("body {}", "content body content body ".repeat(40));
+        let _c0 = db
+            .insert_chunk(doc_id, 0, Some("h0"), None, &body, &dummy_emb_384(), 1.0)
+            .expect("c0");
+        let c1 = db
+            .insert_chunk(doc_id, 1, Some("h1"), None, &body, &dummy_emb_384(), 1.0)
+            .expect("c1");
+        let _c2 = db
+            .insert_chunk(doc_id, 2, Some("h2"), None, &body, &dummy_emb_384(), 1.0)
+            .expect("c2");
+
+        let hit = make_hit("/doc.md", "body content");
+        let expanded = expand_parent(hit, c1, &db, params()).expect("expand");
+        // level NULL でも adjacent merge は機能する
+        match expanded.expanded_from {
+            Some(ExpandedRange::Adjacent {
+                from_index: 0,
+                to_index: 2,
+            }) => {}
+            other => panic!("expected Adjacent {{0,2}} for NULL-level chunks, got {other:?}"),
+        }
+    }
+
+    /// CJK (日本語) を含む content で expand_parent が panic / char boundary 違反を
+    /// 起こさない smoke test。compute_match_spans 自体は server.rs の既存 path で
+    /// 検証済 (call site は run_search_pipeline、Task 3.6 で wire される)、ここは
+    /// expand_parent が日本語入りの content を一度も切らずにそのまま渡せるかの確認。
+    #[test]
+    fn test_parent_cjk_content_no_panic() {
+        let tmp = tempdir_for_test();
+        let path = tmp.0.join("test.db");
+        let db = Database::open(path.to_str().unwrap()).expect("open");
+        db.verify_embedding_meta("bge-small-en-v1.5", 384)
+            .expect("vec_chunks");
+        let doc_id = db
+            .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
+            .expect("upsert");
+        // 日本語 + マルチバイト UTF-8 (絵文字、半角全角混在)
+        let jp_body = format!("日本語の本文 {}", "テキストてきすと ".repeat(40));
+        let _c0 = db
+            .insert_chunk(doc_id, 0, Some("h0"), None, &jp_body, &dummy_emb_384(), 1.0)
+            .expect("c0");
+        let c1 = db
+            .insert_chunk(doc_id, 1, Some("h1"), None, &jp_body, &dummy_emb_384(), 1.0)
+            .expect("c1");
+        let _c2 = db
+            .insert_chunk(doc_id, 2, Some("h2"), None, &jp_body, &dummy_emb_384(), 1.0)
+            .expect("c2");
+
+        let hit = make_hit("/doc.md", "日本語");
+        let expanded = expand_parent(hit, c1, &db, params()).expect("expand");
+        // panic しなければ OK。content に日本語が含まれること。
+        assert!(expanded.content.contains("日本語の本文"));
+        match expanded.expanded_from {
+            Some(ExpandedRange::Adjacent { .. }) => {}
+            other => panic!("expected Adjacent variant, got {other:?}"),
+        }
     }
 }
