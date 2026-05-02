@@ -40,7 +40,22 @@ pub struct Frontmatter {
 pub struct Chunk {
     pub index: usize,
     pub heading: Option<String>,
+    /// Markdown 見出しレベル (h2=2, h3=3)。heading が None の場合や、
+    /// 見出し概念のない parser (.txt 等) では None。Parent retriever や
+    /// 将来の Contextual Retrieval (A-1) で hierarchy を利用する。
+    pub level: Option<u8>,
     pub content: String,
+}
+
+impl Default for Chunk {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            heading: None,
+            level: None,
+            content: String::new(),
+        }
+    }
 }
 
 /// A fully parsed document: frontmatter + chunks + retained raw content.
@@ -138,5 +153,14 @@ mod tests {
             enabled: vec!["md".to_string()],
         };
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn test_chunk_default_has_level_none() {
+        let c = Chunk::default();
+        assert_eq!(c.index, 0);
+        assert!(c.heading.is_none());
+        assert!(c.level.is_none());
+        assert_eq!(c.content, "");
     }
 }
