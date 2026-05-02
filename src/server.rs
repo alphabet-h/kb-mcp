@@ -905,9 +905,15 @@ pub(crate) fn compile_path_globs(
 /// - `scores.len() < 2` のとき false (比較対象なし)
 /// - `mean(scores) <= 0.0` のとき false (フォールバック)
 /// - `min_ratio == 0.0` のとき false (判定無効)
-/// - `top1 / mean(scores) < min_ratio` のとき true
+/// - `max(scores) / mean(scores) < min_ratio` のとき true
 ///
-/// `scores` は score 降順を前提 (`scores[0]` が top1)。
+/// `scores` は順序非依存。relevance ピークは「ranking 順序ではなく score
+/// 自体の最大値」で決定する。MMR (diversity 補正) 後の hits は score 降順
+/// ではなく selection order に並ぶため、`scores[0]` を top1 とみなす旧実装
+/// では低 confidence 判定が壊れていた (codex review の指摘)。`max` で取る
+/// 実装は MMR off / on どちらでも同一結果を返す (NaN は std::f32 の
+/// `partial_cmp` 順守、`fold(NEG_INFINITY, f32::max)` で安定)。
+///
 /// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
 pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
     if scores.len() < 2 || min_ratio == 0.0 {
@@ -918,7 +924,7 @@ pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
     if mean <= 0.0 {
         return false;
     }
-    let top1 = scores[0]; // results は score 降順を前提
+    let top1 = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     (top1 / mean) < min_ratio
 }
 
@@ -1663,6 +1669,23 @@ mod tests {
         // ratio=0.0 -> 常に false
         let scores = [0.3_f32, 0.3, 0.3];
         assert!(!compute_low_confidence(&scores, 0.0));
+    }
+
+    #[test]
+    fn test_compute_low_confidence_order_independent_for_mmr() {
+        // MMR (diversity 補正) 後は selection 順 ≠ score 降順。
+        // 旧実装は scores[0] を top1 とみなしていたため、低 score の chunk
+        // が先頭に来ると false positive / negative を起こした。
+        // codex review の指摘: PR #36 の compute_low_confidence は順序非依存
+        // (max(scores) を使う) であるべき。
+        let sorted = [0.9_f32, 0.5, 0.4]; // score 降順 (MMR off の典型)
+        let mmr_reordered = [0.5_f32, 0.9, 0.4]; // MMR で diversity 順に並び替え
+        // 同じスコア集合なので結果は一致するはず
+        assert_eq!(
+            compute_low_confidence(&sorted, 1.5),
+            compute_low_confidence(&mmr_reordered, 1.5),
+            "compute_low_confidence must be order-independent (MMR safety)"
+        );
     }
 
     // -----------------------------------------------------------------------
