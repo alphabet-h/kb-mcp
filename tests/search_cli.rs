@@ -137,3 +137,69 @@ fn cli_search_with_path_glob_filter_excludes() {
     assert!(stdout.contains("docs/a.md"));
     assert!(!stdout.contains("notes/b.md"));
 }
+
+#[test]
+fn test_search_cli_rejects_mmr_lambda_above_one() {
+    let kb = TempKb::new("kb-mcp-mmr-lambda-above");
+    let output = std::process::Command::new(bin())
+        .args([
+            "search",
+            "--kb-path",
+            kb.kb().to_str().unwrap(),
+            "--mmr-lambda",
+            "1.5",
+            "query",
+        ])
+        .output()
+        .expect("kb-mcp binary should run");
+    assert!(!output.status.success(), "should fail with non-zero exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must be in [0.0, 1.0]"),
+        "stderr should contain parser error message; got: {stderr}"
+    );
+}
+
+#[test]
+fn test_search_cli_rejects_mmr_lambda_below_zero() {
+    let kb = TempKb::new("kb-mcp-mmr-lambda-below");
+    let output = std::process::Command::new(bin())
+        .args([
+            "search",
+            "--kb-path",
+            kb.kb().to_str().unwrap(),
+            "--mmr-lambda",
+            "-0.1",
+            "query",
+        ])
+        .output()
+        .expect("kb-mcp binary should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must be in [0.0, 1.0]"),
+        "stderr should contain parser error message; got: {stderr}"
+    );
+}
+
+#[test]
+fn test_search_cli_rejects_mmr_same_doc_penalty_above_one() {
+    let kb = TempKb::new("kb-mcp-mmr-penalty-above");
+    let output = std::process::Command::new(bin())
+        .args([
+            "search",
+            "--kb-path",
+            kb.kb().to_str().unwrap(),
+            "--mmr-same-doc-penalty",
+            "1.5",
+            "query",
+        ])
+        .output()
+        .expect("kb-mcp binary should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must be in [0.0, 1.0]"),
+        "stderr should contain parser error message; got: {stderr}"
+    );
+}

@@ -225,6 +225,23 @@ enum Commands {
     Eval(EvalCliArgs),
 }
 
+/// Parse a `[0.0, 1.0]` f32 from CLI. NaN / Inf / out-of-range は reject。
+/// CLI 入口で early reject することで、embedding model DL 前に user に
+/// 明確な error message を返す (codex review 罠 2 cluster 防御)。
+///
+/// clap が値を再表示するため (`error: invalid value '1.5' for '...': <msg>`)
+/// parser 側 message では値を再掲しない。冗長な message を避ける。
+fn parse_unit_f32(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a valid f32: {e}"))?;
+    if !v.is_finite() {
+        return Err("must be finite".into());
+    }
+    if !(0.0..=1.0).contains(&v) {
+        return Err("must be in [0.0, 1.0]".into());
+    }
+    Ok(v)
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct SearchCliArgs {
     /// Search query text (positional)
@@ -280,10 +297,10 @@ pub(crate) struct SearchCliArgs {
     #[arg(long, value_parser = clap::value_parser!(bool))]
     pub(crate) mmr: Option<bool>,
     /// MMR lambda (relevance vs diversity tradeoff). 0.0..=1.0.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_unit_f32, allow_hyphen_values = true)]
     pub(crate) mmr_lambda: Option<f32>,
     /// MMR same-document penalty. 0.0..=1.0.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_unit_f32, allow_hyphen_values = true)]
     pub(crate) mmr_same_doc_penalty: Option<f32>,
     /// Enable Parent retriever (content expansion).
     #[arg(long, value_parser = clap::value_parser!(bool))]
@@ -333,10 +350,10 @@ pub(crate) struct EvalCliArgs {
     #[arg(long, value_parser = clap::value_parser!(bool))]
     pub(crate) mmr: Option<bool>,
     /// MMR lambda (relevance vs diversity tradeoff). 0.0..=1.0.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_unit_f32, allow_hyphen_values = true)]
     pub(crate) mmr_lambda: Option<f32>,
     /// MMR same-document penalty. 0.0..=1.0.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_unit_f32, allow_hyphen_values = true)]
     pub(crate) mmr_same_doc_penalty: Option<f32>,
     /// Enable Parent retriever (content expansion).
     #[arg(long, value_parser = clap::value_parser!(bool))]
