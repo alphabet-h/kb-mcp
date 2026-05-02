@@ -101,6 +101,45 @@ pub struct SearchConfig {
     /// rank-based low_confidence 判定の閾値 (top1.score / mean(top-N.score) < ratio で立つ)。
     /// 省略時は 1.5。0.0 は判定無効。
     pub min_confidence_ratio: Option<f32>,
+    /// MMR (Maximal Marginal Relevance) post-rerank 多様化設定。
+    /// セクション省略時は [`MmrConfig::default()`] (enabled=false)。
+    #[serde(default)]
+    pub mmr: MmrConfig,
+}
+
+/// `[search.mmr]` セクション。feature-28 PR-2 で追加。
+///
+/// rerank 後にチャンク類似度ペナルティで多様化する MMR を opt-in で有効化する。
+/// 既定は無効。詳細は `docs/feature-28-mmr.md` (TBD) 参照。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MmrConfig {
+    /// MMR を有効にするか。`false` ならパイプラインは従来通り (rerank 結果を
+    /// そのまま score 降順で返す)。
+    #[serde(default)]
+    pub enabled: bool,
+    /// MMR の relevance / diversity tradeoff 係数。`1.0` で多様化なし
+    /// (= MMR 無効と等価)、`< 0.5` で diversity 寄り。0.0..=1.0。
+    #[serde(default = "default_mmr_lambda")]
+    pub lambda: f32,
+    /// 同一ドキュメント内チャンク同士に追加で課す類似度ペナルティ。
+    /// `0.0` で純粋 MMR、`> 0` で同一文書チャンクの重複抑制が強まる。0.0..=1.0。
+    #[serde(default)]
+    pub same_doc_penalty: f32,
+}
+
+fn default_mmr_lambda() -> f32 {
+    0.7
+}
+
+impl Default for MmrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lambda: default_mmr_lambda(),
+            same_doc_penalty: 0.0,
+        }
+    }
 }
 
 /// `kb-mcp eval` (retrieval quality evaluation) の設定。省略時は全デフォルトで走る。
@@ -245,6 +284,11 @@ impl Config {
                 .with_context(|| format!("{}: invalid [parsers] config", path.display()))?;
         }
 
+        // Cross-section semantic validation (range checks for [search.mmr] etc.).
+        // 構文 (deny_unknown_fields / 型) は serde 段で済んでおり、ここでは値域を見る。
+        cfg.validate()
+            .with_context(|| format!("{}: invalid config", path.display()))?;
+
         Ok(cfg)
     }
 
@@ -283,6 +327,32 @@ impl Config {
             Some(p) => crate::parser::Registry::from_enabled(&p.enabled),
             None => Ok(crate::parser::Registry::defaults()),
         }
+    }
+
+    /// パース後の値域 / 整合性チェック。`load_from` のような構文レベルの
+    /// validation (`deny_unknown_fields` / 型不一致) では弾けない、数値の
+    /// レンジ違反などを検出する。
+    ///
+    /// 現状チェック対象:
+    /// - `[search.mmr].lambda` が `0.0..=1.0`
+    /// - `[search.mmr].same_doc_penalty` が `0.0..=1.0`
+    pub fn validate(&self) -> Result<()> {
+        if let Some(s) = &self.search {
+            // MMR レンジチェック
+            if !(0.0..=1.0).contains(&s.mmr.lambda) {
+                anyhow::bail!(
+                    "[search.mmr].lambda must be in 0.0..=1.0, got {}",
+                    s.mmr.lambda
+                );
+            }
+            if !(0.0..=1.0).contains(&s.mmr.same_doc_penalty) {
+                anyhow::bail!(
+                    "[search.mmr].same_doc_penalty must be in 0.0..=1.0, got {}",
+                    s.mmr.same_doc_penalty
+                );
+            }
+        }
+        Ok(())
     }
 
     /// `fastembed_cache_dir` が設定されていて、かつ環境変数
@@ -616,6 +686,53 @@ mod tests {
         .unwrap();
         let err = Config::load_from(file.path()).expect_err("unknown [search] field must reject");
         assert!(err.to_string().contains("failed to parse config"));
+    }
+
+    #[test]
+    fn test_mmr_config_defaults() {
+        let cfg = MmrConfig::default();
+        assert!(!cfg.enabled);
+        assert!((cfg.lambda - 0.7).abs() < 1e-6);
+        assert_eq!(cfg.same_doc_penalty, 0.0);
+    }
+
+    #[test]
+    fn test_mmr_config_rejects_unknown_field() {
+        let toml = r#"
+[search.mmr]
+enabled = true
+lambda = 0.5
+unknown = "bad"
+"#;
+        let result: std::result::Result<crate::config::Config, _> = toml::from_str(toml);
+        assert!(result.is_err(), "unknown field should be rejected");
+    }
+
+    #[test]
+    fn test_mmr_lambda_out_of_range_rejected() {
+        let toml = r#"
+[search.mmr]
+enabled = true
+lambda = 1.5
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let result = cfg.validate();
+        assert!(result.is_err(), "lambda > 1.0 should fail validate");
+    }
+
+    #[test]
+    fn test_mmr_same_doc_penalty_out_of_range_rejected() {
+        let toml = r#"
+[search.mmr]
+enabled = true
+same_doc_penalty = -0.1
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let result = cfg.validate();
+        assert!(
+            result.is_err(),
+            "negative same_doc_penalty should fail validate"
+        );
     }
 
     #[test]
