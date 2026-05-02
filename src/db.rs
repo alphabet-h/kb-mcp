@@ -16,6 +16,13 @@ const FILTER_OVERFETCH_CAP: u32 = 10_000;
 const FTS_BM25_HEADING_WEIGHT: f32 = 2.0;
 const FTS_BM25_CONTENT_WEIGHT: f32 = 1.0;
 
+/// `fetch_embeddings_by_chunk_ids` の IN 句 batch サイズ。
+/// SQLite `SQLITE_MAX_VARIABLE_NUMBER` は modern SQLite で 32766 だが、
+/// 余裕を持たせ + prepared statement の準備コストとのバランスで 500 を採用。
+/// 典型的な MMR pool (≤ 500) では 1 round-trip で済み、高 limit (limit=10000
+/// で pool=50000 等) でも 100 回程度の round-trip で完了する。
+const EMBEDDING_FETCH_BATCH: usize = 500;
+
 // ---------------------------------------------------------------------------
 // Public result types
 // ---------------------------------------------------------------------------
@@ -834,6 +841,13 @@ impl Database {
     /// 存在しない `chunk_id` は単に結果から除外される (エラーにしない)。index
     /// 中の race / 削除済 chunk_id を query に含む可能性があるので silently
     /// skip が望ましい。
+    ///
+    /// **SQLite host parameter limit**: `SQLITE_MAX_VARIABLE_NUMBER` は modern
+    /// SQLite (3.32+) で 32766。bundled SQLite 3.47+ でもこの値が default。
+    /// 高 limit MMR (例: `--limit 10000` で pool = 50000 chunk_ids) で IN 句が
+    /// この上限を超えるため、内部で [`EMBEDDING_FETCH_BATCH`] (= 500) ごとに
+    /// 分割して複数 query を発行する。500 は SQLite の上限に十分余裕を持た
+    /// せつつ、典型的な MMR pool (≤ 500) では 1 round-trip で済む値。
     pub fn fetch_embeddings_by_chunk_ids(
         &self,
         chunk_ids: &[i64],
@@ -841,29 +855,29 @@ impl Database {
         if chunk_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        // IN 句のプレースホルダを動的生成 (?1, ?2, ...)
-        let placeholders: String = (1..=chunk_ids.len())
-            .map(|i| format!("?{i}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT chunk_id, vec_to_json(embedding) \
-             FROM vec_chunks WHERE chunk_id IN ({placeholders})"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let params_iter: Vec<&dyn rusqlite::ToSql> = chunk_ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
-        let rows = stmt.query_map(rusqlite::params_from_iter(params_iter), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
         let mut out = HashMap::with_capacity(chunk_ids.len());
-        for r in rows {
-            let (id, json) = r?;
-            let emb: Vec<f32> = serde_json::from_str(&json)
-                .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
-            out.insert(id, emb);
+        for batch in chunk_ids.chunks(EMBEDDING_FETCH_BATCH) {
+            // IN 句のプレースホルダを動的生成 (?1, ?2, ...)
+            let placeholders: String = (1..=batch.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT chunk_id, vec_to_json(embedding) \
+                 FROM vec_chunks WHERE chunk_id IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params_iter: Vec<&dyn rusqlite::ToSql> =
+                batch.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(rusqlite::params_from_iter(params_iter), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for r in rows {
+                let (id, json) = r?;
+                let emb: Vec<f32> = serde_json::from_str(&json)
+                    .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
+                out.insert(id, emb);
+            }
         }
         Ok(out)
     }
@@ -2293,6 +2307,54 @@ mod tests {
         let db = db_with_384();
         let result = db.fetch_embeddings_by_chunk_ids(&[]).expect("fetch");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_fetch_embeddings_by_chunk_ids_batches_above_sqlite_limit() {
+        // SQLITE_MAX_VARIABLE_NUMBER (32766) を超える chunk_ids でも batch
+        // 分割で正常動作することを確認 (codex review #5 の regression guard)。
+        // 600 chunks (= EMBEDDING_FETCH_BATCH=500 を 1 batch 超える) を作る。
+        let db = db_with_384();
+        let doc_id = db
+            .upsert_document(
+                "/big.md",
+                Some("big"),
+                Some("topic"),
+                None,
+                None,
+                &[],
+                None,
+                "h",
+            )
+            .expect("upsert");
+        let n = 600;
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let cid = db
+                .insert_chunk(
+                    doc_id,
+                    i as i32,
+                    Some("h"),
+                    None,
+                    "c",
+                    &dummy_embedding((i as f32) * 0.001),
+                    1.0,
+                )
+                .expect("insert");
+            ids.push(cid);
+        }
+        let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+        assert_eq!(
+            result.len(),
+            n,
+            "all {n} embeddings should be returned across batches"
+        );
+        for &id in &ids {
+            assert!(
+                result.contains_key(&id),
+                "chunk_id {id} missing from batched fetch"
+            );
+        }
     }
 
     #[test]
