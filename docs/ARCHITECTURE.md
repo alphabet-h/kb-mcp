@@ -18,10 +18,12 @@ Source-level structure and data flow of kb-mcp, for contributors extending or mo
 | `src/transport/` | MCP transport abstraction. `mod.rs` (Transport enum + CLI/config resolution), `stdio.rs` (stdio), `http.rs` (rmcp `StreamableHttpService` + axum, mounts `/mcp` and `/healthz`). `KbServerShared` is `Arc`-shared through a session factory so each connection gets a lightweight handle. |
 | `src/schema.rs` | Frontmatter schema validation. Reads `kb-mcp-schema.toml` under `kb_path`, enforces `required` / `type` / `pattern` / `enum` / `min_length` / `max_length` / `allow_empty`. Invoked by the `kb-mcp validate` CLI which reports in text / JSON / GitHub-annotation formats. |
 | `src/embedder.rs` | Thin wrapper over `fastembed-rs`. `ModelChoice` selects the embedding model (BGE-small-en-v1.5 / BGE-M3). `RerankerChoice` + `Reranker` provide optional cross-encoder reranking. |
-| `src/db.rs` | `rusqlite` + `sqlite-vec` + FTS5 (trigram). Manages the `chunks` / `vec_chunks` / `fts_chunks` schemas and CRUD. Exposes `search_hybrid` (Reciprocal Rank Fusion, `k = 60`). `SearchFilters` struct unifies filter args (path globs / tags / date range / min_quality); `MatchSpan` carries byte-offset citations (added in v0.3.0). |
+| `src/db.rs` | `rusqlite` + `sqlite-vec` + FTS5 (trigram). Manages the `chunks` / `vec_chunks` / `fts_chunks` schemas and CRUD. Exposes `search_hybrid` (Reciprocal Rank Fusion, `k = 60`) and the v0.7.0 unbounded variants for the MMR / parent retriever pipeline. `SearchFilters` struct unifies filter args (path globs / tags / date range / min_quality); `MatchSpan` carries byte-offset citations (added in v0.3.0). `chunks.level` (added v0.7.0) distinguishes h2 / h3 headings. |
+| `src/mmr.rs` | (v0.7.0+) Maximal Marginal Relevance greedy re-rank with a similarity cache. `mmr_select` operates on the post-rerank candidate pool and is gated by `[search.mmr]` config or the `mmr` per-call param. |
+| `src/parent.rs` | (v0.7.0+) Display-time parent retriever. `apply_parent_retriever` expands hit chunks via `expand_adjacent` (level-aware sibling merge) or `expand_whole_document` (full-doc fallback for chunks under `whole_doc_threshold_tokens`). Score / rank / `match_spans` stay on the original hit; only `content` and the new `expanded_from` field change. |
 | `src/quality.rs` | Per-chunk quality scoring (length / boilerplate / structure signals). |
 | `src/graph.rs` | Connection graph BFS over the vector index, for the `get_connection_graph` MCP tool and the `kb-mcp graph` CLI. |
-| `src/eval.rs` | Optional retrieval-quality evaluation for the `kb-mcp eval` CLI. Parses a golden YAML, runs each query through `db.search_hybrid`, and computes recall@k / MRR / nDCG@k. Loads / saves `<kb_path>/.kb-mcp-eval-history.json` for diff display. Opt-in; does not affect `serve` / `search` / `index`. |
+| `src/eval.rs` | Optional retrieval-quality evaluation for the `kb-mcp eval` CLI. Parses a golden YAML, runs each query through `db.search_hybrid`, and computes recall@k / MRR / nDCG@k. Loads / saves `<kb_path>/.kb-mcp-eval-history.json` for diff display. `ConfigFingerprint` (v0.7.0+) carries optional `mmr` / `parent_retriever` so eval runs with different settings produce distinguishable history entries. Opt-in; does not affect `serve` / `search` / `index`. |
 
 ## Data flow
 
@@ -50,6 +52,10 @@ At query time the `search` tool runs a hybrid:
 - query → sanitize → `fts_chunks MATCH` + bm25 (top-N) — heading weighted 2×
 - Reciprocal Rank Fusion on the Rust side (`k = 60`) → top-`limit` returned
 - (optional) cross-encoder reranker re-scores the top candidates before return
+- (optional, v0.7.0+) MMR diversity re-rank greedily picks `limit` chunks from the larger candidate pool, balancing relevance and novelty (`lambda` controls the tradeoff; `same_doc_penalty` deduplicates same-document hits)
+- (optional, v0.7.0+) parent retriever expands the `content` of short hits to adjacent siblings or the whole document; the score, rank, path, and `match_spans` are preserved so the relevance signal is unchanged
+
+The full v0.7.0 pipeline is **`RRF → reranker → MMR → parent retriever → match_spans`**. Each stage is a no-op when its config is off, so the pipeline collapses to pre-v0.7.0 behavior by default. See [retrieval-pipeline.md](./retrieval-pipeline.md) for the narrative.
 
 ## Embedding cache resolution
 

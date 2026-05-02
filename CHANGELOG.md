@@ -4,6 +4,82 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-02
+
+### Added
+- MMR (Maximal Marginal Relevance) diversity re-rank stage
+  (feature-28 PR-2). Greedy post-rerank picker that balances
+  relevance against novelty:
+  ```
+  score = λ · rel(c) − (1 − λ) · max_sim(c, picked)
+                     − same_doc_penalty · 1[doc(c) ∈ picked_docs]
+  ```
+  Configured via `[search.mmr]` in `kb-mcp.toml`
+  (`enabled = false` default, `lambda = 0.7`,
+  `same_doc_penalty = 0.0`) and per-call `mmr` /
+  `mmr_lambda` / `mmr_same_doc_penalty` params on the `search`
+  MCP tool. CLI: `kb-mcp search --mmr` /
+  `--mmr-lambda` / `--mmr-same-doc-penalty`. Relevance scores
+  (RRF or reranker) are min-max normalized to `[0, 1]` before
+  combining with the cosine-similarity diversity term, so
+  `lambda` is invariant to which prior stage produced the
+  score. Kicks in only when the candidate pool is larger than
+  `limit`; pulls extra candidates through stages 1–2 when
+  enabled. Off by default: pre-v0.7.0 pipelines behave
+  identically.
+- Parent retriever display-time content expansion
+  (feature-28 PR-3). For each hit chunk, optionally rewrites
+  the returned `content` so the LLM gets enough surrounding
+  context:
+  - **Whole-document fallback** when
+    `token_count < whole_doc_threshold_tokens` (default 100):
+    return the entire document, capped at
+    `max_expanded_tokens`.
+  - **Adjacent-sibling merge** otherwise: merge the chunk
+    immediately before / after the hit at the same heading
+    level, until the merged block hits `max_expanded_tokens`
+    (default 2000; BGE-M3 max is 8192).
+  Score, rank, path, and `match_spans` of the original hit
+  are preserved — only `content` and the new `expanded_from:
+  Option<ExpandedRange>` field change. Configured via
+  `[search.parent_retriever]` (`enabled = false` default) and
+  per-call `parent_retriever` MCP param. CLI:
+  `kb-mcp search --parent-retriever`. Legacy rows where
+  `chunks.token_count IS NULL` use a `len(content) / 4` token
+  estimate (matches the indexer's own estimator) so the cap
+  is enforced even on databases predating `token_count`.
+- `chunks.level` schema column (feature-28 PR-1) distinguishing
+  h2 / h3 headings, with idempotent migration. Used by parent
+  retriever's adjacent-sibling merge to avoid jumping across
+  heading levels. Old rows have `level = NULL` (no upgrade
+  required); the chunker populates the column for newly
+  indexed content.
+- `kb-mcp eval` accepts the same `--mmr` / `--mmr-lambda` /
+  `--mmr-same-doc-penalty` / `--parent-retriever` flags as
+  `kb-mcp search`, so retrieval-quality experiments can pin
+  the full pipeline. `ConfigFingerprint` gains optional
+  `mmr` / `parent_retriever` sub-fingerprints (additive —
+  the JSON layout is forward-compatible with pre-v0.7.0
+  history files; old runs deserialize without these
+  fields).
+- New narrative doc `docs/retrieval-pipeline.{md,ja.md}`
+  describing the full
+  `RRF → reranker → MMR → parent retriever → match_spans`
+  pipeline with tuning advice for each stage.
+
+### Changed (additive, MCP minor-compatible)
+- `SearchHit` JSON schema gains an optional `expanded_from`
+  field (`null` when parent retriever did not fire). Strict
+  clients that use `deny_unknown_fields` need to know this
+  field exists; default-tolerant clients are unaffected.
+- `Reranker::rerank_candidates` is now a thin wrapper over
+  the new chunk_id-preserving `rerank_candidates_with_ids`.
+  Behavior of the public `rerank_candidates` entry-point is
+  unchanged. `search_hybrid_candidates` body is refactored
+  to share an `rrf_topk` helper with the unbounded variant
+  used by the MMR pipeline; return shape is preserved and
+  every existing caller keeps compiling without changes.
+
 ### Fixed
 - `examples/deployments/personal-http/kb-mcp-task.xml`:
   `RestartOnFailure.Interval` was set to `PT5S` (5 seconds), but
@@ -433,7 +509,8 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.3...v0.5.0

@@ -107,6 +107,21 @@ bind = "127.0.0.1:3100"
 # # 0.0 disables the flag. CLI `--min-confidence-ratio` and the MCP
 # # param `min_confidence_ratio` override per query.
 # min_confidence_ratio = 1.5
+
+# Optional: MMR diversity re-rank (v0.7.0+). Off by default.
+# Applied AFTER reranker and BEFORE parent retriever.
+# [search.mmr]
+# enabled = false
+# lambda = 0.7              # 1.0 = no diversity (MMR off equiv); < 0.5 leans exploration
+# same_doc_penalty = 0.0    # > 0 deduplicates same-document chunks; 0 = pure MMR
+
+# Optional: parent retriever content expansion (v0.7.0+). Off by default.
+# When a hit chunk is short, expand its `content` to adjacent siblings or the
+# whole document so the LLM gets enough context. Score / order untouched.
+# [search.parent_retriever]
+# enabled = false
+# whole_doc_threshold_tokens = 100   # token_count below this -> whole document fallback
+# max_expanded_tokens = 2000         # cap for adjacent merge / whole-doc (BGE-M3 <= 8192)
 ```
 
 With the file in place `kb-mcp serve` / `index` / `status` / `graph` / `search` all work without any of those flags. Unknown keys are rejected to catch typos early. `FASTEMBED_CACHE_DIR` from the real environment overrides the file entry.
@@ -293,6 +308,32 @@ kb-mcp search "tokio spawn" \
 - `--min-confidence-ratio <N>` — per-query override of the `low_confidence` threshold.
 
 CLI `kb-mcp search --format json` follows the same wrapper format. See [docs/citations.md](docs/citations.md) for `match_spans` / byte-offset details and [docs/filters.md](docs/filters.md) for the full filter reference.
+
+### Diversity (MMR) and parent retriever (v0.7.0+)
+
+Two opt-in retrieval-quality knobs land in v0.7.0. They are independent — enable either, both, or neither. Both default to **off** so existing pipelines behave exactly as before.
+
+```bash
+# MMR diversity re-rank
+kb-mcp search "tokio runtime" --mmr true --mmr-lambda 0.7
+
+# Parent retriever (expand short chunks to adjacent siblings or whole doc)
+kb-mcp search "k=60 in RRF" --parent-retriever true
+
+# Both at once
+kb-mcp search "context management" --mmr true --parent-retriever true
+```
+
+CLI flags (also accepted by `kb-mcp eval`):
+
+- `--mmr <bool>` — enable MMR diversity re-rank. Default `false`.
+- `--mmr-lambda <0..1>` — MMR balance: `1.0` is "no diversity" (= MMR off behavior), lower values lean toward exploration / less redundancy. Default `0.7`.
+- `--mmr-same-doc-penalty <0..1>` — extra cost when an already-selected chunk lives in the same document. `0.0` is pure MMR; raise to actively deduplicate same-doc chunks. Default `0.0`.
+- `--parent-retriever <bool>` — when a hit chunk's token count is below `whole_doc_threshold_tokens`, expand its `content` to adjacent siblings (level-aware) or, for very short chunks, the whole document. The score, rank, path, and `match_spans` of the original hit are preserved; only `content` (and a new optional `expanded_from`) changes. Default `false`.
+
+MCP `search` tool gains the matching per-call params `mmr` / `mmr_lambda` / `mmr_same_doc_penalty` / `parent_retriever`. Toml defaults live in `[search.mmr]` and `[search.parent_retriever]` (see [Optional config file](#optional-config-file) above). Per-call params override toml; toml overrides built-in defaults.
+
+The pipeline order is **`RRF → reranker → MMR → parent retriever → match_spans`**. MMR re-orders candidates while the reranker score is still on the chunks; parent retriever runs last so the expanded content does not contaminate the relevance signal. See [docs/retrieval-pipeline.md](docs/retrieval-pipeline.md) for the full pipeline narrative and tuning advice.
 
 ### Connection graph from a starting document
 
@@ -556,7 +597,7 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 
 | Tool | Description | Key parameters |
 |---|---|---|
-| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion, optionally followed by cross-encoder reranking. Returns a wrapper `{ results, low_confidence, filter_applied }` with chunks ranked by relevance. See [docs/citations.md](docs/citations.md), [docs/filters.md](docs/filters.md). | `query` (required), `limit`, `category`, `topic`, `rerank` (override server default), `min_quality`, `include_low_quality`, `path_globs` (glob list, `!`-prefix excludes), `tags_any` / `tags_all`, `date_from` / `date_to` (`YYYY-MM-DD`), `min_confidence_ratio` |
+| `search` | Hybrid search (vector + FTS5 full-text) merged via Reciprocal Rank Fusion, optionally followed by cross-encoder reranking, optional MMR diversity re-rank, and optional parent retriever content expansion. Returns a wrapper `{ results, low_confidence, filter_applied }` with chunks ranked by relevance; each result may carry `expanded_from` if parent retriever fired. See [docs/citations.md](docs/citations.md), [docs/filters.md](docs/filters.md), [docs/retrieval-pipeline.md](docs/retrieval-pipeline.md). | `query` (required), `limit`, `category`, `topic`, `rerank` (override server default), `min_quality`, `include_low_quality`, `path_globs` (glob list, `!`-prefix excludes), `tags_any` / `tags_all`, `date_from` / `date_to` (`YYYY-MM-DD`), `min_confidence_ratio`, `mmr` / `mmr_lambda` / `mmr_same_doc_penalty` (v0.7.0+), `parent_retriever` (v0.7.0+) |
 | `list_topics` | List all indexed topics and categories with document counts. | (none) |
 | `get_document` | Get the full content and metadata of a document by its relative path. | `path` (e.g. `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | Opt-in: when `[best_practice].path_templates` is configured in `kb-mcp.toml`, fetch a best-practices document for the given target and optionally extract an h2 section. Without configuration the tool returns a "not configured" error. | `target` (e.g. `"claude-code"`), `category` (optional) |
