@@ -2447,6 +2447,90 @@ mod tests {
     }
 
     #[test]
+    fn test_fetch_embeddings_by_chunk_ids_boundary_table() {
+        // codex 罠 5 (SQLite IN limit) cluster の 2 件目防御。
+        // EMBEDDING_FETCH_BATCH を境界とする 5 値を直接 round-trip 検証。
+        // 値を `EMBEDDING_FETCH_BATCH` 定数に bind することで、
+        // 将来 batch サイズを変えた時に boundary 値が連動するよう保証する
+        // (= マジックナンバー 499/500/501/1500 を直書きしない)。
+        // 3 * batch (現在 1500) で batch 跨ぎ + 複数 batch 連結を検証
+        // (`32766` SQLite default MAX_VARIABLE_NUMBER 直前は CI cost が見合わないため out-of-scope)。
+        let efb = EMBEDDING_FETCH_BATCH;
+        for &n in &[0_usize, efb - 1, efb, efb + 1, 3 * efb] {
+            let db = db_with_384();
+            let doc_id = db
+                .upsert_document(
+                    "/big.md",
+                    Some("big"),
+                    Some("topic"),
+                    None,
+                    None,
+                    &[],
+                    None,
+                    "h",
+                )
+                .expect("upsert");
+            let mut ids = Vec::with_capacity(n);
+            for i in 0..n {
+                let cid = db
+                    .insert_chunk(
+                        doc_id,
+                        i as i32,
+                        Some("h"),
+                        None,
+                        "c",
+                        &dummy_embedding((i as f32) * 0.001),
+                        1.0,
+                    )
+                    .expect("insert");
+                ids.push(cid);
+            }
+            let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+            assert_eq!(result.len(), n, "round-trip count mismatch for n={n}");
+            for &id in &ids {
+                assert!(result.contains_key(&id), "chunk_id {id} missing for n={n}");
+            }
+        }
+    }
+
+    proptest::proptest! {
+        // proptest で 0..=200 の任意 N を sweep、round-trip 完全一致を assert。
+        // PROPTEST_CASES = 64 で IO-heavy test の cost を抑制。
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 64,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        #[test]
+        fn prop_fetch_embeddings_by_chunk_ids_round_trip(n in 0_usize..=200) {
+            let db = db_with_384();
+            let doc_id = db
+                .upsert_document("/big.md", Some("big"), Some("topic"), None, None, &[], None, "h")
+                .expect("upsert");
+            let mut ids = Vec::with_capacity(n);
+            for i in 0..n {
+                let cid = db
+                    .insert_chunk(
+                        doc_id,
+                        i as i32,
+                        Some("h"),
+                        None,
+                        "c",
+                        &dummy_embedding((i as f32) * 0.001),
+                        1.0,
+                    )
+                    .expect("insert");
+                ids.push(cid);
+            }
+            let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+            proptest::prop_assert_eq!(result.len(), n);
+            for &id in &ids {
+                proptest::prop_assert!(result.contains_key(&id), "chunk_id {id} missing");
+            }
+        }
+    }
+
+    #[test]
     fn test_fts_table_created_on_init() {
         let db = Database::open_in_memory().unwrap();
         let name: String = db
