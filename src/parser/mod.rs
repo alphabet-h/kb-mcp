@@ -36,7 +36,12 @@ pub struct Frontmatter {
 }
 
 /// A single chunk of a parsed document.
-#[derive(Debug, Clone)]
+///
+/// All fields use their type's natural default (`0`, `None`, `None`,
+/// `String::new()`), so `#[derive(Default)]` is sufficient and clippy-compliant.
+/// Other config-like structs in this crate (e.g. `MmrConfig`) use a hand-written
+/// `Default` because some defaults are non-zero (e.g. `lambda = 0.7`).
+#[derive(Debug, Clone, Default)]
 pub struct Chunk {
     pub index: usize,
     pub heading: Option<String>,
@@ -45,17 +50,6 @@ pub struct Chunk {
     /// 将来の Contextual Retrieval (A-1) で hierarchy を利用する。
     pub level: Option<u8>,
     pub content: String,
-}
-
-impl Default for Chunk {
-    fn default() -> Self {
-        Self {
-            index: 0,
-            heading: None,
-            level: None,
-            content: String::new(),
-        }
-    }
 }
 
 /// A fully parsed document: frontmatter + chunks + retained raw content.
