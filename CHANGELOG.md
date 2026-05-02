@@ -4,6 +4,32 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+### Changed
+- `kb-mcp search` / `kb-mcp eval`: `--mmr-lambda` and
+  `--mmr-same-doc-penalty` values outside `[0.0, 1.0]` (and
+  NaN / ±Inf) are now rejected at parse time (clap layer)
+  instead of after embedding model load. This avoids a
+  ~130MB / ~2.3GB model DL just to get an "out of range"
+  error. Exit code becomes 2 (clap convention) instead of 1
+  (anyhow). No effect on valid inputs. The existing
+  helper-level guards (`run_search_pipeline` and the MCP
+  tool boundary) continue to enforce the same range for
+  non-CLI callers, so the runtime contract is unchanged.
+
+### Internal
+- Test coverage for the codex-review trap cluster surfaced
+  during feature-28: added a proptest for
+  `compute_low_confidence` order invariance (F-47), a
+  boundary table + proptest for
+  `Database::fetch_embeddings_by_chunk_ids` covering
+  `EMBEDDING_FETCH_BATCH = 500` cycles (F-48), 4 unit tests
+  for the new pure helper `compute_reranker_input_limit`
+  including `usize::MAX → u32::MAX` saturate (F-49), and 3
+  subprocess wire tests proving the new clap-level reject
+  path (F-50). Test count: 393 → 400 unit + 3 new
+  integration. No behavior change beyond the CLI early
+  reject above.
+
 ## [0.7.0] - 2026-05-03
 
 ### Added
