@@ -99,6 +99,36 @@ struct SearchParams {
     /// `null` falls back to the server default (`kb-mcp.toml` / CLI);
     /// `0.0` disables the cutoff for this query.
     min_confidence_ratio: Option<f32>,
+
+    // ----- MMR / Parent retriever (per-call overrides) -----
+    /// MMR re-ranking. None なら kb-mcp.toml [search.mmr].enabled を使用。
+    /// per-call で true/false を指定すると toml をオーバーライド。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mmr: Option<bool>,
+
+    /// MMR の lambda override (relevance vs diversity)。0.0..=1.0 outside reject。
+    /// None なら toml [search.mmr].lambda を使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mmr_lambda: Option<f32>,
+
+    /// MMR の same-doc penalty override。0.0..=1.0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mmr_same_doc_penalty: Option<f32>,
+
+    /// Parent retriever (content display expansion)。None なら toml に従う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_retriever: Option<bool>,
+}
+
+impl From<&SearchParams> for crate::config::SearchOverrides {
+    fn from(p: &SearchParams) -> Self {
+        Self {
+            mmr: p.mmr,
+            mmr_lambda: p.mmr_lambda,
+            mmr_same_doc_penalty: p.mmr_same_doc_penalty,
+            parent_retriever: p.parent_retriever,
+        }
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -241,6 +271,27 @@ impl KbServer {
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(5);
+
+        // feature-28 Task 2.7: per-call MMR override の範囲チェック。
+        // 1.5 / -0.1 等の outside-range は MCP boundary で early reject し、
+        // resolve / mmr_select に届ける前に弾く。NaN も `(0.0..=1.0).contains`
+        // が false になるので同経路で reject される。
+        if let Some(l) = params.mmr_lambda
+            && !(0.0..=1.0).contains(&l)
+        {
+            return serde_json::to_string_pretty(&ErrorResponse {
+                error: format!("mmr_lambda out of range: {l} (must be 0.0..=1.0)"),
+            })
+            .unwrap_or_default();
+        }
+        if let Some(p) = params.mmr_same_doc_penalty
+            && !(0.0..=1.0).contains(&p)
+        {
+            return serde_json::to_string_pretty(&ErrorResponse {
+                error: format!("mmr_same_doc_penalty out of range: {p} (must be 0.0..=1.0)"),
+            })
+            .unwrap_or_default();
+        }
 
         // F-35: query length cap (1 KiB)。上限超えは early reject。
         // embedder / FTS5 layer の内部 truncate に任せる手もあるが、上流で
@@ -1517,5 +1568,50 @@ mod tests {
             "expected symlink reject, got: {}",
             err.error
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // feature-28 Task 2.7: SearchParams MMR fields + From<&SearchParams>
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_search_params_from_default_overrides_to_none() {
+        let p = SearchParams::default();
+        let o: crate::config::SearchOverrides = (&p).into();
+        assert_eq!(o.mmr, None);
+        assert_eq!(o.mmr_lambda, None);
+        assert_eq!(o.mmr_same_doc_penalty, None);
+        assert_eq!(o.parent_retriever, None);
+    }
+
+    #[test]
+    fn test_search_params_from_with_overrides() {
+        let p = SearchParams {
+            mmr: Some(true),
+            mmr_lambda: Some(0.5),
+            ..SearchParams::default()
+        };
+        let o: crate::config::SearchOverrides = (&p).into();
+        assert_eq!(o.mmr, Some(true));
+        assert_eq!(o.mmr_lambda, Some(0.5));
+        assert_eq!(o.mmr_same_doc_penalty, None);
+        assert_eq!(o.parent_retriever, None);
+    }
+
+    #[test]
+    fn test_search_params_from_full_overrides() {
+        // 全フィールド個別に指定したケースが From で漏れず通ることを確認。
+        let p = SearchParams {
+            mmr: Some(false),
+            mmr_lambda: Some(0.25),
+            mmr_same_doc_penalty: Some(0.75),
+            parent_retriever: Some(true),
+            ..SearchParams::default()
+        };
+        let o: crate::config::SearchOverrides = (&p).into();
+        assert_eq!(o.mmr, Some(false));
+        assert_eq!(o.mmr_lambda, Some(0.25));
+        assert_eq!(o.mmr_same_doc_penalty, Some(0.75));
+        assert_eq!(o.parent_retriever, Some(true));
     }
 }
