@@ -868,6 +868,27 @@ impl Database {
         Ok(out)
     }
 
+    /// `documents.path` から `documents.id` を引く軽量 lookup。
+    /// MMR の `same_doc_penalty` 計算で chunk → document_id を解決するために使う。
+    /// 不存在なら `Ok(None)`。
+    ///
+    /// 計算量は path カラムへの index 引き 1 回。MMR の候補プール (≤ 50 件) に
+    /// 対して chunk ごとに呼ばれるが、in-memory cache が効くため実測コストは低い。
+    /// 将来 hot path 化したら `Vec<&str>` 入力 → `HashMap<String, i64>` 出力に
+    /// バッチ化するか、search_hybrid_candidates の戻り値型に document_id を
+    /// 同梱する案あり (feature-28 plan Step 2 の note 参照)。
+    pub fn lookup_document_id_by_path(&self, path: &str) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM documents WHERE path = ?1",
+                rusqlite::params![path],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Delete a document and all associated chunks / vectors / FTS rows.
     pub fn delete_document(&self, path: &str) -> Result<()> {
         // Delete vector entries first (no FK from virtual table)

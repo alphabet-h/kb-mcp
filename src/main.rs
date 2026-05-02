@@ -457,6 +457,11 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|s| s.min_confidence_ratio)
                 .unwrap_or(1.5);
 
+            // [search] セクション全体のスナップショット。MMR / parent_retriever
+            // の effective config は MCP `search` ツールの per-call で resolve するため、
+            // serve 起動時にここから clone して KbServer に保持する。
+            let search_config = cfg.search.clone().unwrap_or_default();
+
             // evaluator 指摘 High #2: `--bind` / `--port` が指定されているのに
             // 実効 transport が Stdio なら silent ignore は footgun なので reject。
             if matches!(resolved_transport, transport::Transport::Stdio)
@@ -483,6 +488,7 @@ fn main() -> anyhow::Result<()> {
                     watch_config,
                     resolved_transport,
                     min_confidence_ratio,
+                    search_config,
                 )
                 .await
             })?;
