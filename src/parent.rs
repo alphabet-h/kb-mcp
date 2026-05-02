@@ -33,10 +33,20 @@ pub fn expand_parent(
     db: &Database,
     params: ParentRetrieverParams,
 ) -> anyhow::Result<SearchHit> {
-    // Task 3.2 では adjacent merge のみ。Task 3.3 で whole-doc fallback を分岐
-    // 追加。
-    let (doc_id, chunk_idx, _token_count) = db.get_chunk_meta(chunk_id)?;
-    expand_adjacent(hit, doc_id, chunk_idx, db, params)
+    let (doc_id, chunk_idx, token_count) = db.get_chunk_meta(chunk_id)?;
+
+    // small chunk: token_count が threshold 未満なら whole-doc fallback。
+    // token_count = None (legacy / 計測失敗) は adjacent merge にフォールバック
+    // (保守的: small かどうか判断不能なので展開しすぎないよう adjacent を選ぶ)。
+    let is_small = token_count
+        .map(|t| (t as u32) < params.whole_doc_threshold_tokens)
+        .unwrap_or(false);
+
+    if is_small {
+        expand_whole_document(hit, doc_id, db, params)
+    } else {
+        expand_adjacent(hit, doc_id, chunk_idx, db, params)
+    }
 }
 
 fn expand_adjacent(
@@ -78,6 +88,34 @@ fn expand_adjacent(
         from_index: from_idx,
         to_index: to_idx,
     });
+    Ok(hit)
+}
+
+fn expand_whole_document(
+    mut hit: SearchHit,
+    doc_id: i64,
+    db: &Database,
+    _params: ParentRetrieverParams,
+) -> anyhow::Result<SearchHit> {
+    // i64::MAX で「上限なし」range fetch (= 同 doc 全 chunks)。
+    // quality_filter は parent retriever expansion では適用しない (spec
+    // invariant #6): 周辺 chunk が低 quality_score でも context として含む。
+    // fetch_chunks_by_index_range は quality_score を filter 条件に持たない。
+    let chunks = db.fetch_chunks_by_index_range(doc_id, 0, i64::MAX)?;
+    if chunks.is_empty() {
+        return Ok(hit);
+    }
+    let total_chunks = chunks.len();
+    let merged: String = chunks
+        .iter()
+        .map(|c| c.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    hit.content = merged;
+    // adjacent merge と同様に defensive クリア。呼び出し側 (run_search_pipeline)
+    // が拡張後 content に対して compute_match_spans を再計算する責務。
+    hit.match_spans = None;
+    hit.expanded_from = Some(ExpandedRange::WholeDocument { total_chunks });
     Ok(hit)
 }
 
@@ -134,6 +172,8 @@ mod tests {
 
     /// 3 chunks ([0, 1, 2]) を同 doc に insert、中間の chunk_id を hit にして
     /// adjacent merge が前後を含めて 3 chunks を連結することを確認。
+    /// 各 chunk の content は token_count >= 100 (= ~400 byte) になるように
+    /// 十分長くして whole-doc fallback を踏まないようにする。
     #[test]
     fn test_parent_adjacent_merge_3_chunks() {
         let tmp = tempdir_for_test();
@@ -144,13 +184,18 @@ mod tests {
         let doc_id = db
             .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
             .expect("upsert");
+        // 各 chunk content を ~900 byte (= token_count ~225) にして adjacent
+        // 経路に確実に乗せる。"alpha" / "beta" / "gamma" を marker として残す。
+        let alpha_body = format!("alpha {}", "body content body content ".repeat(40));
+        let beta_body = format!("beta {}", "body content body content ".repeat(40));
+        let gamma_body = format!("gamma {}", "body content body content ".repeat(40));
         let c0 = db
             .insert_chunk(
                 doc_id,
                 0,
                 Some("h0"),
                 None,
-                "alpha body content",
+                &alpha_body,
                 &dummy_emb_384(),
                 1.0,
             )
@@ -161,7 +206,7 @@ mod tests {
                 1,
                 Some("h1"),
                 None,
-                "beta body content",
+                &beta_body,
                 &dummy_emb_384(),
                 1.0,
             )
@@ -172,13 +217,13 @@ mod tests {
                 2,
                 Some("h2"),
                 None,
-                "gamma body content",
+                &gamma_body,
                 &dummy_emb_384(),
                 1.0,
             )
             .expect("c2");
 
-        let hit = make_hit("/doc.md", "beta body content");
+        let hit = make_hit("/doc.md", &beta_body);
         let expanded = expand_parent(hit, c1, &db, params()).expect("expand");
         assert!(expanded.content.contains("alpha"));
         assert!(expanded.content.contains("beta"));
@@ -195,6 +240,7 @@ mod tests {
     }
 
     /// chunk_index = 0 (doc の左端) で hit、左拡張なしで [0, 1] のみ返ることを確認。
+    /// content は token_count >= 100 にして whole-doc fallback を踏まないようにする。
     #[test]
     fn test_parent_adjacent_at_doc_boundary_left() {
         let tmp = tempdir_for_test();
@@ -205,13 +251,15 @@ mod tests {
         let doc_id = db
             .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
             .expect("upsert");
+        let alpha_body = format!("alpha {}", "body content body content ".repeat(40));
+        let beta_body = format!("beta {}", "body content body content ".repeat(40));
         let c0 = db
             .insert_chunk(
                 doc_id,
                 0,
                 Some("h0"),
                 None,
-                "alpha body content",
+                &alpha_body,
                 &dummy_emb_384(),
                 1.0,
             )
@@ -222,13 +270,13 @@ mod tests {
                 1,
                 Some("h1"),
                 None,
-                "beta body content",
+                &beta_body,
                 &dummy_emb_384(),
                 1.0,
             )
             .expect("c1");
 
-        let hit = make_hit("/doc.md", "alpha body content");
+        let hit = make_hit("/doc.md", &alpha_body);
         let expanded = expand_parent(hit, c0, &db, params()).expect("expand");
         match expanded.expanded_from {
             Some(ExpandedRange::Adjacent {
@@ -237,5 +285,122 @@ mod tests {
             }) => {}
             other => panic!("expected Adjacent {{0,1}}, got {other:?}"),
         }
+    }
+
+    /// token_count が whole_doc_threshold_tokens (= 100) 未満の chunk hit に
+    /// 対しては whole document 全 chunks を連結して返す。
+    /// expanded_from は WholeDocument variant。
+    #[test]
+    fn test_parent_whole_doc_for_small_chunk() {
+        let tmp = tempdir_for_test();
+        let path = tmp.0.join("test.db");
+        let db = Database::open(path.to_str().unwrap()).expect("open");
+        db.verify_embedding_meta("bge-small-en-v1.5", 384)
+            .expect("vec_chunks");
+        let doc_id = db
+            .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
+            .expect("upsert");
+
+        // chunk_index=0 が small (token_count=30 < 100), c1 / c2 は普通サイズ
+        let c0 = db
+            .insert_chunk(doc_id, 0, Some("h0"), None, "header", &dummy_emb_384(), 1.0)
+            .expect("c0");
+        // 上記の insert_chunk は token_count を内部で content.len()/4 で計算する。
+        // "header" = 6 byte なので token_count = 1。これは threshold (100) 未満。
+        let _c1 = db
+            .insert_chunk(
+                doc_id,
+                1,
+                Some("h1"),
+                None,
+                // 200 tokens 相当の長文 (~800 byte content) を作る
+                &"longer body content body content body content".repeat(20),
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c1");
+        let _c2 = db
+            .insert_chunk(
+                doc_id,
+                2,
+                Some("h2"),
+                None,
+                &"another longer body block another body block".repeat(20),
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c2");
+
+        let hit = make_hit("/doc.md", "header");
+        let expanded = expand_parent(hit, c0, &db, params()).expect("expand");
+        match expanded.expanded_from {
+            Some(ExpandedRange::WholeDocument { total_chunks: 3 }) => {}
+            other => panic!("expected WholeDocument {{total_chunks: 3}}, got {other:?}"),
+        }
+        assert!(expanded.content.contains("header"));
+        assert!(expanded.content.contains("longer body"));
+        assert!(expanded.content.contains("another longer body"));
+    }
+
+    /// quality_filter が parent retriever expansion で適用されないことを確認:
+    /// 周辺 chunk が低 quality_score でも content に含まれる。
+    #[test]
+    fn test_parent_quality_filter_not_applied_in_expansion() {
+        let tmp = tempdir_for_test();
+        let path = tmp.0.join("test.db");
+        let db = Database::open(path.to_str().unwrap()).expect("open");
+        db.verify_embedding_meta("bge-small-en-v1.5", 384)
+            .expect("vec_chunks");
+        let doc_id = db
+            .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
+            .expect("upsert");
+        // c1 (hit chunk) は normal quality、c0 と c2 は超低 quality (0.05)
+        let _c0 = db
+            .insert_chunk(
+                doc_id,
+                0,
+                Some("h0"),
+                None,
+                "low quality body content",
+                &dummy_emb_384(),
+                0.05, // 低 quality_score
+            )
+            .expect("c0");
+        let c1 = db
+            .insert_chunk(
+                doc_id,
+                1,
+                Some("h1"),
+                None,
+                "hit body content body content body content body content body content",
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c1");
+        let _c2 = db
+            .insert_chunk(
+                doc_id,
+                2,
+                Some("h2"),
+                None,
+                "another low quality body content",
+                &dummy_emb_384(),
+                0.05, // 低 quality_score
+            )
+            .expect("c2");
+
+        let hit = make_hit("/doc.md", "hit body content");
+        let expanded = expand_parent(hit, c1, &db, params()).expect("expand");
+        // 周辺 chunk が低 quality_score でも content に含まれる (= filter 非適用)
+        assert!(
+            expanded.content.contains("low quality body content"),
+            "low quality neighbor (left) should be included as context"
+        );
+        assert!(
+            expanded
+                .content
+                .contains("another low quality body content"),
+            "low quality neighbor (right) should be included as context"
+        );
     }
 }
