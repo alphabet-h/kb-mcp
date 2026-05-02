@@ -107,6 +107,21 @@ bind = "127.0.0.1:3100"
 # # min_confidence_ratio で flag が立つ。0.0 で判定無効。CLI
 # # `--min-confidence-ratio` / MCP param `min_confidence_ratio` で per-query 上書き可。
 # min_confidence_ratio = 1.5
+
+# 任意: MMR (Maximal Marginal Relevance) 多様性再ランク (v0.7.0+)。既定 off。
+# 適用順序は reranker の後、parent retriever の前。
+# [search.mmr]
+# enabled = false
+# lambda = 0.7              # 1.0 = 多様性なし (MMR off 相当); 0.5 未満で探索寄り
+# same_doc_penalty = 0.0    # > 0 で同一 document chunk を更に減点; 0 = 純 MMR
+
+# 任意: parent retriever (v0.7.0+)。既定 off。
+# ヒットしたチャンクが短い場合に隣接 sibling やドキュメント全体に展開して
+# LLM へ十分な context を渡す。score / 順位は変わらず content だけ拡張される。
+# [search.parent_retriever]
+# enabled = false
+# whole_doc_threshold_tokens = 100   # token_count がこの未満なら whole-doc fallback
+# max_expanded_tokens = 2000         # adjacent merge / whole-doc の上限 (BGE-M3 <= 8192)
 ```
 
 この設定ファイルを置けば `kb-mcp serve` / `index` / `status` / `graph` / `search` のどれも対応フラグを省略して動かせる。未知のキーはタイポ対策のため拒否される。`FASTEMBED_CACHE_DIR` の実環境変数は設定ファイルの同項目より優先される。
@@ -293,6 +308,32 @@ kb-mcp search "tokio spawn" \
 - `--min-confidence-ratio <N>` — `low_confidence` 閾値の per-query 上書き
 
 CLI `kb-mcp search --format json` も同じラッパ形式で出力する。`match_spans` / byte offset の詳細は [docs/citations.ja.md](docs/citations.ja.md)、フィルタの完全リファレンスは [docs/filters.ja.md](docs/filters.ja.md) 参照。
+
+### 多様性 (MMR) と parent retriever (v0.7.0+)
+
+retrieval 品質を上げるための任意の knob を 2 つ追加。両者は独立しており、片方だけ on / 両方 on / 両方 off いずれでも動く。**既定は両方 off** なので既存パイプラインの挙動は変わらない。
+
+```bash
+# MMR (多様性再ランク)
+kb-mcp search "tokio runtime" --mmr true --mmr-lambda 0.7
+
+# Parent retriever (短い chunk を隣接 sibling や全文に展開)
+kb-mcp search "k=60 in RRF" --parent-retriever true
+
+# 両方同時
+kb-mcp search "context management" --mmr true --parent-retriever true
+```
+
+CLI フラグ (`kb-mcp eval` も同じものを受け付ける):
+
+- `--mmr <bool>` — MMR 多様性再ランクを有効化。既定 `false`
+- `--mmr-lambda <0..1>` — MMR の関連度と多様性のバランス。`1.0` で「多様性なし」(= MMR off と等価)、低くすると探索寄り (重複の少ない候補を優先)。既定 `0.7`
+- `--mmr-same-doc-penalty <0..1>` — 既選択チャンクと同一 document に属する候補へ追加コストを乗せる係数。`0.0` で純 MMR、上げると同 doc chunk を積極的に除外。既定 `0.0`
+- `--parent-retriever <bool>` — ヒットチャンクの token_count が `whole_doc_threshold_tokens` 未満のとき、`content` を隣接 sibling (level 一致を優先) もしくはドキュメント全体 (極端に短いチャンクの fallback) に拡張する。score / rank / path / `match_spans` は変えず、`content` と新しい optional `expanded_from` のみ変化。既定 `false`
+
+MCP `search` ツールも同名の per-call params (`mmr` / `mmr_lambda` / `mmr_same_doc_penalty` / `parent_retriever`) を受ける。toml 既定値は `[search.mmr]` / `[search.parent_retriever]` (上の[設定ファイル (任意)](#設定ファイル-任意) 節)。優先順位は per-call > toml > built-in defaults。
+
+パイプライン順序は **`RRF → reranker → MMR → parent retriever → match_spans`**。MMR は reranker score を保ったまま並べ替え、parent retriever は最後に走るので展開 content が relevance signal を汚さない。完全な解説とチューニング指針は [docs/retrieval-pipeline.ja.md](docs/retrieval-pipeline.ja.md) 参照。
 
 ### 起点ドキュメントからの Connection Graph
 
@@ -556,7 +597,7 @@ FASTEMBED_CACHE_DIR=~/.cache/huggingface/hub \
 
 | ツール | 説明 | 主なパラメータ |
 |---|---|---|
-| `search` | ベクトル + FTS5 全文検索を Reciprocal Rank Fusion でマージしたハイブリッド検索、任意で cross-encoder 再ランク。`{ results, low_confidence, filter_applied }` ラッパで関連度ランク付き chunk を返す。詳細: [docs/citations.ja.md](docs/citations.ja.md)、[docs/filters.ja.md](docs/filters.ja.md) | `query` (必須)、`limit`、`category`、`topic`、`rerank` (サーバ既定を上書き)、`min_quality`、`include_low_quality`、`path_globs` (`!` 始まりは exclude)、`tags_any` / `tags_all`、`date_from` / `date_to` (`YYYY-MM-DD`)、`min_confidence_ratio` |
+| `search` | ベクトル + FTS5 全文検索を Reciprocal Rank Fusion でマージしたハイブリッド検索、任意で cross-encoder 再ランク + MMR 多様性再ランク + parent retriever 展開。`{ results, low_confidence, filter_applied }` ラッパで関連度ランク付き chunk を返す。parent retriever が発火した行には `expanded_from` も付く。詳細: [docs/citations.ja.md](docs/citations.ja.md)、[docs/filters.ja.md](docs/filters.ja.md)、[docs/retrieval-pipeline.ja.md](docs/retrieval-pipeline.ja.md) | `query` (必須)、`limit`、`category`、`topic`、`rerank` (サーバ既定を上書き)、`min_quality`、`include_low_quality`、`path_globs` (`!` 始まりは exclude)、`tags_any` / `tags_all`、`date_from` / `date_to` (`YYYY-MM-DD`)、`min_confidence_ratio`、`mmr` / `mmr_lambda` / `mmr_same_doc_penalty` (v0.7.0+)、`parent_retriever` (v0.7.0+) |
 | `list_topics` | index 済みの全トピック / カテゴリと文書数を列挙 | (なし) |
 | `get_document` | 相対パスから文書の全文 + メタデータを取得 | `path` (例: `"deep-dive/mcp/overview.md"`) |
 | `get_best_practice` | opt-in: `kb-mcp.toml` の `[best_practice].path_templates` を設定しているときのみ機能する。対象向けの best practice 文書を取得し、任意で特定 h2 セクションを抽出。未設定時は "not configured" エラーを返す | `target` (例: `"claude-code"`)、`category` (任意) |

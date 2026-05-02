@@ -105,21 +105,32 @@ struct SearchParams {
     min_confidence_ratio: Option<f32>,
 
     // ----- MMR / Parent retriever (per-call overrides) -----
-    /// MMR re-ranking. None なら kb-mcp.toml [search.mmr].enabled を使用。
-    /// per-call で true/false を指定すると toml をオーバーライド。
+    /// (v0.7.0+) Enable MMR diversity re-rank. When `null`, falls back to
+    /// `[search.mmr].enabled` from kb-mcp.toml. Setting `true` / `false`
+    /// per call overrides the toml default for that call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mmr: Option<bool>,
 
-    /// MMR の lambda override (relevance vs diversity)。0.0..=1.0 outside reject。
-    /// None なら toml [search.mmr].lambda を使用。
+    /// (v0.7.0+) MMR lambda (relevance vs. diversity tradeoff). Must be in
+    /// `[0.0, 1.0]`; values outside that range are rejected. `1.0` is
+    /// equivalent to MMR off; lower values lean toward exploration. When
+    /// `null`, falls back to `[search.mmr].lambda` from kb-mcp.toml.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mmr_lambda: Option<f32>,
 
-    /// MMR の same-doc penalty override。0.0..=1.0。
+    /// (v0.7.0+) Extra cost when an already-selected chunk lives in the
+    /// same document. Must be in `[0.0, 1.0]`. `0.0` is pure MMR; raise to
+    /// actively deduplicate same-document chunks. When `null`, falls back
+    /// to `[search.mmr].same_doc_penalty`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mmr_same_doc_penalty: Option<f32>,
 
-    /// Parent retriever (content display expansion)。None なら toml に従う。
+    /// (v0.7.0+) Enable parent retriever content expansion. When `true`,
+    /// short hit chunks are expanded to adjacent siblings or the whole
+    /// document; the score, rank, path, and `match_spans` of the hit are
+    /// preserved (only `content` and the new `expanded_from` field
+    /// change). When `null`, falls back to
+    /// `[search.parent_retriever].enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_retriever: Option<bool>,
 }

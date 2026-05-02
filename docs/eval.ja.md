@@ -145,9 +145,12 @@ k_values = [1, 5, 10]          # 既定: [1, 5, 10]
 regression_threshold = 0.05    # 既定: 0.05
 ```
 
-CLI フラグが config より優先: `--golden`, `--k 1,5,10`, `--model`, `--reranker`,
-`--format text|json`, `--no-history`, `--no-diff`, `--no-color`,
-`--fail-on-regression`。
+CLI フラグが config より優先。受理されるフラグ: `--golden`, `--k 1,5,10`,
+`--model`, `--reranker`, `--limit`, `--format text|json`, `--no-history`,
+`--no-diff`, `--no-color`, `--fail-on-regression`。pipeline 系 (v0.7.0+):
+`--mmr <bool>` / `--mmr-lambda <0..1>` / `--mmr-same-doc-penalty <0..1>` /
+`--parent-retriever <bool>` — `kb-mcp search` と完全に同じ意味。各 knob の
+解説は [retrieval-pipeline.ja.md](./retrieval-pipeline.ja.md) 参照。
 
 ### `--fail-on-regression` (CI gate)
 
@@ -155,9 +158,12 @@ CLI フラグが config より優先: `--golden`, `--k 1,5,10`, `--model`, `--re
 **直前の compatible run** から `regression_threshold` (既定 0.05、`kb-mcp.toml`
 の `[eval].regression_threshold` で調整) を超えて退化していた場合、exit code 1
 で終了する。"compatible" = 直前 run の fingerprint (`model` / `reranker` /
-`limit` / `k_values` / golden YAML の content hash) が一致していること。
-golden YAML を更新した直後の run は fingerprint 不一致で比較対象外となるので、
-golden 改訂が誤検知に化けることはない。
+`limit` / `k_values` / golden YAML の content hash、および v0.7.0+ では
+実効 `[search.mmr]` / `[search.parent_retriever]` 設定) が一致していること。
+MMR / parent retriever の on/off を切り替えると fingerprint も変わるので
+比較対象外となり、誤検知にはならない (MMR の有無で recall@k を比較するのは
+意図的に apples-to-oranges)。golden YAML を更新した直後の run も同じ理由で
+比較対象外となる。
 
 履歴は exit より前に書き出されるので、今回の run は次回比較用に保存される。
 

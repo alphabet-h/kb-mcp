@@ -43,11 +43,15 @@ cargo test -- --ignored    # Includes embedding / reranker tests that download m
 - `src/indexer.rs` — `walkdir` → parse → embed → store pipeline
 - `src/db.rs` — SQLite + sqlite-vec + FTS5 storage, `search_hybrid` (RRF, k=60)
 - `src/embedder.rs` — `fastembed-rs` wrapper (embeddings + cross-encoder rerankers)
+- `src/mmr.rs` — MMR diversity re-rank (`mmr_select`, v0.7.0+)
+- `src/parent.rs` — Parent retriever content expansion (`apply_parent_retriever`, v0.7.0+)
 - `src/server.rs` — `rmcp::ServerHandler` with six MCP tools
 - `src/transport/` — stdio and Streamable HTTP transports
 - `src/watcher.rs` — `notify-debouncer-full`-based incremental reindex
 - `src/schema.rs` — frontmatter schema validation
 - `src/quality.rs` / `src/graph.rs` — quality filter + BFS connection graph
+- `src/eval.rs` — optional retrieval-quality evaluation for `kb-mcp eval`
+- `src/config.rs` — `kb-mcp.toml` 4-tier discovery / merge with CLI overrides
 
 See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for a detailed walkthrough.
 

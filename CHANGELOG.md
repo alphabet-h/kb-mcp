@@ -4,7 +4,132 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-03
+
+### Added
+- MMR (Maximal Marginal Relevance) diversity re-rank stage
+  (feature-28 PR-2). Greedy post-rerank picker that balances
+  relevance against novelty:
+  ```
+  score = λ · rel(c) − (1 − λ) · max_sim(c, picked)
+                     − same_doc_penalty · 1[doc(c) ∈ picked_docs]
+  ```
+  Configured via `[search.mmr]` in `kb-mcp.toml`
+  (`enabled = false` default, `lambda = 0.7`,
+  `same_doc_penalty = 0.0`) and per-call `mmr` /
+  `mmr_lambda` / `mmr_same_doc_penalty` params on the `search`
+  MCP tool. CLI: `kb-mcp search --mmr` /
+  `--mmr-lambda` / `--mmr-same-doc-penalty`. Relevance scores
+  (RRF or reranker) are min-max normalized to `[0, 1]` before
+  combining with the cosine-similarity diversity term, so
+  `lambda` is invariant to which prior stage produced the
+  score. Kicks in only when the candidate pool is larger than
+  `limit`; pulls extra candidates through stages 1–2 when
+  enabled. Off by default: pre-v0.7.0 pipelines behave
+  identically.
+- Parent retriever display-time content expansion
+  (feature-28 PR-3). For each hit chunk, optionally rewrites
+  the returned `content` so the LLM gets enough surrounding
+  context:
+  - **Whole-document fallback** when
+    `token_count < whole_doc_threshold_tokens` (default 100):
+    return the entire document, capped at
+    `max_expanded_tokens`.
+  - **Adjacent-sibling merge** otherwise: merge the chunk
+    immediately before / after the hit at the same heading
+    level, until the merged block hits `max_expanded_tokens`
+    (default 2000; BGE-M3 max is 8192).
+  Score, rank, path, and `match_spans` of the original hit
+  are preserved — only `content` and the new `expanded_from:
+  Option<ExpandedRange>` field change. Configured via
+  `[search.parent_retriever]` (`enabled = false` default) and
+  per-call `parent_retriever` MCP param. CLI:
+  `kb-mcp search --parent-retriever`. Legacy rows where
+  `chunks.token_count IS NULL` use a `len(content) / 4` token
+  estimate (matches the indexer's own estimator) so the cap
+  is enforced even on databases predating `token_count`.
+- `chunks.level` schema column (feature-28 PR-1) distinguishing
+  h2 / h3 headings, with idempotent migration. Used by parent
+  retriever's adjacent-sibling merge to avoid jumping across
+  heading levels. Old rows have `level = NULL` (no upgrade
+  required); the chunker populates the column for newly
+  indexed content.
+- `kb-mcp eval` accepts the same `--mmr` / `--mmr-lambda` /
+  `--mmr-same-doc-penalty` / `--parent-retriever` flags as
+  `kb-mcp search`, so retrieval-quality experiments can pin
+  the full pipeline. `ConfigFingerprint` gains optional
+  `mmr` / `parent_retriever` sub-fingerprints (additive —
+  the JSON layout is forward-compatible with pre-v0.7.0
+  history files; old runs deserialize without these
+  fields).
+- New narrative doc `docs/retrieval-pipeline.{md,ja.md}`
+  describing the full
+  `RRF → reranker → MMR → parent retriever → match_spans`
+  pipeline with tuning advice for each stage.
+
+### Changed (additive, MCP minor-compatible)
+- `SearchHit` JSON schema gains an optional `expanded_from`
+  field (`null` when parent retriever did not fire). Strict
+  clients that use `deny_unknown_fields` need to know this
+  field exists; default-tolerant clients are unaffected.
+- `Reranker::rerank_candidates` is now a thin wrapper over
+  the new chunk_id-preserving `rerank_candidates_with_ids`.
+  Behavior of the public `rerank_candidates` entry-point is
+  unchanged. `search_hybrid_candidates` body is refactored
+  to share an `rrf_topk` helper with the unbounded variant
+  used by the MMR pipeline; return shape is preserved and
+  every existing caller keeps compiling without changes.
+
+### Security
+- Bounded the row count for parent retriever's whole-document
+  fallback (`expand_whole_document` in `src/parent.rs`). Pre-fix,
+  `Database::fetch_chunks_by_index_range` had no `LIMIT` and
+  loaded every chunk of the target document into a `Vec<ChunkRow>`
+  before the `max_expanded_tokens` cap was checked. A pathological
+  document (e.g. a single very large `.md` file) could therefore
+  spike memory before the cap engaged. Fix: `fetch_chunks_by_index_range`
+  now requires a `max_rows` parameter (`LIMIT` clause), and the
+  whole-doc path derives `row_cap = max_expanded_tokens × 2 + 64`
+  before fetching; if the cap is reached, the call falls back to
+  adjacent merge. Closes the 2026-05-03 audit Sec H-1+H-3 finding.
+
 ### Fixed
+- `parent.rs::expand_adjacent` / `expand_whole_document`: the
+  `max_expanded_tokens` cap accumulator is now `u64` instead of
+  `u32`, eliminating a theoretical wrap-around path where
+  successive very large chunks could sum past `u32::MAX` and
+  silently bypass the cap. Realistic KBs do not hit this; this is
+  defense-in-depth so the cap remains correct under adversarial
+  content sizes. Closes the 2026-05-03 audit Code C2 finding.
+- `docs/retrieval-pipeline.{md,ja.md}`: corrected Stage 2 (reranker)
+  candidate-pool description. Pre-fix said the pool grows when
+  "MMR or parent retriever" is enabled; in fact only MMR enlarges
+  the pool. Parent retriever is a content-only stage that runs on
+  already-selected hits and never changes reranker workload.
+  Caught by codex review on PR #38.
+- `docs/eval.{md,ja.md}`: CLI flag list now includes the v0.7.0
+  pipeline flags (`--mmr` / `--mmr-lambda` /
+  `--mmr-same-doc-penalty` / `--parent-retriever`) and `--limit`
+  (which was always supported but undocumented). The
+  `--fail-on-regression` fingerprint description now lists the
+  v0.7.0 additions (`mmr` / `parent_retriever`); toggling either
+  intentionally breaks fingerprint compatibility.
+- `docs/citations.{md,ja.md}`: added a v0.7.0+ note that when
+  parent retriever fires, `match_spans` are byte offsets into the
+  expanded `content`, not the original chunk. The `expanded_from`
+  field on the same hit indicates the merged range.
+- `CONTRIBUTING.{md,ja.md}`: repository layout list now includes
+  `src/mmr.rs`, `src/parent.rs`, `src/eval.rs`, and `src/config.rs`.
+- `kb-mcp.toml.example`: `[search.mmr]` / `[search.parent_retriever]`
+  section comments rewritten to make the "header present, all keys
+  commented = built-in defaults" semantics explicit. The behavior
+  is unchanged from the v0.6.x layout; this is a clarification only.
+- `src/server.rs` MCP `search` tool docstrings for the new MMR /
+  parent retriever per-call params (`mmr` / `mmr_lambda` /
+  `mmr_same_doc_penalty` / `parent_retriever`) are now in English,
+  matching the rest of the schema. The Japanese-only docstrings
+  were leaking into MCP client schema output for non-Japanese
+  consumers.
 - `examples/deployments/personal-http/kb-mcp-task.xml`:
   `RestartOnFailure.Interval` was set to `PT5S` (5 seconds), but
   Windows Task Scheduler rejects anything below `PT1M` at registration
@@ -433,7 +558,8 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.4.3...v0.5.0

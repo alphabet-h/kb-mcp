@@ -128,18 +128,25 @@ bind = "127.0.0.1:3100"
 [search]
 #min_confidence_ratio = 1.5             # default: 1.5
 
-# [search.mmr] (optional)
+# [search.mmr] (optional, v0.7.0+).
 # Maximal Marginal Relevance: post-rerank diversity correction.
-# When unsure, leave defaults.
+# Defaults below show the built-in values (kept commented). Leaving
+# the section as-is opts into the default behavior with MMR off.
+# Uncomment specific keys to override. See docs/retrieval-pipeline.md.
 [search.mmr]
 #enabled = false
-#lambda = 0.7              # 1.0 = no diversity (MMR off equiv); < 0.5 leans exploration
-#same_doc_penalty = 0.0    # > 0 deduplicates same-document chunks; 0 = pure MMR
+#lambda = 0.7              # 1.0 means no diversity (MMR off equivalent); < 0.5 leans exploration
+#same_doc_penalty = 0.0    # > 0 deduplicates same-document chunks; 0 means pure MMR
 
-# [search.parent_retriever] (optional)
-# Display-time content expansion for hit chunks.
-# When unsure, leave defaults.
+# [search.parent_retriever] (optional, v0.7.0+).
+# Display-time content expansion for hit chunks. Defaults below are the
+# built-in values (kept commented). Leaving the section as-is opts into
+# the default behavior with parent retriever off. When enabled, short
+# hits are expanded to adjacent siblings or the whole document so the
+# LLM gets enough context. Score / rank / match_spans of the original
+# hit are preserved (only `content` and the new `expanded_from` field
+# change). See docs/retrieval-pipeline.md.
 [search.parent_retriever]
-#enabled = false                      # opt-in
+#enabled = false
 #whole_doc_threshold_tokens = 100     # token_count below this -> whole document fallback
-#max_expanded_tokens = 2000           # cap for adjacent merge / whole-doc (BGE-M3 <= 8192)
+#max_expanded_tokens = 2000           # cap for adjacent merge / whole-doc (BGE-M3 supports up to 8192)

@@ -153,9 +153,12 @@ k_values = [1, 5, 10]          # default: [1, 5, 10]
 regression_threshold = 0.05    # default: 0.05
 ```
 
-CLI flags override config values. `--golden`, `--k 1,5,10`,
-`--model`, `--reranker`, `--format text|json`, `--no-history`, `--no-diff`,
-`--no-color`, `--fail-on-regression`.
+CLI flags override config values. Recognized flags: `--golden`, `--k 1,5,10`,
+`--model`, `--reranker`, `--limit`, `--format text|json`, `--no-history`,
+`--no-diff`, `--no-color`, `--fail-on-regression`. Pipeline flags (v0.7.0+):
+`--mmr <bool>` / `--mmr-lambda <0..1>` / `--mmr-same-doc-penalty <0..1>` /
+`--parent-retriever <bool>` — exact same semantics as on `kb-mcp search`,
+see [retrieval-pipeline.md](./retrieval-pipeline.md) for what each knob does.
 
 ### `--fail-on-regression` (CI gate)
 
@@ -163,9 +166,13 @@ Exit with code 1 if any aggregate metric (`recall@k` for any k, `MRR`, or
 `ndcg@k` for any k) regressed from the previous **compatible** run by more
 than `regression_threshold` (default 0.05; tune via `[eval].regression_threshold`
 in `kb-mcp.toml`). "Compatible" means the previous run had the same
-fingerprint — `model`, `reranker`, `limit`, `k_values`, and the golden
-YAML's content hash. Updating the golden file therefore does **not** trigger
-a false regression on the next run; it just means the comparison is skipped.
+fingerprint — `model`, `reranker`, `limit`, `k_values`, the golden YAML's
+content hash, and (v0.7.0+) the effective `[search.mmr]` and
+`[search.parent_retriever]` settings. Toggling MMR or parent retriever
+therefore breaks fingerprint compatibility (intentionally — comparing
+`recall@k` with the diversity stage on vs off is apples-to-oranges).
+Updating the golden file likewise does **not** trigger a false regression
+on the next run; it just means the comparison is skipped.
 
 History is still written before the process exits, so the new run is
 recorded for the next comparison.

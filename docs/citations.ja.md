@@ -39,6 +39,15 @@
 **UTF-8 codepoint 境界に揃う**ことを `kb-mcp` 側で保証する。クライアントは
 安全に切り取れる:
 
+> **注記 (v0.7.0+):** parent retriever (`[search.parent_retriever]`) が発火した
+> ヒットでは、返ってくる `content` は**展開後**のテキスト (隣接 sibling もしくは
+> ドキュメント全体)、`match_spans` はその展開後 content への byte offset である
+> (元 chunk ではない)。`content.get(start..end)` でそのまま切り出せる動作は
+> 変わらない。同じヒットの新フィールド `expanded_from` がどの chunk range を
+> merge したかを伝える。pipeline 全体の順序 (`match_spans` は parent 展開の
+> **後**で再計算される) は [retrieval-pipeline.ja.md](./retrieval-pipeline.ja.md)
+> 参照。
+
 ```typescript
 const snippet = content.slice(span.start, span.end);
 ```
