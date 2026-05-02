@@ -61,7 +61,7 @@ This stage is what `kb-mcp eval` measures by default: any improvement here lifts
 
 When `--reranker` is set (or `[reranker]` in `kb-mcp.toml`), the top RRF candidates are re-scored by a cross-encoder before being returned. The score column switches from RRF to the reranker raw score.
 
-When **MMR or parent retriever is enabled**, kb-mcp pulls a *larger candidate pool* through the reranker (so that diversity re-rank has room to operate). When neither is on, the pool size matches `limit` exactly, so the reranker pays exactly what it did pre-v0.7.0.
+When **MMR is enabled**, kb-mcp pulls a *larger candidate pool* (`limit × 5`, min 50) through the reranker so that diversity re-rank has room to operate. When MMR is off, the reranker input limit matches `limit` (or `limit × 5` when only reranking, preserving pre-v0.7.0 reranker overfetch behavior). Parent retriever does **not** enlarge the pool — it is a content-only stage that runs on the already-selected hits, so reranker workload is unchanged when only `--parent-retriever` is set.
 
 **When to enable**: cross-language queries, queries where the top RRF hit is contextually close but topically wrong, or queries with multiple expected docs (the reranker re-orders rank-1 → rank-2 transitions noticeably).
 

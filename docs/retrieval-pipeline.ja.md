@@ -61,7 +61,7 @@ match_spans  → top-`limit` SearchHit を
 
 `--reranker` (または `kb-mcp.toml` の `[reranker]`) を設定すると、上位 RRF 候補を cross-encoder で再スコアして返す。`score` 列は RRF から reranker raw score に切り替わる。
 
-**MMR または parent retriever が enabled なとき**は reranker に**より大きい候補プール**を流す (多様性再ランクが操作する余地を確保)。両者 off の場合のプールサイズは `limit` と一致するため、reranker のコストは v0.7.0 以前と完全に同じ。
+**MMR が enabled なとき**は reranker に **より大きい候補プール** (`limit × 5`、最小 50) を流して多様性再ランクの操作余地を確保する。MMR off のときは reranker への入力 limit が `limit` (または reranker のみ on の場合は `limit × 5`、これは v0.7.0 以前の reranker overfetch を保つ) になる。Parent retriever は **プールを拡大しない** — 既に選択されたヒットに対する content-only 段なので、`--parent-retriever` 単独 on のとき reranker 負荷は変わらない。
 
 **enable する場面**: 多言語 / 言語跨ぎ クエリ、上位 RRF が文脈は近いが topic 違いのケース、複数の expected doc を持つ クエリ (rank-1 → rank-2 の入れ替えが顕著に良くなる)
 
