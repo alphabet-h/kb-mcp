@@ -824,6 +824,50 @@ impl Database {
         }
     }
 
+    /// 指定 `chunk_ids` 群の embedding を一括取得する。`get_chunk_embedding` の
+    /// IN 句版で、MMR の候補プール (RRF で得た FTS 単独 hit + vec 単独 hit の
+    /// merge 結果) に対して pairwise 類似度を計算するときに使う。
+    ///
+    /// SQL の IN 句は順序非保証なので、戻り値は `HashMap<i64, Vec<f32>>` で
+    /// 返し、呼び出し側で reorder すること。
+    ///
+    /// 存在しない `chunk_id` は単に結果から除外される (エラーにしない)。index
+    /// 中の race / 削除済 chunk_id を query に含む可能性があるので silently
+    /// skip が望ましい。
+    pub fn fetch_embeddings_by_chunk_ids(
+        &self,
+        chunk_ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<f32>>> {
+        if chunk_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // IN 句のプレースホルダを動的生成 (?1, ?2, ...)
+        let placeholders: String = (1..=chunk_ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT chunk_id, vec_to_json(embedding) \
+             FROM vec_chunks WHERE chunk_id IN ({placeholders})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params_iter: Vec<&dyn rusqlite::ToSql> = chunk_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_iter), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = HashMap::with_capacity(chunk_ids.len());
+        for r in rows {
+            let (id, json) = r?;
+            let emb: Vec<f32> = serde_json::from_str(&json)
+                .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
+            out.insert(id, emb);
+        }
+        Ok(out)
+    }
+
     /// Delete a document and all associated chunks / vectors / FTS rows.
     pub fn delete_document(&self, path: &str) -> Result<()> {
         // Delete vector entries first (no FK from virtual table)
@@ -2133,6 +2177,98 @@ mod tests {
 
         // 存在しない chunk_id は None
         assert!(db.get_chunk_embedding(99_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_fetch_embeddings_by_chunk_ids_returns_hashmap() {
+        let db = db_with_384();
+        let doc1 = db
+            .upsert_document("a.md", None, None, None, None, &[], None, "h_a")
+            .unwrap();
+        let c1 = db
+            .insert_chunk(
+                doc1,
+                0,
+                Some("h1"),
+                None,
+                "alpha",
+                &dummy_embedding(0.1),
+                1.0,
+            )
+            .unwrap();
+        let c2 = db
+            .insert_chunk(
+                doc1,
+                1,
+                Some("h2"),
+                None,
+                "beta",
+                &dummy_embedding(0.2),
+                1.0,
+            )
+            .unwrap();
+        let doc2 = db
+            .upsert_document("b.md", None, None, None, None, &[], None, "h_b")
+            .unwrap();
+        let c3 = db
+            .insert_chunk(
+                doc2,
+                0,
+                Some("h3"),
+                None,
+                "gamma",
+                &dummy_embedding(0.3),
+                1.0,
+            )
+            .unwrap();
+
+        let ids = vec![c1, c2, c3];
+        let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+        assert_eq!(result.len(), 3);
+        assert!(result.contains_key(&c1));
+        assert!(result.contains_key(&c2));
+        assert!(result.contains_key(&c3));
+
+        // 各 embedding が 384 次元
+        for emb in result.values() {
+            assert_eq!(emb.len(), 384);
+        }
+
+        // Sanity: 値が正しく往復していること (insert 時の dummy_embedding 値に一致)
+        assert!((result[&c1][0] - 0.1).abs() < 1e-5);
+        assert!((result[&c2][0] - 0.2).abs() < 1e-5);
+        assert!((result[&c3][0] - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fetch_embeddings_by_chunk_ids_skips_missing() {
+        let db = db_with_384();
+        let doc1 = db
+            .upsert_document("a.md", None, None, None, None, &[], None, "h_a")
+            .unwrap();
+        let c1 = db
+            .insert_chunk(
+                doc1,
+                0,
+                Some("h1"),
+                None,
+                "alpha",
+                &dummy_embedding(0.1),
+                1.0,
+            )
+            .unwrap();
+
+        let ids = vec![c1, 9999, 10000];
+        let result = db.fetch_embeddings_by_chunk_ids(&ids).expect("fetch");
+        assert_eq!(result.len(), 1, "missing ids should be silently skipped");
+        assert!(result.contains_key(&c1));
+    }
+
+    #[test]
+    fn test_fetch_embeddings_by_chunk_ids_empty_input() {
+        let db = db_with_384();
+        let result = db.fetch_embeddings_by_chunk_ids(&[]).expect("fetch");
+        assert!(result.is_empty());
     }
 
     #[test]
