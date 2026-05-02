@@ -961,13 +961,23 @@ impl Database {
         doc_id: i64,
         from: i64,
         to: i64,
+        max_rows: u32,
     ) -> Result<Vec<ChunkRow>> {
+        // `max_rows` cap: defense-in-depth so a pathological document
+        // (e.g. tens of thousands of chunks) cannot force whole-doc
+        // expansion to materialize an unbounded `Vec<ChunkRow>` before
+        // the caller's per-chunk token cap can kick in. Caller is
+        // responsible for picking a reasonable bound (adjacent merge
+        // can pass a small constant, whole-doc passes a heuristic
+        // derived from `max_expanded_tokens`). `max_rows = 0` is
+        // treated as "no rows", matching SQLite LIMIT 0 semantics.
         let mut stmt = self.conn.prepare(
             "SELECT chunk_index, content, token_count, level FROM chunks
              WHERE document_id = ?1 AND chunk_index >= ?2 AND chunk_index <= ?3
-             ORDER BY chunk_index ASC",
+             ORDER BY chunk_index ASC
+             LIMIT ?4",
         )?;
-        let rows = stmt.query_map(rusqlite::params![doc_id, from, to], |row| {
+        let rows = stmt.query_map(rusqlite::params![doc_id, from, to, max_rows], |row| {
             Ok(ChunkRow {
                 chunk_index: row.get(0)?,
                 content: row.get(1)?,

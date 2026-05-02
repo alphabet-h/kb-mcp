@@ -80,7 +80,56 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
   used by the MMR pipeline; return shape is preserved and
   every existing caller keeps compiling without changes.
 
+### Security
+- Bounded the row count for parent retriever's whole-document
+  fallback (`expand_whole_document` in `src/parent.rs`). Pre-fix,
+  `Database::fetch_chunks_by_index_range` had no `LIMIT` and
+  loaded every chunk of the target document into a `Vec<ChunkRow>`
+  before the `max_expanded_tokens` cap was checked. A pathological
+  document (e.g. a single very large `.md` file) could therefore
+  spike memory before the cap engaged. Fix: `fetch_chunks_by_index_range`
+  now requires a `max_rows` parameter (`LIMIT` clause), and the
+  whole-doc path derives `row_cap = max_expanded_tokens × 2 + 64`
+  before fetching; if the cap is reached, the call falls back to
+  adjacent merge. Closes the 2026-05-03 audit Sec H-1+H-3 finding.
+
 ### Fixed
+- `parent.rs::expand_adjacent` / `expand_whole_document`: the
+  `max_expanded_tokens` cap accumulator is now `u64` instead of
+  `u32`, eliminating a theoretical wrap-around path where
+  successive very large chunks could sum past `u32::MAX` and
+  silently bypass the cap. Realistic KBs do not hit this; this is
+  defense-in-depth so the cap remains correct under adversarial
+  content sizes. Closes the 2026-05-03 audit Code C2 finding.
+- `docs/retrieval-pipeline.{md,ja.md}`: corrected Stage 2 (reranker)
+  candidate-pool description. Pre-fix said the pool grows when
+  "MMR or parent retriever" is enabled; in fact only MMR enlarges
+  the pool. Parent retriever is a content-only stage that runs on
+  already-selected hits and never changes reranker workload.
+  Caught by codex review on PR #38.
+- `docs/eval.{md,ja.md}`: CLI flag list now includes the v0.7.0
+  pipeline flags (`--mmr` / `--mmr-lambda` /
+  `--mmr-same-doc-penalty` / `--parent-retriever`) and `--limit`
+  (which was always supported but undocumented). The
+  `--fail-on-regression` fingerprint description now lists the
+  v0.7.0 additions (`mmr` / `parent_retriever`); toggling either
+  intentionally breaks fingerprint compatibility.
+- `docs/citations.{md,ja.md}`: added a v0.7.0+ note that when
+  parent retriever fires, `match_spans` are byte offsets into the
+  expanded `content`, not the original chunk. The `expanded_from`
+  field on the same hit indicates the merged range.
+- `CONTRIBUTING.{md,ja.md}`: repository layout list now includes
+  `src/mmr.rs`, `src/parent.rs`, `src/eval.rs`, and `src/config.rs`.
+- `kb-mcp.toml.example`: `[search.mmr]` / `[search.parent_retriever]`
+  section comments rewritten to make the "header present, all keys
+  commented = built-in defaults" semantics explicit. The behavior
+  is unchanged from the v0.6.x layout; this is a clarification only.
+- `src/server.rs` MCP `search` tool docstrings for the new MMR /
+  parent retriever per-call params (`mmr` / `mmr_lambda` /
+  `mmr_same_doc_penalty` / `parent_retriever`) are now in English,
+  matching the rest of the schema. The Japanese-only docstrings
+  were leaking into MCP client schema output for non-Japanese
+  consumers.
 - `examples/deployments/personal-http/kb-mcp-task.xml`:
   `RestartOnFailure.Interval` was set to `PT5S` (5 seconds), but
   Windows Task Scheduler rejects anything below `PT1M` at registration

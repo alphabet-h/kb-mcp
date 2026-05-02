@@ -39,6 +39,15 @@ quote source text accurately and reduces hallucination.
 guarantees that both indices fall on UTF-8 codepoint boundaries, so clients can
 safely slice:
 
+> **Note (v0.7.0+):** When the parent retriever (`[search.parent_retriever]`)
+> fires, the returned `content` is the **expanded** text (adjacent siblings or
+> the whole document), and `match_spans` are byte offsets into that expanded
+> content — not the original chunk. Clients can keep slicing
+> `content.get(start..end)` safely; the new `expanded_from` field on the same
+> hit indicates which chunk range was merged in. See
+> [retrieval-pipeline.md](./retrieval-pipeline.md) for the full pipeline order
+> (`match_spans` is recomputed *after* parent expansion).
+
 ```typescript
 const snippet = content.slice(span.start, span.end);
 ```

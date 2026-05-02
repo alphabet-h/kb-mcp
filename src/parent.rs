@@ -101,7 +101,9 @@ fn expand_adjacent(
     db: &Database,
     params: ParentRetrieverParams,
 ) -> anyhow::Result<SearchHit> {
-    let neighbors = db.fetch_chunks_by_index_range(doc_id, chunk_idx - 1, chunk_idx + 1)?;
+    // Adjacent merge は最大 3 行 (前 / hit / 後) が想定だが、SQLite LIMIT には
+    // 余裕を持って 16 行を渡す。万一 chunk_index に gap があっても安全側に倒れる。
+    let neighbors = db.fetch_chunks_by_index_range(doc_id, chunk_idx - 1, chunk_idx + 1, 16)?;
     if neighbors.is_empty() {
         return Ok(hit);
     }
@@ -113,8 +115,11 @@ fn expand_adjacent(
     // 安全側に倒すため content から estimate (= insert_chunk 内の token_count
     // 計算式 `content.len() / 4` と整合)。これで NULL row も実 byte 数で
     // 評価され、cap を保つ。
-    let total_tokens: u32 = neighbors.iter().map(estimated_tokens).sum();
-    if total_tokens > params.max_expanded_tokens {
+    // **2026-05-03 audit Code C2**: 累積を `u64` で行うことで `u32` 加算 wrap
+    // による cap bypass (極端に大きい chunk が連続する場合の理論上の risk) を
+    // 防ぐ。realistic な KB では trigger されないが defense-in-depth。
+    let total_tokens: u64 = neighbors.iter().map(|c| estimated_tokens(c) as u64).sum();
+    if total_tokens > params.max_expanded_tokens as u64 {
         if let Some(c) = neighbors.into_iter().find(|c| c.chunk_index == chunk_idx) {
             hit.content = c.content;
             hit.match_spans = None;
@@ -164,13 +169,29 @@ fn expand_whole_document(
     db: &Database,
     params: ParentRetrieverParams,
 ) -> anyhow::Result<SearchHit> {
-    // i64::MAX で「上限なし」range fetch (= 同 doc 全 chunks)。
+    // 同 doc 全 chunks fetch、ただし `max_rows` 上限付き。
     // quality_filter は parent retriever expansion では適用しない (spec
     // invariant #6): 周辺 chunk が低 quality_score でも context として含む。
     // fetch_chunks_by_index_range は quality_score を filter 条件に持たない。
-    let chunks = db.fetch_chunks_by_index_range(doc_id, 0, i64::MAX)?;
+    //
+    // **2026-05-03 audit Sec H-1+H-3**: 巨大 doc (例: 100 MiB の単一 .md) を
+    // 不可避に Vec<ChunkRow> に materialize すると、cap check の前に大量メモリ
+    // を消費する。max_expanded_tokens から上限 row 数を派生させ、SQL LIMIT
+    // で上流ガードする。1 chunk あたり最低 4 byte / 1 token と仮定すると、
+    // `max_expanded_tokens × 2 + 64` rows もあれば overshoot 判定に十分。
+    // この cap に hit したら whole-doc 路は破綻と判断して adjacent fallback。
+    let row_cap = params
+        .max_expanded_tokens
+        .saturating_mul(2)
+        .saturating_add(64);
+    let chunks = db.fetch_chunks_by_index_range(doc_id, 0, i64::MAX, row_cap)?;
     if chunks.is_empty() {
         return Ok(hit);
+    }
+    if chunks.len() as u32 >= row_cap {
+        // row_cap で truncate された = doc が想定より遥かに大きい。
+        // 全文 merge は無理なので adjacent merge にフォールバック。
+        return expand_adjacent(hit, doc_id, chunk_idx, db, params);
     }
     // max_expanded_tokens cap (Task 3.4 invariant #1):
     // 全 doc 連結が cap を超えるなら adjacent merge にフォールバックする。
@@ -178,8 +199,10 @@ fn expand_whole_document(
     // 縮退し得る (= cap 超過時の strong guarantee)。
     // NULL token_count (legacy DB) でも cap を bypass できないよう
     // estimated_tokens で content から逆算する (codex P1 対応)。
-    let total_tokens: u32 = chunks.iter().map(estimated_tokens).sum();
-    if total_tokens > params.max_expanded_tokens {
+    // **2026-05-03 audit Code C2**: `u64` 累積で u32 wrap による cap bypass
+    // を防ぐ defense-in-depth。
+    let total_tokens: u64 = chunks.iter().map(|c| estimated_tokens(c) as u64).sum();
+    if total_tokens > params.max_expanded_tokens as u64 {
         return expand_adjacent(hit, doc_id, chunk_idx, db, params);
     }
     let total_chunks = chunks.len();
