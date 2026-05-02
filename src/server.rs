@@ -1718,6 +1718,46 @@ mod tests {
         );
     }
 
+    /// `prop_compute_low_confidence_order_invariant` の score 上限と
+    /// swap_indices 長を単一 source-of-truth で定義する。将来上限を広げる時に
+    /// 片方だけ更新して biased shuffle を生むバグを予防 (= `unwrap_or(0)` の
+    /// fallback が常に no-op であることの契約)。
+    const ORDER_INVARIANT_PROPTEST_MAX_LEN: usize = 20;
+
+    proptest::proptest! {
+        /// codex 罠 4 (order-dependent low_confidence) cluster の 2 件目防御。
+        /// 任意の score 配列を deterministic shuffle (Fisher-Yates) しても同 result を proptest で固定。
+        /// `rand` crate には依存せず、proptest が生成する usize 配列を swap index として使う。
+        ///
+        /// 既存の example-based test (`test_compute_low_confidence_order_independent_for_mmr`)
+        /// と相補的: example test は MMR 由来の具体ケースを documentation 兼で残し、
+        /// 本 proptest は default 256 cases で機械的に同 invariant を網羅する。
+        #[test]
+        fn prop_compute_low_confidence_order_invariant(
+            scores in proptest::collection::vec(0.0_f32..=10.0, 0..=ORDER_INVARIANT_PROPTEST_MAX_LEN),
+            min_ratio in 0.0_f32..=10.0,
+            swap_indices in proptest::collection::vec(
+                proptest::prelude::any::<usize>(),
+                ORDER_INVARIANT_PROPTEST_MAX_LEN,
+            ),
+        ) {
+            let mut shuffled = scores.clone();
+            let n = shuffled.len();
+            // Durstenfeld variant of Fisher-Yates: i = n-1, n-2, ..., 1 で
+            // j = swap_indices[i] % (i+1) ∈ [0, i] と swap。
+            // swap_indices.len() == ORDER_INVARIANT_PROPTEST_MAX_LEN なので
+            // i < n ≤ MAX_LEN を満たす範囲で `get(i)` は常に Some。
+            // `unwrap_or(0)` は契約違反時の defensive fallback (現状到達不能)。
+            for i in (1..n).rev() {
+                let j = swap_indices.get(i).copied().unwrap_or(0) % (i + 1);
+                shuffled.swap(i, j);
+            }
+            let original_result = compute_low_confidence(&scores, min_ratio);
+            let shuffled_result = compute_low_confidence(&shuffled, min_ratio);
+            proptest::prop_assert_eq!(original_result, shuffled_result);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // validate_get_document_path: F-28 hardening
     // -----------------------------------------------------------------------
