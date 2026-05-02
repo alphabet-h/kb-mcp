@@ -110,6 +110,20 @@ impl From<SearchResult> for SearchHit {
     }
 }
 
+/// Parent retriever 用 chunk row 抜粋。`fetch_chunks_by_index_range` の戻り値要素。
+///
+/// Display-time content expansion で隣接 chunk を読み取るために必要な
+/// 最小フィールドのみ (`chunk_index` / `content` / `token_count` / `level`)。
+/// `level` は legacy DB (feature-28 以前) では NULL になる可能性があるため、
+/// `Option<u8>` として返す。
+#[derive(Debug, Clone)]
+pub struct ChunkRow {
+    pub chunk_index: i64,
+    pub content: String,
+    pub token_count: Option<i64>,
+    pub level: Option<u8>,
+}
+
 /// Search 系 API に渡す filter 引数の集約。
 ///
 /// 既存の category / topic / min_quality に加え、feature-26 で path_globs /
@@ -922,6 +936,50 @@ impl Database {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Parent retriever 用: `chunk_id` から `(document_id, chunk_index, token_count)`
+    /// を引く軽量 lookup。`token_count` は legacy 行で NULL になり得るので
+    /// `Option<i64>` として返す。
+    pub fn get_chunk_meta(&self, chunk_id: i64) -> Result<(i64, i64, Option<i64>)> {
+        Ok(self.conn.query_row(
+            "SELECT document_id, chunk_index, token_count FROM chunks WHERE id = ?1",
+            rusqlite::params![chunk_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?)
+    }
+
+    /// Parent retriever 用: 同一 doc 内の `chunk_index` 範囲 `[from, to]` (inclusive)
+    /// に該当する chunk を `chunk_index` ASC で返す。
+    ///
+    /// `from` が負だったり `to` が doc 末尾を超える場合は単に該当行が無い扱いに
+    /// なる (SQLite range filter で自然にトリム)。adjacent merge では
+    /// `[hit_idx - 1, hit_idx + 1]` のような呼び出しを想定しており、左右の
+    /// 端で自動的にバウンドされる前提。
+    pub fn fetch_chunks_by_index_range(
+        &self,
+        doc_id: i64,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<ChunkRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_index, content, token_count, level FROM chunks
+             WHERE document_id = ?1 AND chunk_index >= ?2 AND chunk_index <= ?3
+             ORDER BY chunk_index ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![doc_id, from, to], |row| {
+            Ok(ChunkRow {
+                chunk_index: row.get(0)?,
+                content: row.get(1)?,
+                token_count: row.get(2)?,
+                level: row.get::<_, Option<i64>>(3)?.map(|v| v as u8),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Delete a document and all associated chunks / vectors / FTS rows.
