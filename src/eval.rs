@@ -219,6 +219,52 @@ pub struct ConfigFingerprint {
     pub limit: u32,
     pub k_values: Vec<usize>,
     pub golden_hash: String,
+
+    /// MMR が有効な場合のみ Some。off (default) なら None で旧 history JSON
+    /// と互換維持。enabled=true でのみ lambda + same_doc_penalty を fingerprint
+    /// に含めることで、MMR off の状態は古い baseline と直接比較可能。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmr: Option<MmrFingerprint>,
+}
+
+/// `[search.mmr]` の effective config を fingerprint に含めるための snapshot。
+/// MMR が enabled=true のときだけ [`ConfigFingerprint::mmr`] に Some で入る。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MmrFingerprint {
+    pub lambda: f32,
+    pub same_doc_penalty: f32,
+}
+
+impl ConfigFingerprint {
+    /// `kb-mcp.toml` Config と eval 実行時の引数から fingerprint を構築。
+    /// MMR が effective on なら `mmr: Some(_)` を作り、off なら `None` のまま
+    /// にすることで旧 history JSON (mmr field なし) と直接比較できる
+    /// PartialEq を維持する。
+    pub fn from_config(
+        cfg: &crate::config::Config,
+        model: String,
+        reranker: Option<String>,
+        limit: u32,
+        k_values: Vec<usize>,
+        golden_hash: String,
+    ) -> Self {
+        let mmr = cfg
+            .search
+            .as_ref()
+            .filter(|s| s.mmr.enabled)
+            .map(|s| MmrFingerprint {
+                lambda: s.mmr.lambda,
+                same_doc_penalty: s.mmr.same_doc_penalty,
+            });
+        Self {
+            model,
+            reranker,
+            limit,
+            k_values,
+            golden_hash,
+            mmr,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -691,6 +737,7 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
             limit: opts.limit,
             k_values: opts.k_values.clone(),
             golden_hash,
+            mmr: None,
         },
         per_query,
         aggregate,
@@ -1107,6 +1154,7 @@ mod tests {
                 limit: 10,
                 k_values: vec![1, 5, 10],
                 golden_hash: "deadbeef".into(),
+                mmr: None,
             },
             per_query: vec![],
             aggregate: agg,
@@ -1171,6 +1219,7 @@ mod tests {
                 limit: 10,
                 k_values: vec![1, 5],
                 golden_hash: "h".into(),
+                mmr: None,
             },
             per_query: vec![],
             aggregate: agg,
@@ -1193,6 +1242,7 @@ mod tests {
             limit: 10,
             k_values: vec![5],
             golden_hash: "h".into(),
+            mmr: None,
         };
         let mut a_now = AggregateMetrics::default();
         a_now.recall_at_k.insert(5, 0.8);
@@ -1228,6 +1278,7 @@ mod tests {
             limit: 10,
             k_values: vec![5],
             golden_hash: "AAA".into(),
+            mmr: None,
         };
         let fp_prev = ConfigFingerprint {
             golden_hash: "BBB".into(),
@@ -1268,6 +1319,7 @@ mod tests {
                 limit: 10,
                 k_values: vec![1, 5],
                 golden_hash: "abc".into(),
+                mmr: None,
             },
             per_query: vec![],
             aggregate: agg,
@@ -1292,6 +1344,7 @@ mod tests {
             limit: 10,
             k_values: vec![5],
             golden_hash: "h".into(),
+            mmr: None,
         };
         let now = EvalRun {
             timestamp: Utc::now(),
@@ -1353,6 +1406,7 @@ mod tests {
                 limit: 10,
                 k_values: recall.keys().copied().collect(),
                 golden_hash: golden_hash.into(),
+                mmr: None,
             },
             per_query: vec![],
             aggregate: AggregateMetrics {
@@ -1446,5 +1500,65 @@ mod tests {
         let now = synthetic_run(map_one(5, 0.5), 0.5, map_one(10, 0.5), "golden_NEW");
         h.push_front(prev, 10);
         assert!(h.previous_compatible(&now).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // feature-28 PR-2: ConfigFingerprint.mmr (Option<MmrFingerprint>)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_fingerprint_mmr_off_serializes_as_none() {
+        // MMR が off の Config から ConfigFingerprint を構築すると
+        // mmr field は None
+        let toml = r#"
+[search.mmr]
+enabled = false
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let fp = ConfigFingerprint::from_config(
+            &cfg,
+            "bge-m3".to_string(),
+            None,
+            10,
+            vec![1, 5, 10],
+            "deadbeef".to_string(),
+        );
+        assert!(fp.mmr.is_none());
+    }
+
+    #[test]
+    fn test_fingerprint_mmr_on_serializes_as_some() {
+        let toml = r#"
+[search.mmr]
+enabled = true
+lambda = 0.5
+same_doc_penalty = 0.1
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let fp = ConfigFingerprint::from_config(
+            &cfg,
+            "bge-m3".to_string(),
+            None,
+            10,
+            vec![1, 5, 10],
+            "deadbeef".to_string(),
+        );
+        let mmr = fp.mmr.expect("mmr should be Some");
+        assert!((mmr.lambda - 0.5).abs() < 1e-6);
+        assert!((mmr.same_doc_penalty - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_history_load_handles_old_json_without_mmr_field() {
+        // 旧 JSON history (mmr field なし) を deserialize しても fail しない
+        let old_json = serde_json::json!({
+            "model": "bge-m3",
+            "reranker": null,
+            "limit": 10,
+            "k_values": [1, 5, 10],
+            "golden_hash": "abc"
+        });
+        let fp: ConfigFingerprint = serde_json::from_value(old_json).expect("load old");
+        assert!(fp.mmr.is_none());
     }
 }
