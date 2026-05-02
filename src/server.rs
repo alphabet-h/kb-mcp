@@ -712,6 +712,27 @@ impl KbServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Decide the reranker's input-limit from the candidate-pool size and the
+/// caller's `limit`, depending on whether MMR is enabled.
+///
+/// When MMR is on, the reranker should rerank *every* candidate in the
+/// pool because MMR will then greedily down-select to `limit`. When MMR
+/// is off, the reranker only needs `limit` rows (the pipeline returns
+/// `reranked.take(limit)` directly).
+///
+/// The `usize → u32` saturate cast (via `u32::try_from`) is the core
+/// guard against codex-review trap #1 (passing `u32::MAX` to
+/// `Vec::with_capacity` used to OOM). Even if a future caller mistakenly
+/// passes a `pool_size` larger than `u32::MAX`, this helper bounds it
+/// at `u32::MAX` rather than panicking or wrapping.
+fn compute_reranker_input_limit(mmr_enabled: bool, pool_size: usize, limit: u32) -> u32 {
+    if mmr_enabled {
+        u32::try_from(pool_size).unwrap_or(u32::MAX)
+    } else {
+        limit
+    }
+}
+
 /// Shared MMR-aware search pipeline. Used by:
 /// - MCP `SearchTool::search` (server.rs)
 /// - CLI `kb-mcp search` (main.rs)
@@ -781,12 +802,10 @@ pub(crate) fn run_search_pipeline(
     //    保持)、MMR on のときは MMR 側が select するので候補プール全体を保持
     //    する。**P1 fix**: ここで `u32::MAX` を渡すと `Vec::with_capacity(u32::MAX)`
     //    で OOM 直行するので、候補プールサイズを上限とする
-    //    (`limit*5.max(50)` で実用上 limit に追従)。
-    let reranker_input_limit = if resolved.mmr_enabled {
-        candidates_pool.len() as u32
-    } else {
-        limit
-    };
+    //    (`limit*5.max(50)` で実用上 limit に追従)。saturate cast
+    //    (`u32::try_from(...).unwrap_or(u32::MAX)`) は helper の中に押し込み済み。
+    let reranker_input_limit =
+        compute_reranker_input_limit(resolved.mmr_enabled, candidates_pool.len(), limit);
     let reranked: Vec<(i64, crate::db::SearchResult)> = match reranker {
         Some(r) => r.rerank_candidates_with_ids(query, candidates_pool, reranker_input_limit)?,
         None => candidates_pool,
@@ -1718,6 +1737,46 @@ mod tests {
         );
     }
 
+    /// `prop_compute_low_confidence_order_invariant` の score 上限と
+    /// swap_indices 長を単一 source-of-truth で定義する。将来上限を広げる時に
+    /// 片方だけ更新して biased shuffle を生むバグを予防 (= `unwrap_or(0)` の
+    /// fallback が常に no-op であることの契約)。
+    const ORDER_INVARIANT_PROPTEST_MAX_LEN: usize = 20;
+
+    proptest::proptest! {
+        /// codex 罠 4 (order-dependent low_confidence) cluster の 2 件目防御。
+        /// 任意の score 配列を deterministic shuffle (Fisher-Yates) しても同 result を proptest で固定。
+        /// `rand` crate には依存せず、proptest が生成する usize 配列を swap index として使う。
+        ///
+        /// 既存の example-based test (`test_compute_low_confidence_order_independent_for_mmr`)
+        /// と相補的: example test は MMR 由来の具体ケースを documentation 兼で残し、
+        /// 本 proptest は default 256 cases で機械的に同 invariant を網羅する。
+        #[test]
+        fn prop_compute_low_confidence_order_invariant(
+            scores in proptest::collection::vec(0.0_f32..=10.0, 0..=ORDER_INVARIANT_PROPTEST_MAX_LEN),
+            min_ratio in 0.0_f32..=10.0,
+            swap_indices in proptest::collection::vec(
+                proptest::prelude::any::<usize>(),
+                ORDER_INVARIANT_PROPTEST_MAX_LEN,
+            ),
+        ) {
+            let mut shuffled = scores.clone();
+            let n = shuffled.len();
+            // Durstenfeld variant of Fisher-Yates: i = n-1, n-2, ..., 1 で
+            // j = swap_indices[i] % (i+1) ∈ [0, i] と swap。
+            // swap_indices.len() == ORDER_INVARIANT_PROPTEST_MAX_LEN なので
+            // i < n ≤ MAX_LEN を満たす範囲で `get(i)` は常に Some。
+            // `unwrap_or(0)` は契約違反時の defensive fallback (現状到達不能)。
+            for i in (1..n).rev() {
+                let j = swap_indices.get(i).copied().unwrap_or(0) % (i + 1);
+                shuffled.swap(i, j);
+            }
+            let original_result = compute_low_confidence(&scores, min_ratio);
+            let shuffled_result = compute_low_confidence(&shuffled, min_ratio);
+            proptest::prop_assert_eq!(original_result, shuffled_result);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // validate_get_document_path: F-28 hardening
     // -----------------------------------------------------------------------
@@ -1855,6 +1914,39 @@ mod tests {
     // -----------------------------------------------------------------------
     // run_search_pipeline: shared MMR-aware pipeline used by MCP / CLI / eval
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_reranker_input_limit_mmr_on_returns_pool_size() {
+        // codex 罠 1 (Vec::with_capacity(u32::MAX) OOM) cluster の核心防御:
+        // MMR on の経路で reranker_input_limit がそのまま pool_size を返すことの
+        // 直接検証 (= caller が candidates_pool.len() を渡せば、reranker は
+        // 全候補をスコアリングする)。
+        assert_eq!(compute_reranker_input_limit(true, 0, 10), 0);
+        assert_eq!(compute_reranker_input_limit(true, 50, 10), 50);
+        assert_eq!(compute_reranker_input_limit(true, 5000, 10), 5000);
+    }
+
+    #[test]
+    fn test_compute_reranker_input_limit_mmr_off_returns_limit() {
+        // MMR off では pool_size を無視して limit を返すこと。
+        assert_eq!(compute_reranker_input_limit(false, 0, 10), 10);
+        assert_eq!(compute_reranker_input_limit(false, 50, 10), 10);
+        assert_eq!(compute_reranker_input_limit(false, 5000, 10), 10);
+    }
+
+    #[test]
+    fn test_compute_reranker_input_limit_saturates_at_u32_max() {
+        // codex 罠 1 cluster 2 件目防御: pool_size: usize が u32::MAX を超えても
+        // u32::MAX で saturate されることを直接 assert。
+        // 万一 future caller が usize::MAX を渡しても OOM せず u32::MAX で bound される。
+        assert_eq!(compute_reranker_input_limit(true, usize::MAX, 10), u32::MAX);
+    }
+
+    #[test]
+    fn test_compute_reranker_input_limit_mmr_off_ignores_pool_size() {
+        // MMR off では saturate path に入らない。pool=usize::MAX でも limit を返す。
+        assert_eq!(compute_reranker_input_limit(false, usize::MAX, 10), 10);
+    }
 
     /// Range validation must fire **before** any DB access — so an
     /// invalid `mmr_lambda` is rejected even when the helper is called with
