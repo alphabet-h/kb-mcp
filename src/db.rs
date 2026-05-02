@@ -1037,6 +1037,39 @@ impl Database {
         Ok(rrf_topk(scores, rows, Some(limit)))
     }
 
+    /// `search_hybrid_candidates` と同じ RRF を計算するが、最終 truncate を
+    /// せず候補プール全件を返す。MMR の候補プール用。
+    ///
+    /// 既存 `search_hybrid_candidates` の戻り値型 `Vec<(i64, SearchResult)>`
+    /// と互換 (truncate しないだけの違い)。`limit` を取らないので、
+    /// candidates は固定 50 を使う (= bounded 側の `.max(50)` 床と一致)。
+    /// MMR に対しては `top-k` が小さい (~10) 想定なので 50 件のプールで十分。
+    /// `top-k` が大きい場合の拡張は将来 candidates パラメタを足せば対応可能だが、
+    /// 現状のユースケース (Task 2.9 MMR 統合) では不要。
+    pub fn search_hybrid_candidates_unbounded(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        filters: &SearchFilters<'_>,
+    ) -> Result<Vec<(i64, SearchResult)>> {
+        let candidates = 50_u32;
+        let vec_hits = self.search_vec_candidates(query_embedding, candidates, filters)?;
+        let fts_hits = self.search_fts_candidates(query_text, candidates, filters)?;
+
+        let mut scores: HashMap<i64, f32> = HashMap::new();
+        let mut rows: HashMap<i64, SearchResult> = HashMap::new();
+        for (rank, (chunk_id, row)) in vec_hits.into_iter().enumerate() {
+            *scores.entry(chunk_id).or_insert(0.0) += 1.0 / (RRF_K + (rank as f32) + 1.0);
+            rows.entry(chunk_id).or_insert(row);
+        }
+        for (rank, (chunk_id, row)) in fts_hits.into_iter().enumerate() {
+            *scores.entry(chunk_id).or_insert(0.0) += 1.0 / (RRF_K + (rank as f32) + 1.0);
+            rows.entry(chunk_id).or_insert(row);
+        }
+
+        Ok(rrf_topk(scores, rows, None))
+    }
+
     /// RRF 用: ベクトル検索の候補を `(chunk_id, SearchResult)` で返す。
     /// 既存の `search_similar` とロジックは同じだが chunk_id を外に出す。
     /// ベクトル検索で最大 `limit` 件の候補を `(chunk_id, SearchResult)` で返す。
@@ -2344,6 +2377,92 @@ mod tests {
         // 返ってきた chunk_id は insert 時の id と一致
         let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
         assert!(ids.contains(&c1) || ids.contains(&c2));
+    }
+
+    #[test]
+    fn test_search_hybrid_candidates_unbounded_returns_full_pool() {
+        // 5+ docs / 多 chunks の小さな KB を作り、`_unbounded` が
+        // bounded (limit=2) より多くの候補を返すことを確認する。
+        // MMR の候補プール用 API なので truncate されないのが要件。
+        let db = db_with_384();
+
+        let mut chunk_ids: Vec<i64> = Vec::new();
+        for i in 0..5 {
+            let path = format!("doc_{i}.md");
+            let doc_id = db
+                .upsert_document(
+                    &path,
+                    Some("d"),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    &format!("h_{i}"),
+                )
+                .unwrap();
+            // chunk 1: keyword を含む (FTS hit)
+            let c_a = db
+                .insert_chunk(
+                    doc_id,
+                    0,
+                    None,
+                    None,
+                    &format!("alpha keyword text doc {i}"),
+                    &dummy_embedding(0.1 + (i as f32) * 0.01),
+                    1.0,
+                )
+                .unwrap();
+            chunk_ids.push(c_a);
+            // 2 doc 目以降にもう 1 chunk 追加 → 合計 7+ chunks
+            if i >= 2 {
+                let c_b = db
+                    .insert_chunk(
+                        doc_id,
+                        1,
+                        None,
+                        None,
+                        &format!("secondary chunk content {i}"),
+                        &dummy_embedding(0.5 + (i as f32) * 0.01),
+                        1.0,
+                    )
+                    .unwrap();
+                chunk_ids.push(c_b);
+            }
+        }
+        assert!(chunk_ids.len() >= 7, "fixture should have 7+ chunks");
+
+        let query_emb = dummy_embedding(0.1);
+        let query_text = "keyword";
+        let filters = SearchFilters::default();
+
+        let bounded = db
+            .search_hybrid_candidates(query_text, &query_emb, 2, &filters)
+            .unwrap();
+        let unbounded = db
+            .search_hybrid_candidates_unbounded(query_text, &query_emb, &filters)
+            .unwrap();
+
+        assert!(
+            bounded.len() <= 2,
+            "bounded must respect limit=2 (got {})",
+            bounded.len()
+        );
+        assert!(
+            unbounded.len() >= bounded.len(),
+            "unbounded should return >= bounded: bounded={} unbounded={}",
+            bounded.len(),
+            unbounded.len()
+        );
+        // 候補プール全件: 上記 fixture では vec_chunks が 7+ 件あるので
+        // unbounded は 2 件超を返すはず (limit 解除の差分が出ること)。
+        assert!(
+            unbounded.len() > bounded.len(),
+            "unbounded should strictly exceed bounded with this fixture: \
+             bounded={} unbounded={}",
+            bounded.len(),
+            unbounded.len()
+        );
     }
 
     #[test]
