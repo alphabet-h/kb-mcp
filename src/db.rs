@@ -50,6 +50,21 @@ pub struct MatchSpan {
     pub end: usize,
 }
 
+/// Parent retriever が `SearchHit.content` を表示拡張した範囲のメタデータ。
+/// `Option<ExpandedRange>` として `SearchHit` に持たせる。
+///
+/// - `None` (or 不在 — `skip_serializing_if`): Parent retriever off or 元 chunk のまま
+/// - `Adjacent { from_index, to_index }`: 隣接 chunk と merge。`from_index` /
+///   `to_index` は `chunks.chunk_index` (DB 列値、0-indexed)。inclusive range
+/// - `WholeDocument { total_chunks }`: 同 doc 全 chunk を連結。`total_chunks`
+///   は doc 内 chunk 数 (variant payload からは derive 不能なので保持)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExpandedRange {
+    Adjacent { from_index: usize, to_index: usize },
+    WholeDocument { total_chunks: usize },
+}
+
 /// JSON-serializable view of [`SearchResult`]. DB 層 (rusqlite) は `serde` 非依存
 /// のままにしておき、API / CLI への露出はこの型を経由する。
 ///
@@ -71,6 +86,11 @@ pub struct SearchHit {
     /// Deserialize 側は `null` と key 不在を区別しない (どちらも None)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_spans: Option<Vec<MatchSpan>>,
+
+    /// Parent retriever expansion metadata. None when expansion is off
+    /// or the hit chunk was not expanded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded_from: Option<ExpandedRange>,
 }
 
 impl From<SearchResult> for SearchHit {
@@ -85,6 +105,7 @@ impl From<SearchResult> for SearchHit {
             tags: r.tags,
             content: r.content,
             match_spans: None,
+            expanded_from: None,
         }
     }
 }
@@ -3646,5 +3667,52 @@ mod tests {
         }
         let result = rrf_topk(scores, rows, None);
         assert_eq!(result.len(), 10, "limit=None should not truncate");
+    }
+
+    #[test]
+    fn test_expanded_range_serializes_with_kind_tag() {
+        let adj = ExpandedRange::Adjacent {
+            from_index: 1,
+            to_index: 3,
+        };
+        let json = serde_json::to_string(&adj).unwrap();
+        assert!(
+            json.contains(r#""kind":"adjacent""#),
+            "kind tag missing: {json}"
+        );
+        assert!(json.contains(r#""from_index":1"#));
+        assert!(json.contains(r#""to_index":3"#));
+    }
+
+    #[test]
+    fn test_expanded_range_whole_document_serializes() {
+        let wd = ExpandedRange::WholeDocument { total_chunks: 7 };
+        let json = serde_json::to_string(&wd).unwrap();
+        assert!(
+            json.contains(r#""kind":"whole_document""#),
+            "kind tag missing: {json}"
+        );
+        assert!(json.contains(r#""total_chunks":7"#));
+    }
+
+    #[test]
+    fn test_search_hit_expanded_from_omitted_when_none() {
+        let hit = SearchHit {
+            score: 1.0,
+            path: "p".into(),
+            title: None,
+            heading: None,
+            topic: None,
+            date: None,
+            tags: vec![],
+            content: "c".into(),
+            match_spans: None,
+            expanded_from: None,
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(
+            !json.contains("expanded_from"),
+            "None should omit field, got: {json}"
+        );
     }
 }
