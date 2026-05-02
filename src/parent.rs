@@ -11,7 +11,20 @@
 //! - `quality_filter` is NOT applied (low-score neighbors are kept as context)
 //! - NULL `chunks.level` (legacy DBs) → adjacent merge fallback (Task 3.4)
 
-use crate::db::{Database, ExpandedRange, SearchHit};
+use crate::db::{ChunkRow, Database, ExpandedRange, SearchHit};
+
+/// chunk の token 数を推定する。`token_count` 列が `Some(n)` なら n を、
+/// `None` (legacy DB 行で NULL) なら content から `bytes / 4` で逆算する
+/// (`Database::insert_chunk` 内の計算式と整合)。負値は 0 に clamp。
+///
+/// **目的**: `max_expanded_tokens` cap が NULL token_count 行で bypass される
+/// 脆弱性 (codex P1) を防ぐ。estimate なので overhead は無視できる。
+fn estimated_tokens(chunk: &ChunkRow) -> u32 {
+    match chunk.token_count {
+        Some(n) if n > 0 => n as u32,
+        _ => (chunk.content.len() / 4) as u32,
+    }
+}
 
 /// Parent retriever 設定。kb-mcp.toml `[search.parent_retriever]` と
 /// 1:1 対応する。Task 3.5 で `ParentRetrieverConfig` を加えた後はこの構造体を
@@ -95,12 +108,12 @@ fn expand_adjacent(
     // max_expanded_tokens cap (Task 3.4 invariant #1):
     // adjacent neighbor 群の token_count 合計が cap を超えるなら拡張を放棄し、
     // hit chunk のみを返す (Adjacent { from = to = chunk_idx })。
-    // token_count = None (legacy 行で NULL) は 0 扱い (保守的)。
-    // 負の i64 が紛れた時のため `.max(0)` で clamp してから u32 化する。
-    let total_tokens: u32 = neighbors
-        .iter()
-        .map(|c| c.token_count.unwrap_or(0).max(0) as u32)
-        .sum();
+    // **codex P1 (#43826e9 後の review)**: token_count = None (legacy DB 行で
+    // NULL) を 0 扱いすると cap が bypass され巨大 chunk が merge される。
+    // 安全側に倒すため content から estimate (= insert_chunk 内の token_count
+    // 計算式 `content.len() / 4` と整合)。これで NULL row も実 byte 数で
+    // 評価され、cap を保つ。
+    let total_tokens: u32 = neighbors.iter().map(estimated_tokens).sum();
     if total_tokens > params.max_expanded_tokens {
         if let Some(c) = neighbors.into_iter().find(|c| c.chunk_index == chunk_idx) {
             hit.content = c.content;
@@ -163,10 +176,9 @@ fn expand_whole_document(
     // 全 doc 連結が cap を超えるなら adjacent merge にフォールバックする。
     // adjacent merge 自身も同 cap を持つので、最終的には hit chunk のみまで
     // 縮退し得る (= cap 超過時の strong guarantee)。
-    let total_tokens: u32 = chunks
-        .iter()
-        .map(|c| c.token_count.unwrap_or(0).max(0) as u32)
-        .sum();
+    // NULL token_count (legacy DB) でも cap を bypass できないよう
+    // estimated_tokens で content から逆算する (codex P1 対応)。
+    let total_tokens: u32 = chunks.iter().map(estimated_tokens).sum();
     if total_tokens > params.max_expanded_tokens {
         return expand_adjacent(hit, doc_id, chunk_idx, db, params);
     }
@@ -605,6 +617,82 @@ mod tests {
         match expanded.expanded_from {
             Some(ExpandedRange::Adjacent { .. }) => {}
             other => panic!("expected Adjacent variant, got {other:?}"),
+        }
+    }
+
+    /// codex P1 regression: NULL token_count (legacy DB 行) でも cap が
+    /// bypass されないことを確認。content から estimate (`bytes / 4`) で
+    /// 評価され、巨大 chunk なら hit only に degrade される。
+    #[test]
+    fn test_parent_max_expanded_cap_with_null_token_count() {
+        let tmp = tempdir_for_test();
+        let path = tmp.0.join("test.db");
+        let db = Database::open(path.to_str().unwrap()).expect("open");
+        db.verify_embedding_meta("bge-small-en-v1.5", 384)
+            .expect("vec_chunks");
+        let doc_id = db
+            .upsert_document("/doc.md", Some("d"), Some("t"), None, None, &[], None, "h")
+            .expect("upsert");
+        // 各 chunk content を ~20000 byte (= estimated tokens ~5000) に。
+        // legacy NULL token_count を simulate するため、insert 後に直接 SQL で
+        // chunks.token_count = NULL を設定する。
+        let big_body = format!("big {}", "body content body content ".repeat(800));
+        let _c0 = db
+            .insert_chunk(
+                doc_id,
+                0,
+                Some("h0"),
+                None,
+                &big_body,
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c0");
+        let c1 = db
+            .insert_chunk(
+                doc_id,
+                1,
+                Some("h1"),
+                None,
+                &big_body,
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c1");
+        let _c2 = db
+            .insert_chunk(
+                doc_id,
+                2,
+                Some("h2"),
+                None,
+                &big_body,
+                &dummy_emb_384(),
+                1.0,
+            )
+            .expect("c2");
+
+        // legacy DB 行を simulate: 全 chunks の token_count を NULL にする
+        let conn = rusqlite::Connection::open(path.to_str().unwrap()).expect("re-open");
+        conn.execute("UPDATE chunks SET token_count = NULL", [])
+            .expect("null token_count");
+        drop(conn);
+
+        let hit = make_hit("/doc.md", "big body");
+        let p = ParentRetrieverParams {
+            whole_doc_threshold_tokens: 100,
+            max_expanded_tokens: 2000,
+        };
+        let expanded = expand_parent(hit, c1, &db, p).expect("expand");
+        // NULL でも estimated_tokens 経由で content から逆算され、cap (2000)
+        // を超えると判定される → hit chunk only に degrade
+        match expanded.expanded_from {
+            Some(ExpandedRange::Adjacent {
+                from_index: 1,
+                to_index: 1,
+            }) => {}
+            other => panic!(
+                "expected Adjacent {{1,1}} (cap-degrade with NULL token_count), got {other:?}"
+            ),
         }
     }
 }
