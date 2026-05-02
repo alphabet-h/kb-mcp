@@ -225,6 +225,13 @@ pub struct ConfigFingerprint {
     /// に含めることで、MMR off の状態は古い baseline と直接比較可能。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmr: Option<MmrFingerprint>,
+
+    /// Parent retriever が有効な場合のみ Some。off (default) なら None で旧
+    /// history JSON との互換維持。enabled=true でのみ
+    /// `whole_doc_threshold_tokens` と `max_expanded_tokens` を fingerprint に
+    /// 含める (これらが変われば baseline は別物として扱う)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_retriever: Option<ParentRetrieverFingerprint>,
 }
 
 /// `[search.mmr]` の effective config を fingerprint に含めるための snapshot。
@@ -235,11 +242,20 @@ pub struct MmrFingerprint {
     pub same_doc_penalty: f32,
 }
 
+/// `[search.parent_retriever]` の effective config を fingerprint に含めるための
+/// snapshot。Parent retriever が enabled=true のときだけ
+/// [`ConfigFingerprint::parent_retriever`] に Some で入る。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ParentRetrieverFingerprint {
+    pub whole_doc_threshold_tokens: u32,
+    pub max_expanded_tokens: u32,
+}
+
 impl ConfigFingerprint {
     /// `kb-mcp.toml` Config と eval 実行時の引数から fingerprint を構築。
-    /// MMR が effective on なら `mmr: Some(_)` を作り、off なら `None` のまま
-    /// にすることで旧 history JSON (mmr field なし) と直接比較できる
-    /// PartialEq を維持する。
+    /// MMR / Parent retriever が effective on なら `Some(_)` を作り、off なら
+    /// `None` のままにすることで旧 history JSON (該当 field なし) と直接比較
+    /// できる PartialEq を維持する。
     pub fn from_config(
         cfg: &crate::config::Config,
         model: String,
@@ -256,6 +272,14 @@ impl ConfigFingerprint {
                 lambda: s.mmr.lambda,
                 same_doc_penalty: s.mmr.same_doc_penalty,
             });
+        let parent_retriever = cfg
+            .search
+            .as_ref()
+            .filter(|s| s.parent_retriever.enabled)
+            .map(|s| ParentRetrieverFingerprint {
+                whole_doc_threshold_tokens: s.parent_retriever.whole_doc_threshold_tokens,
+                max_expanded_tokens: s.parent_retriever.max_expanded_tokens,
+            });
         Self {
             model,
             reranker,
@@ -263,6 +287,7 @@ impl ConfigFingerprint {
             k_values,
             golden_hash,
             mmr,
+            parent_retriever,
         }
     }
 }
@@ -710,16 +735,37 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
             &opts.overrides,
             &opts.search_config,
         )?;
-        let results: Vec<crate::db::SearchResult> =
-            pipeline.into_iter().map(|(_, sr)| sr).collect();
-        let top_k: Vec<HitRecord> = results
+
+        // chunk_id を維持したまま SearchHit に変換し、Parent retriever 段を
+        // 適用する (enabled = false なら content / expanded_from は触らない)。
+        // eval は match_spans を計算しないので、Parent retriever 後の content
+        // のみ使う。HitRecord は path / heading / score / rank しか見ないため
+        // 表示拡張された content / expanded_from は読み捨てるが、retrieval
+        // pipeline 全段を実本番と揃えることで「eval 上は良いが production で
+        // parent enabled にすると挙動が変わる」を防ぐ。
+        let hits_with_id: Vec<(i64, crate::db::SearchHit)> = pipeline
+            .into_iter()
+            .map(|(id, sr)| (id, sr.into()))
+            .collect();
+        let resolved = opts.overrides.resolve(&opts.search_config);
+        let parent_params = crate::parent::ParentRetrieverParams {
+            whole_doc_threshold_tokens: resolved.parent_whole_doc_threshold_tokens,
+            max_expanded_tokens: resolved.parent_max_expanded_tokens,
+        };
+        let hits: Vec<crate::db::SearchHit> = crate::parent::apply_parent_retriever(
+            hits_with_id,
+            &db,
+            resolved.parent_retriever_enabled,
+            parent_params,
+        );
+        let top_k: Vec<HitRecord> = hits
             .into_iter()
             .enumerate()
-            .map(|(i, r)| HitRecord {
+            .map(|(i, h)| HitRecord {
                 rank: i + 1,
-                path: r.path,
-                heading: r.heading,
-                score: r.score,
+                path: h.path,
+                heading: h.heading,
+                score: h.score,
             })
             .collect();
         let metrics = compute_query_metrics(&q.expected, &top_k, &opts.k_values);
@@ -734,16 +780,26 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
 
     let aggregate = aggregate_metrics(&per_query, &opts.k_values);
 
-    // ConfigFingerprint.mmr is built from the **effective** resolved config
-    // (toml + per-call overrides), not just the toml. This matches what the
-    // pipeline actually executed for each query, so a `--mmr true` CLI flag
-    // gets recorded and a future re-run with the flag dropped (= MMR off)
-    // does not silently get treated as a "compatible" baseline.
+    // ConfigFingerprint.{mmr,parent_retriever} are built from the **effective**
+    // resolved config (toml + per-call overrides), not just the toml. This
+    // matches what the pipeline actually executed for each query, so a
+    // `--mmr true` CLI flag gets recorded and a future re-run with the flag
+    // dropped (= MMR off) does not silently get treated as a "compatible"
+    // baseline. Parent retriever has no per-call override (toml-only), but is
+    // surfaced symmetrically here so future overrides can hook in cleanly.
     let resolved = opts.overrides.resolve(&opts.search_config);
     let mmr_fp = if resolved.mmr_enabled {
         Some(MmrFingerprint {
             lambda: resolved.mmr_lambda,
             same_doc_penalty: resolved.mmr_same_doc_penalty,
+        })
+    } else {
+        None
+    };
+    let parent_fp = if resolved.parent_retriever_enabled {
+        Some(ParentRetrieverFingerprint {
+            whole_doc_threshold_tokens: resolved.parent_whole_doc_threshold_tokens,
+            max_expanded_tokens: resolved.parent_max_expanded_tokens,
         })
     } else {
         None
@@ -762,6 +818,7 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
             k_values: opts.k_values.clone(),
             golden_hash,
             mmr: mmr_fp,
+            parent_retriever: parent_fp,
         },
         per_query,
         aggregate,
@@ -1179,6 +1236,7 @@ mod tests {
                 k_values: vec![1, 5, 10],
                 golden_hash: "deadbeef".into(),
                 mmr: None,
+                parent_retriever: None,
             },
             per_query: vec![],
             aggregate: agg,
@@ -1244,6 +1302,7 @@ mod tests {
                 k_values: vec![1, 5],
                 golden_hash: "h".into(),
                 mmr: None,
+                parent_retriever: None,
             },
             per_query: vec![],
             aggregate: agg,
@@ -1267,6 +1326,7 @@ mod tests {
             k_values: vec![5],
             golden_hash: "h".into(),
             mmr: None,
+            parent_retriever: None,
         };
         let mut a_now = AggregateMetrics::default();
         a_now.recall_at_k.insert(5, 0.8);
@@ -1303,6 +1363,7 @@ mod tests {
             k_values: vec![5],
             golden_hash: "AAA".into(),
             mmr: None,
+            parent_retriever: None,
         };
         let fp_prev = ConfigFingerprint {
             golden_hash: "BBB".into(),
@@ -1344,6 +1405,7 @@ mod tests {
                 k_values: vec![1, 5],
                 golden_hash: "abc".into(),
                 mmr: None,
+                parent_retriever: None,
             },
             per_query: vec![],
             aggregate: agg,
@@ -1369,6 +1431,7 @@ mod tests {
             k_values: vec![5],
             golden_hash: "h".into(),
             mmr: None,
+            parent_retriever: None,
         };
         let now = EvalRun {
             timestamp: Utc::now(),
@@ -1431,6 +1494,7 @@ mod tests {
                 k_values: recall.keys().copied().collect(),
                 golden_hash: golden_hash.into(),
                 mmr: None,
+                parent_retriever: None,
             },
             per_query: vec![],
             aggregate: AggregateMetrics {
@@ -1583,6 +1647,68 @@ same_doc_penalty = 0.1
             "golden_hash": "abc"
         });
         let fp: ConfigFingerprint = serde_json::from_value(old_json).expect("load old");
+        assert!(fp.mmr.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // feature-28 PR-3: ConfigFingerprint.parent_retriever
+    // (Option<ParentRetrieverFingerprint>)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_fingerprint_parent_retriever_off_serializes_as_none() {
+        let toml = r#"
+[search.parent_retriever]
+enabled = false
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let fp = ConfigFingerprint::from_config(
+            &cfg,
+            "bge-m3".into(),
+            None,
+            10,
+            vec![1, 5, 10],
+            "deadbeef".into(),
+        );
+        assert!(fp.parent_retriever.is_none());
+    }
+
+    #[test]
+    fn test_fingerprint_parent_retriever_on_serializes_as_some() {
+        let toml = r#"
+[search.parent_retriever]
+enabled = true
+whole_doc_threshold_tokens = 50
+max_expanded_tokens = 1500
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let fp = ConfigFingerprint::from_config(
+            &cfg,
+            "bge-m3".into(),
+            None,
+            10,
+            vec![1, 5, 10],
+            "deadbeef".into(),
+        );
+        let p = fp
+            .parent_retriever
+            .expect("parent_retriever should be Some");
+        assert_eq!(p.whole_doc_threshold_tokens, 50);
+        assert_eq!(p.max_expanded_tokens, 1500);
+    }
+
+    #[test]
+    fn test_history_load_handles_old_json_without_parent_retriever_field() {
+        // 旧 JSON history (parent_retriever field なし) を deserialize しても fail しない
+        let old_json = serde_json::json!({
+            "model": "bge-m3",
+            "reranker": null,
+            "limit": 10,
+            "k_values": [1, 5, 10],
+            "golden_hash": "abc"
+        });
+        let fp: ConfigFingerprint = serde_json::from_value(old_json).expect("load old");
+        assert!(fp.parent_retriever.is_none());
         assert!(fp.mmr.is_none());
     }
 }

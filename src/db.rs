@@ -50,6 +50,21 @@ pub struct MatchSpan {
     pub end: usize,
 }
 
+/// Parent retriever が `SearchHit.content` を表示拡張した範囲のメタデータ。
+/// `Option<ExpandedRange>` として `SearchHit` に持たせる。
+///
+/// - `None` (or 不在 — `skip_serializing_if`): Parent retriever off or 元 chunk のまま
+/// - `Adjacent { from_index, to_index }`: 隣接 chunk と merge。`from_index` /
+///   `to_index` は `chunks.chunk_index` (DB 列値、0-indexed)。inclusive range
+/// - `WholeDocument { total_chunks }`: 同 doc 全 chunk を連結。`total_chunks`
+///   は doc 内 chunk 数 (variant payload からは derive 不能なので保持)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExpandedRange {
+    Adjacent { from_index: usize, to_index: usize },
+    WholeDocument { total_chunks: usize },
+}
+
 /// JSON-serializable view of [`SearchResult`]. DB 層 (rusqlite) は `serde` 非依存
 /// のままにしておき、API / CLI への露出はこの型を経由する。
 ///
@@ -71,6 +86,11 @@ pub struct SearchHit {
     /// Deserialize 側は `null` と key 不在を区別しない (どちらも None)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_spans: Option<Vec<MatchSpan>>,
+
+    /// Parent retriever expansion metadata. None when expansion is off
+    /// or the hit chunk was not expanded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded_from: Option<ExpandedRange>,
 }
 
 impl From<SearchResult> for SearchHit {
@@ -85,8 +105,23 @@ impl From<SearchResult> for SearchHit {
             tags: r.tags,
             content: r.content,
             match_spans: None,
+            expanded_from: None,
         }
     }
+}
+
+/// Parent retriever 用 chunk row 抜粋。`fetch_chunks_by_index_range` の戻り値要素。
+///
+/// Display-time content expansion で隣接 chunk を読み取るために必要な
+/// 最小フィールドのみ (`chunk_index` / `content` / `token_count` / `level`)。
+/// `level` は legacy DB (feature-28 以前) では NULL になる可能性があるため、
+/// `Option<u8>` として返す。
+#[derive(Debug, Clone)]
+pub struct ChunkRow {
+    pub chunk_index: i64,
+    pub content: String,
+    pub token_count: Option<i64>,
+    pub level: Option<u8>,
 }
 
 /// Search 系 API に渡す filter 引数の集約。
@@ -901,6 +936,50 @@ impl Database {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Parent retriever 用: `chunk_id` から `(document_id, chunk_index, token_count)`
+    /// を引く軽量 lookup。`token_count` は legacy 行で NULL になり得るので
+    /// `Option<i64>` として返す。
+    pub fn get_chunk_meta(&self, chunk_id: i64) -> Result<(i64, i64, Option<i64>)> {
+        Ok(self.conn.query_row(
+            "SELECT document_id, chunk_index, token_count FROM chunks WHERE id = ?1",
+            rusqlite::params![chunk_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?)
+    }
+
+    /// Parent retriever 用: 同一 doc 内の `chunk_index` 範囲 `[from, to]` (inclusive)
+    /// に該当する chunk を `chunk_index` ASC で返す。
+    ///
+    /// `from` が負だったり `to` が doc 末尾を超える場合は単に該当行が無い扱いに
+    /// なる (SQLite range filter で自然にトリム)。adjacent merge では
+    /// `[hit_idx - 1, hit_idx + 1]` のような呼び出しを想定しており、左右の
+    /// 端で自動的にバウンドされる前提。
+    pub fn fetch_chunks_by_index_range(
+        &self,
+        doc_id: i64,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<ChunkRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_index, content, token_count, level FROM chunks
+             WHERE document_id = ?1 AND chunk_index >= ?2 AND chunk_index <= ?3
+             ORDER BY chunk_index ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![doc_id, from, to], |row| {
+            Ok(ChunkRow {
+                chunk_index: row.get(0)?,
+                content: row.get(1)?,
+                token_count: row.get(2)?,
+                level: row.get::<_, Option<i64>>(3)?.map(|v| v as u8),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Delete a document and all associated chunks / vectors / FTS rows.
@@ -3646,5 +3725,52 @@ mod tests {
         }
         let result = rrf_topk(scores, rows, None);
         assert_eq!(result.len(), 10, "limit=None should not truncate");
+    }
+
+    #[test]
+    fn test_expanded_range_serializes_with_kind_tag() {
+        let adj = ExpandedRange::Adjacent {
+            from_index: 1,
+            to_index: 3,
+        };
+        let json = serde_json::to_string(&adj).unwrap();
+        assert!(
+            json.contains(r#""kind":"adjacent""#),
+            "kind tag missing: {json}"
+        );
+        assert!(json.contains(r#""from_index":1"#));
+        assert!(json.contains(r#""to_index":3"#));
+    }
+
+    #[test]
+    fn test_expanded_range_whole_document_serializes() {
+        let wd = ExpandedRange::WholeDocument { total_chunks: 7 };
+        let json = serde_json::to_string(&wd).unwrap();
+        assert!(
+            json.contains(r#""kind":"whole_document""#),
+            "kind tag missing: {json}"
+        );
+        assert!(json.contains(r#""total_chunks":7"#));
+    }
+
+    #[test]
+    fn test_search_hit_expanded_from_omitted_when_none() {
+        let hit = SearchHit {
+            score: 1.0,
+            path: "p".into(),
+            title: None,
+            heading: None,
+            topic: None,
+            date: None,
+            tags: vec![],
+            content: "c".into(),
+            match_spans: None,
+            expanded_from: None,
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(
+            !json.contains("expanded_from"),
+            "None should omit field, got: {json}"
+        );
     }
 }

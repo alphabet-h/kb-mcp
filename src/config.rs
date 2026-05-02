@@ -105,6 +105,10 @@ pub struct SearchConfig {
     /// セクション省略時は [`MmrConfig::default()`] (enabled=false)。
     #[serde(default)]
     pub mmr: MmrConfig,
+    /// Parent retriever (display-time content expansion) 設定。
+    /// セクション省略時は [`ParentRetrieverConfig::default()`] (enabled=false)。
+    #[serde(default)]
+    pub parent_retriever: ParentRetrieverConfig,
 }
 
 /// `[search.mmr]` セクション。feature-28 PR-2 で追加。
@@ -142,6 +146,46 @@ impl Default for MmrConfig {
     }
 }
 
+/// `[search.parent_retriever]` セクション。feature-28 PR-3 で追加。
+///
+/// 検索結果の content を表示拡張する Parent retriever (post-relevance) 設定。
+/// 既定は無効。詳細は `docs/feature-28-parent-retriever.md` (TBD)。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentRetrieverConfig {
+    /// Parent retriever を有効にするか。`false` なら hit chunk の content
+    /// をそのまま返す (拡張なし)。
+    #[serde(default)]
+    pub enabled: bool,
+    /// `token_count` がこの値未満の chunk hit に対しては whole-document
+    /// fallback (= 同 doc 全 chunks を連結) を適用する。0 < x < max_expanded_tokens。
+    #[serde(default = "default_whole_doc_threshold")]
+    pub whole_doc_threshold_tokens: u32,
+    /// adjacent merge / whole-doc 共通の content size cap (token 単位)。
+    /// 超えた場合 adjacent は hit chunk のみに、whole-doc は adjacent fallback
+    /// に degrade する。BGE-M3 context window 8192 を上限とする。
+    #[serde(default = "default_max_expanded")]
+    pub max_expanded_tokens: u32,
+}
+
+fn default_whole_doc_threshold() -> u32 {
+    100
+}
+
+fn default_max_expanded() -> u32 {
+    2000
+}
+
+impl Default for ParentRetrieverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            whole_doc_threshold_tokens: default_whole_doc_threshold(),
+            max_expanded_tokens: default_max_expanded(),
+        }
+    }
+}
+
 /// 3 caller (MCP server, CLI search, CLI eval) から共通利用される per-call
 /// override 構造体。`From` impls で各 caller の native 型から構築する。
 ///
@@ -167,6 +211,8 @@ pub struct ResolvedSearchConfig {
     pub mmr_lambda: f32,
     pub mmr_same_doc_penalty: f32,
     pub parent_retriever_enabled: bool,
+    pub parent_whole_doc_threshold_tokens: u32,
+    pub parent_max_expanded_tokens: u32,
 }
 
 impl SearchOverrides {
@@ -189,13 +235,17 @@ impl SearchOverrides {
             );
         }
 
-        // Parent retriever は Task 3.x で本体実装、ここでは config 上の
-        // enabled だけ反映 (false default)。
+        // Parent retriever: enabled のみ per-call override 可、threshold /
+        // max_expanded は toml-only (per-call では渡せない、spec 通り)。
         ResolvedSearchConfig {
             mmr_enabled,
             mmr_lambda,
             mmr_same_doc_penalty: mmr_penalty,
-            parent_retriever_enabled: self.parent_retriever.unwrap_or(false),
+            parent_retriever_enabled: self
+                .parent_retriever
+                .unwrap_or(toml.parent_retriever.enabled),
+            parent_whole_doc_threshold_tokens: toml.parent_retriever.whole_doc_threshold_tokens,
+            parent_max_expanded_tokens: toml.parent_retriever.max_expanded_tokens,
         }
     }
 }
@@ -394,6 +444,8 @@ impl Config {
     /// 現状チェック対象:
     /// - `[search.mmr].lambda` が `0.0..=1.0`
     /// - `[search.mmr].same_doc_penalty` が `0.0..=1.0`
+    /// - `[search.parent_retriever].max_expanded_tokens > whole_doc_threshold_tokens`
+    /// - `[search.parent_retriever].max_expanded_tokens <= 8192` (BGE-M3 ctx)
     pub fn validate(&self) -> Result<()> {
         if let Some(s) = &self.search {
             // MMR レンジチェック
@@ -407,6 +459,23 @@ impl Config {
                 anyhow::bail!(
                     "[search.mmr].same_doc_penalty must be in 0.0..=1.0, got {}",
                     s.mmr.same_doc_penalty
+                );
+            }
+
+            // Parent retriever レンジチェック
+            if s.parent_retriever.max_expanded_tokens
+                <= s.parent_retriever.whole_doc_threshold_tokens
+            {
+                anyhow::bail!(
+                    "[search.parent_retriever].max_expanded_tokens ({}) must be > whole_doc_threshold_tokens ({})",
+                    s.parent_retriever.max_expanded_tokens,
+                    s.parent_retriever.whole_doc_threshold_tokens
+                );
+            }
+            if s.parent_retriever.max_expanded_tokens > 8192 {
+                anyhow::bail!(
+                    "[search.parent_retriever].max_expanded_tokens must be <= 8192 (BGE-M3 context window), got {}",
+                    s.parent_retriever.max_expanded_tokens
                 );
             }
         }
@@ -791,6 +860,73 @@ same_doc_penalty = -0.1
             result.is_err(),
             "negative same_doc_penalty should fail validate"
         );
+    }
+
+    #[test]
+    fn test_parent_retriever_config_defaults() {
+        let cfg = ParentRetrieverConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.whole_doc_threshold_tokens, 100);
+        assert_eq!(cfg.max_expanded_tokens, 2000);
+    }
+
+    #[test]
+    fn test_parent_retriever_config_rejects_unknown_field() {
+        let toml = r#"
+[search.parent_retriever]
+enabled = true
+unknown = "bad"
+"#;
+        let result: std::result::Result<crate::config::Config, _> = toml::from_str(toml);
+        assert!(result.is_err(), "unknown field should be rejected");
+    }
+
+    #[test]
+    fn test_parent_retriever_validates_max_expanded_gt_threshold() {
+        let toml = r#"
+[search.parent_retriever]
+enabled = true
+whole_doc_threshold_tokens = 500
+max_expanded_tokens = 500
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let result = cfg.validate();
+        assert!(
+            result.is_err(),
+            "max_expanded_tokens <= threshold should fail"
+        );
+    }
+
+    #[test]
+    fn test_parent_retriever_max_expanded_capped_at_8192() {
+        let toml = r#"
+[search.parent_retriever]
+enabled = true
+max_expanded_tokens = 9000
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let result = cfg.validate();
+        assert!(
+            result.is_err(),
+            "max_expanded_tokens > 8192 (BGE-M3 ctx) should fail"
+        );
+    }
+
+    #[test]
+    fn test_search_overrides_resolve_parent_retriever_thresholds() {
+        let toml = r#"
+[search.parent_retriever]
+enabled = true
+whole_doc_threshold_tokens = 50
+max_expanded_tokens = 1500
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml).unwrap();
+        let search_cfg = cfg.search.unwrap_or_default();
+        let overrides = SearchOverrides::default();
+        let resolved = overrides.resolve(&search_cfg);
+        assert!(resolved.parent_retriever_enabled);
+        assert_eq!(resolved.parent_whole_doc_threshold_tokens, 50);
+        assert_eq!(resolved.parent_max_expanded_tokens, 1500);
     }
 
     #[test]

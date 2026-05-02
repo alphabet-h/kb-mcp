@@ -6,6 +6,7 @@ pub mod graph;
 pub mod indexer;
 pub mod markdown;
 pub mod mmr;
+pub mod parent;
 pub mod parser;
 pub mod quality;
 pub mod schema;
@@ -650,15 +651,38 @@ fn main() -> anyhow::Result<()> {
                 &overrides,
                 &toml_search,
             )?;
-            let results: Vec<db::SearchResult> = pipeline.into_iter().map(|(_, sr)| sr).collect();
+
+            // chunk_id を維持したまま SearchHit に変換 (Parent retriever 用)。
+            let hits_with_id: Vec<(i64, db::SearchHit)> = pipeline
+                .into_iter()
+                .map(|(id, sr)| (id, sr.into()))
+                .collect();
+
+            // Parent retriever 段。enabled = false なら chunk_id を剥がすだけで
+            // content / expanded_from は触らない (= v0.6.1 と bit-exact 互換)。
+            let resolved = overrides.resolve(&toml_search);
+            let parent_params = parent::ParentRetrieverParams {
+                whole_doc_threshold_tokens: resolved.parent_whole_doc_threshold_tokens,
+                max_expanded_tokens: resolved.parent_max_expanded_tokens,
+            };
+            let mut hits: Vec<db::SearchHit> = parent::apply_parent_retriever(
+                hits_with_id,
+                &db,
+                resolved.parent_retriever_enabled,
+                parent_params,
+            );
+            // match_spans は Parent retriever 拡張後の content に対して計算する
+            // (`expand_parent` は defensive に None クリアするので必ず再計算が要る)。
+            for h in &mut hits {
+                h.match_spans = server::compute_match_spans(&query, &h.content);
+            }
 
             let effective_ratio = min_confidence_ratio
                 .or(toml_search.min_confidence_ratio)
                 .unwrap_or(1.5);
 
             print_search_results(
-                &query,
-                results,
+                hits,
                 effective_ratio,
                 &path_globs,
                 &tags_any,
@@ -1102,8 +1126,7 @@ fn print_graph(g: graph::ConnectionGraph, format: SearchFormat) {
 
 #[allow(clippy::too_many_arguments)]
 fn print_search_results(
-    query: &str,
-    results: Vec<db::SearchResult>,
+    hits: Vec<db::SearchHit>,
     min_confidence_ratio: f32,
     path_globs: &[String],
     tags_any: &[String],
@@ -1115,12 +1138,8 @@ fn print_search_results(
     explicit_ratio: Option<f32>,
     format: SearchFormat,
 ) {
-    let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+    let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
     let low_confidence = server::compute_low_confidence(&scores, min_confidence_ratio);
-    let mut hits: Vec<db::SearchHit> = results.into_iter().map(Into::into).collect();
-    for h in &mut hits {
-        h.match_spans = server::compute_match_spans(query, &h.content);
-    }
 
     match format {
         SearchFormat::Json => {
