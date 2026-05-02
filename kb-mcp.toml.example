@@ -135,3 +135,11 @@ bind = "127.0.0.1:3100"
 #enabled = false
 #lambda = 0.7              # 1.0 = no diversity (MMR off equiv); < 0.5 leans exploration
 #same_doc_penalty = 0.0    # > 0 deduplicates same-document chunks; 0 = pure MMR
+
+# [search.parent_retriever] (optional)
+# Display-time content expansion for hit chunks.
+# When unsure, leave defaults.
+[search.parent_retriever]
+#enabled = false                      # opt-in
+#whole_doc_threshold_tokens = 100     # token_count below this -> whole document fallback
+#max_expanded_tokens = 2000           # cap for adjacent merge / whole-doc (BGE-M3 <= 8192)
