@@ -334,6 +334,7 @@ impl Database {
                 document_id   INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
                 chunk_index   INTEGER NOT NULL,
                 heading       TEXT,
+                level         INTEGER,
                 content       TEXT NOT NULL,
                 token_count   INTEGER,
                 quality_score REAL NOT NULL DEFAULT 1.0
@@ -367,6 +368,10 @@ impl Database {
         // legacy DB 互換: chunks.quality_score 列が無ければ ALTER で
         // 追加する (DEFAULT 1.0 で既存行は全件「通過」扱い)。
         self.ensure_quality_score_column()?;
+
+        // legacy DB 互換: chunks.level 列が無ければ ALTER で追加する
+        // (NULL のまま — 値は再 index 時に埋まる)。
+        self.ensure_chunk_level_column()?;
 
         Ok(())
     }
@@ -405,6 +410,32 @@ impl Database {
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chunks_quality ON chunks(quality_score);",
         )?;
+        Ok(())
+    }
+
+    /// `chunks.level` 列が存在しなければ追加する (idempotent)。
+    /// legacy DB を開いても失敗しないよう init 経路から呼ぶ。
+    /// 新規 DB では `CREATE TABLE` 時点で列があるので no-op。
+    /// 既存行の `level` は NULL のまま (再 index で埋まる)。
+    /// race 条件 (2 プロセス同時 open) の場合は duplicate column エラーを吸収。
+    fn ensure_chunk_level_column(&self) -> Result<()> {
+        let has_col: bool = self
+            .conn
+            .prepare("PRAGMA table_info(chunks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|name| name == "level");
+        if !has_col {
+            match self
+                .conn
+                .execute_batch("ALTER TABLE chunks ADD COLUMN level INTEGER;")
+            {
+                Ok(()) => {}
+                // 他プロセスが先に ALTER した場合 (race) はエラーを飲み込んで継続。
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(())
     }
 
@@ -2964,5 +2995,56 @@ mod tests {
         };
         let h: SearchHit = r.into();
         assert!(h.match_spans.is_none());
+    }
+
+    /// Local helper: create a temp directory unique to this test process /
+    /// invocation. Mirrors the pattern used in `tests/validate_cli.rs`
+    /// (`tempfile` crate is intentionally avoided per project policy).
+    struct TempPath {
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn tempdir_for_test() -> TempPath {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("kb-mcp-test-{pid}-{nanos}"));
+        std::fs::create_dir_all(&p).unwrap();
+        TempPath { path: p }
+    }
+
+    #[test]
+    fn test_ensure_chunk_level_column_idempotent() {
+        let tmp = tempdir_for_test();
+        let db_path = tmp.path.join("test.db");
+        let db_path_str = db_path.to_str().expect("utf-8 path");
+        // 新規作成 → ensure を 2 回呼ぶ (race / 重複呼びを模す)。
+        // 1 回目は init で列が既に作られているので no-op、2 回目も no-op で成功。
+        {
+            let db = Database::open(db_path_str).expect("open");
+            db.ensure_chunk_level_column().expect("first ensure");
+            db.ensure_chunk_level_column().expect("idempotent ensure");
+        }
+        // 列が存在することを PRAGMA で確認 (db wrapper を経由せず直接 reopen)。
+        let conn = rusqlite::Connection::open(&db_path).expect("re-open");
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(chunks)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "level"),
+            "level column missing: {cols:?}"
+        );
     }
 }
