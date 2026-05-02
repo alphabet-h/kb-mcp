@@ -122,13 +122,13 @@ fn extract_frontmatter(raw: &str) -> (Frontmatter, String) {
 // ---------------------------------------------------------------------------
 
 fn chunk_body(body: &str, excludes: &[&str]) -> Vec<Chunk> {
-    let mut raw_chunks: Vec<(Option<String>, String)> = Vec::new();
-    let mut current_heading: Option<String> = None;
+    let mut raw_chunks: Vec<(Option<(u8, String)>, String)> = Vec::new();
+    let mut current_heading: Option<(u8, String)> = None;
     let mut current_lines: Vec<&str> = Vec::new();
     let mut excluded = false;
 
     for line in body.lines() {
-        if let Some(heading_text) = strip_heading(line) {
+        if let Some((level, heading_text)) = strip_heading(line) {
             if excludes.iter().any(|ex| heading_text.contains(ex)) {
                 if !excluded {
                     let content = current_lines.join("\n").trim().to_string();
@@ -150,7 +150,7 @@ fn chunk_body(body: &str, excludes: &[&str]) -> Vec<Chunk> {
             }
 
             excluded = false;
-            current_heading = Some(heading_text);
+            current_heading = Some((level, heading_text));
             current_lines.clear();
         } else if !excluded {
             current_lines.push(line);
@@ -164,14 +164,18 @@ fn chunk_body(body: &str, excludes: &[&str]) -> Vec<Chunk> {
         }
     }
 
-    let mut merged: Vec<(Option<String>, String)> = Vec::new();
+    // 50-char 未満 chunk は直前 chunk に merge する。
+    // merge 後 chunk の heading / level は **最初に出現した heading のもの**
+    // を維持し、merge された後続 heading は content 側に `## h\n\n` で残す
+    // (legacy 挙動の継続)。
+    let mut merged: Vec<(Option<(u8, String)>, String)> = Vec::new();
     for (heading, content) in raw_chunks {
         if content.len() < 50 && !merged.is_empty() {
             let prev = merged.last_mut().unwrap();
             if !prev.1.is_empty() {
                 prev.1.push_str("\n\n");
             }
-            if let Some(ref h) = heading {
+            if let Some((_lvl, ref h)) = heading {
                 prev.1.push_str(&format!("## {h}\n\n"));
             }
             prev.1.push_str(&content);
@@ -183,21 +187,102 @@ fn chunk_body(body: &str, excludes: &[&str]) -> Vec<Chunk> {
     merged
         .into_iter()
         .enumerate()
-        .map(|(i, (heading, content))| Chunk {
-            index: i,
-            heading,
-            content,
+        .map(|(i, (heading_pair, content))| {
+            let (level, heading) = match heading_pair {
+                Some((lvl, text)) => (Some(lvl), Some(text)),
+                None => (None, None),
+            };
+            Chunk {
+                index: i,
+                heading,
+                level,
+                content,
+            }
         })
         .collect()
 }
 
-fn strip_heading(line: &str) -> Option<String> {
+fn strip_heading(line: &str) -> Option<(u8, String)> {
     let trimmed = line.trim();
     if let Some(rest) = trimmed.strip_prefix("### ") {
-        Some(rest.trim().to_string())
+        Some((3, rest.trim().to_string()))
     } else {
         trimmed
             .strip_prefix("## ")
-            .map(|rest| rest.trim().to_string())
+            .map(|rest| (2, rest.trim().to_string()))
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(md: &str) -> ParsedDocument {
+        MarkdownParser.parse(md, "test.md", &[])
+    }
+
+    #[test]
+    fn test_strip_heading_returns_h2_level() {
+        let result = strip_heading("## Foo");
+        assert_eq!(result, Some((2, "Foo".to_string())));
+    }
+
+    #[test]
+    fn test_strip_heading_returns_h3_level() {
+        let result = strip_heading("### Bar");
+        assert_eq!(result, Some((3, "Bar".to_string())));
+    }
+
+    #[test]
+    fn test_strip_heading_no_heading_returns_none() {
+        assert_eq!(strip_heading("plain text"), None);
+        assert_eq!(strip_heading("# H1 ignored"), None);
+        assert_eq!(strip_heading("#### too deep"), None);
+    }
+
+    #[test]
+    fn test_chunk_with_h2_heading_has_level_2() {
+        let md = "## Section\n\nbody enough body enough body enough body enough body";
+        let doc = parse(md);
+        assert_eq!(doc.chunks.len(), 1);
+        assert_eq!(doc.chunks[0].heading.as_deref(), Some("Section"));
+        assert_eq!(doc.chunks[0].level, Some(2));
+    }
+
+    #[test]
+    fn test_chunk_with_h3_heading_has_level_3() {
+        let md = "### Sub\n\nbody enough body enough body enough body enough body";
+        let doc = parse(md);
+        assert_eq!(doc.chunks.len(), 1);
+        assert_eq!(doc.chunks[0].level, Some(3));
+    }
+
+    #[test]
+    fn test_chunk_no_heading_has_level_none() {
+        let md = "leading prose without heading enough body to avoid 50-char merge";
+        let doc = parse(md);
+        assert_eq!(doc.chunks.len(), 1);
+        assert!(doc.chunks[0].heading.is_none());
+        assert!(doc.chunks[0].level.is_none());
+    }
+
+    #[test]
+    fn test_50char_merge_preserves_first_heading_level() {
+        let md = "\
+## Big
+
+short.
+
+### Sub
+
+larger body enough enough enough enough enough enough enough.";
+        let doc = parse(md);
+        let merged = doc.chunks.first().expect("expected at least one chunk");
+        assert_eq!(merged.heading.as_deref(), Some("Big"));
+        assert_eq!(merged.level, Some(2));
     }
 }

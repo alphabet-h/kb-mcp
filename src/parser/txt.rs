@@ -32,6 +32,7 @@ impl Parser for TxtParser {
             vec![Chunk {
                 index: 0,
                 heading: None,
+                level: None,
                 content: body,
             }]
         };

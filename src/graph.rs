@@ -374,6 +374,7 @@ mod tests {
             doc_id,
             0,
             Some(heading),
+            None,
             content,
             &dummy_embedding(val),
             1.0,
@@ -568,10 +569,26 @@ mod tests {
         let doc_id = db
             .upsert_document("s.md", Some("T"), None, None, None, &[], None, "hs")
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("h1"), "c1", &dummy_embedding(0.0), 1.0)
-            .unwrap();
-        db.insert_chunk(doc_id, 1, Some("h2"), "c2", &dummy_embedding(0.1), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("h1"),
+            None,
+            "c1",
+            &dummy_embedding(0.0),
+            1.0,
+        )
+        .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            Some("h2"),
+            None,
+            "c2",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
         insert_doc_with_chunk(&db, "x.md", "x", "x", 0.05);
 
         let opts = GraphOptions {
@@ -627,10 +644,26 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", Some("T"), None, None, None, &[], None, "ha")
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("h1"), "c1", &dummy_embedding(0.001), 1.0)
-            .unwrap();
-        db.insert_chunk(doc_id, 1, Some("h2"), "c2", &dummy_embedding(0.002), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("h1"),
+            None,
+            "c1",
+            &dummy_embedding(0.001),
+            1.0,
+        )
+        .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            Some("h2"),
+            None,
+            "c2",
+            &dummy_embedding(0.002),
+            1.0,
+        )
+        .unwrap();
 
         // dedup_by_path=true なら a.md は 1 つだけ
         let opts_dedup = GraphOptions {

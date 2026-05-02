@@ -334,6 +334,7 @@ impl Database {
                 document_id   INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
                 chunk_index   INTEGER NOT NULL,
                 heading       TEXT,
+                level         INTEGER,
                 content       TEXT NOT NULL,
                 token_count   INTEGER,
                 quality_score REAL NOT NULL DEFAULT 1.0
@@ -367,6 +368,10 @@ impl Database {
         // legacy DB 互換: chunks.quality_score 列が無ければ ALTER で
         // 追加する (DEFAULT 1.0 で既存行は全件「通過」扱い)。
         self.ensure_quality_score_column()?;
+
+        // legacy DB 互換: chunks.level 列が無ければ ALTER で追加する
+        // (NULL のまま — 値は再 index 時に埋まる)。
+        self.ensure_chunk_level_column()?;
 
         Ok(())
     }
@@ -405,6 +410,32 @@ impl Database {
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chunks_quality ON chunks(quality_score);",
         )?;
+        Ok(())
+    }
+
+    /// `chunks.level` 列が存在しなければ追加する (idempotent)。
+    /// legacy DB を開いても失敗しないよう init 経路から呼ぶ。
+    /// 新規 DB では `CREATE TABLE` 時点で列があるので no-op。
+    /// 既存行の `level` は NULL のまま (再 index で埋まる)。
+    /// race 条件 (2 プロセス同時 open) の場合は duplicate column エラーを吸収。
+    fn ensure_chunk_level_column(&self) -> Result<()> {
+        let has_col: bool = self
+            .conn
+            .prepare("PRAGMA table_info(chunks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|name| name == "level");
+        if !has_col {
+            match self
+                .conn
+                .execute_batch("ALTER TABLE chunks ADD COLUMN level INTEGER;")
+            {
+                Ok(()) => {}
+                // 他プロセスが先に ALTER した場合 (race) はエラーを飲み込んで継続。
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(())
     }
 
@@ -561,6 +592,7 @@ impl Database {
         document_id: i64,
         chunk_index: i32,
         heading: Option<&str>,
+        level: Option<u8>,
         content: &str,
         embedding: &[f32],
         quality_score: f32,
@@ -574,10 +606,15 @@ impl Database {
             None
         };
 
+        // SQLite has no native u8; widen to i64 for the bind. NULL is stored
+        // when `level` is None, matching the column's NULL-able definition
+        // and the legacy-row migration path (chunks indexed before
+        // feature-28 keep `level = NULL` until re-indexed).
+        let level_bind = level.map(|l| l as i64);
         self.conn.execute(
-            "INSERT INTO chunks (document_id, chunk_index, heading, content, token_count, quality_score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![document_id, chunk_index, heading, content, token_count, quality_score],
+            "INSERT INTO chunks (document_id, chunk_index, heading, level, content, token_count, quality_score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![document_id, chunk_index, heading, level_bind, content, token_count, quality_score],
         )?;
         let chunk_id = self.conn.last_insert_rowid();
 
@@ -1472,6 +1509,7 @@ mod tests {
             id1,
             0,
             Some("Intro"),
+            None,
             "Hello MCP",
             &dummy_embedding(0.1),
             1.0,
@@ -1548,8 +1586,16 @@ mod tests {
                 "hash_del",
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "some content", &dummy_embedding(0.5), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            None,
+            None,
+            "some content",
+            &dummy_embedding(0.5),
+            1.0,
+        )
+        .unwrap();
         assert_eq!(db.document_count().unwrap(), 1);
         assert_eq!(db.chunk_count().unwrap(), 1);
 
@@ -1584,13 +1630,22 @@ mod tests {
             doc_id,
             0,
             Some("Intro"),
+            None,
             "hello",
             &dummy_embedding(0.1),
             1.0,
         )
         .unwrap();
-        db.insert_chunk(doc_id, 1, Some("Body"), "world", &dummy_embedding(0.2), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            Some("Body"),
+            None,
+            "world",
+            &dummy_embedding(0.2),
+            1.0,
+        )
+        .unwrap();
 
         // No filter path
         let hits = db
@@ -1636,13 +1691,22 @@ mod tests {
             doc_id,
             0,
             Some("high"),
+            None,
             "rich body with plenty of content",
             &dummy_embedding(0.1),
             1.0,
         )
         .unwrap();
-        db.insert_chunk(doc_id, 1, Some("low"), "stub", &dummy_embedding(0.11), 0.1)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            Some("low"),
+            None,
+            "stub",
+            &dummy_embedding(0.11),
+            0.1,
+        )
+        .unwrap();
 
         // threshold=0.0: 両方返る (既存挙動)
         let hits = db
@@ -1688,11 +1752,12 @@ mod tests {
             .upsert_document("b.md", None, None, None, None, &[], None, "h")
             .unwrap();
         // 本当はスタブ (短い定型) だが quality_score=1.0 で insert
-        db.insert_chunk(doc_id, 0, None, "TBD", &dummy_embedding(0.1), 1.0)
+        db.insert_chunk(doc_id, 0, None, None, "TBD", &dummy_embedding(0.1), 1.0)
             .unwrap();
         db.insert_chunk(
             doc_id,
             1,
+            None,
             None,
             "plenty of informative content indeed, long enough to avoid penalties",
             &dummy_embedding(0.2),
@@ -1722,8 +1787,16 @@ mod tests {
                 "hash_same",
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, Some("H"), "content", &dummy_embedding(0.1), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("H"),
+            None,
+            "content",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
         assert_eq!(db.chunk_count().unwrap(), 1);
 
         // rename
@@ -1817,6 +1890,7 @@ mod tests {
             doc_id,
             0,
             Some("intro"),
+            None,
             "initial body",
             &dummy_embedding(0.1),
             1.0,
@@ -1836,6 +1910,7 @@ mod tests {
                 doc_id,
                 0,
                 Some("new"),
+                None,
                 "new body",
                 &dummy_embedding(0.2),
                 1.0,
@@ -1867,6 +1942,7 @@ mod tests {
             doc_id,
             0,
             Some("intro"),
+            None,
             "initial body",
             &dummy_embedding(0.1),
             1.0,
@@ -1881,6 +1957,7 @@ mod tests {
                 doc_id,
                 0,
                 Some("new"),
+                None,
                 "new body",
                 &dummy_embedding(0.2),
                 1.0,
@@ -1912,9 +1989,9 @@ mod tests {
         let doc_id = db
             .upsert_document("c.md", None, None, None, None, &[], None, "h")
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "x", &dummy_embedding(0.1), 0.9)
+        db.insert_chunk(doc_id, 0, None, None, "x", &dummy_embedding(0.1), 0.9)
             .unwrap();
-        db.insert_chunk(doc_id, 1, None, "y", &dummy_embedding(0.2), 0.1)
+        db.insert_chunk(doc_id, 1, None, None, "y", &dummy_embedding(0.2), 0.1)
             .unwrap();
         let (above, below) = db.chunk_count_by_quality(0.5).unwrap();
         assert_eq!(above, 1);
@@ -1940,13 +2017,22 @@ mod tests {
             doc_id,
             0,
             Some("Intro"),
+            None,
             "hello",
             &dummy_embedding(0.1),
             1.0,
         )
         .unwrap();
-        db.insert_chunk(doc_id, 1, Some("Body"), "world", &dummy_embedding(0.2), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            Some("Body"),
+            None,
+            "world",
+            &dummy_embedding(0.2),
+            1.0,
+        )
+        .unwrap();
 
         let out = db.chunks_for_path("deep-dive/mcp/overview.md").unwrap();
         assert_eq!(out.len(), 2);
@@ -1975,7 +2061,7 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", None, None, None, None, &[], None, "h1")
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "x", &dummy_embedding(0.3), 1.0)
+        db.insert_chunk(doc_id, 0, None, None, "x", &dummy_embedding(0.3), 1.0)
             .unwrap();
 
         let chunk_id: i64 = db
@@ -2058,7 +2144,8 @@ mod tests {
             .upsert_document("x.md", Some("x"), None, None, None, &[], None, "h")
             .unwrap();
         let emb: Vec<f32> = vec![0.1; 1024];
-        db.insert_chunk(doc_id, 0, None, "hi", &emb, 1.0).unwrap();
+        db.insert_chunk(doc_id, 0, None, None, "hi", &emb, 1.0)
+            .unwrap();
         assert_eq!(db.chunk_count().unwrap(), 1);
     }
 
@@ -2088,6 +2175,7 @@ mod tests {
                 doc_id,
                 0,
                 Some("Intro"),
+                None,
                 "hello world",
                 &dummy_embedding(0.1),
                 1.0,
@@ -2109,7 +2197,7 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "hi", &dummy_embedding(0.1), 1.0)
+        db.insert_chunk(doc_id, 0, None, None, "hi", &dummy_embedding(0.1), 1.0)
             .unwrap();
         assert_eq!(fts_count(&db), 1);
 
@@ -2123,8 +2211,16 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h1")
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "old content", &dummy_embedding(0.1), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            None,
+            None,
+            "old content",
+            &dummy_embedding(0.1),
+            1.0,
+        )
+        .unwrap();
         assert_eq!(fts_count(&db), 1);
 
         // 同一 path を異なる content_hash で再 upsert → 旧 chunk/FTS は消える
@@ -2145,6 +2241,7 @@ mod tests {
                 doc_id,
                 0,
                 Some("Errors"),
+                None,
                 "E0382 is a move error",
                 &dummy_embedding(0.5),
                 1.0,
@@ -2156,6 +2253,7 @@ mod tests {
                 doc_id,
                 1,
                 Some("Other"),
+                None,
                 "unrelated content here",
                 &dummy_embedding(0.5),
                 1.0,
@@ -2181,7 +2279,7 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "content", &dummy_embedding(0.1), 1.0)
+        db.insert_chunk(doc_id, 0, None, None, "content", &dummy_embedding(0.1), 1.0)
             .unwrap();
 
         // 2 文字クエリ → sanitize が None → vec-only
@@ -2203,6 +2301,7 @@ mod tests {
                 doc_id,
                 0,
                 None,
+                None,
                 "E0382 moved value",
                 &dummy_embedding(0.1),
                 1.0,
@@ -2212,6 +2311,7 @@ mod tests {
             .insert_chunk(
                 doc_id,
                 1,
+                None,
                 None,
                 "unrelated note",
                 &dummy_embedding(0.9),
@@ -2240,6 +2340,7 @@ mod tests {
                 doc_id,
                 0,
                 Some("Introduction"),
+                None,
                 "This paragraph contains the kibarashi_unique_keyword only in content text",
                 &dummy_embedding(0.5),
                 1.0,
@@ -2251,6 +2352,7 @@ mod tests {
                 doc_id,
                 1,
                 Some("About kibarashi_unique_keyword"),
+                None,
                 "short body here.",
                 &dummy_embedding(0.5),
                 1.0,
@@ -2283,7 +2385,7 @@ mod tests {
             let doc_id = db
                 .upsert_document(&path, Some("x"), None, Some(cat), None, &[], None, "h")
                 .unwrap();
-            db.insert_chunk(doc_id, 0, None, "content", &dummy_embedding(0.5), 1.0)
+            db.insert_chunk(doc_id, 0, None, None, "content", &dummy_embedding(0.5), 1.0)
                 .unwrap();
         }
 
@@ -2311,13 +2413,22 @@ mod tests {
             doc_id,
             0,
             Some("見出し"),
+            None,
             "E0382 は value moved エラーです",
             &dummy_embedding(0.7),
             1.0,
         )
         .unwrap();
-        db.insert_chunk(doc_id, 1, None, "unrelated", &dummy_embedding(0.9), 1.0)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            1,
+            None,
+            None,
+            "unrelated",
+            &dummy_embedding(0.9),
+            1.0,
+        )
+        .unwrap();
 
         // 日本語 3 文字 "エラー" が trigram でヒットする
         let hits = db
@@ -2345,6 +2456,7 @@ mod tests {
             doc_id,
             0,
             Some("H1"),
+            None,
             "hello world",
             &dummy_embedding(0.1),
             1.0,
@@ -2354,6 +2466,7 @@ mod tests {
             doc_id,
             1,
             Some("H2"),
+            None,
             "second chunk",
             &dummy_embedding(0.2),
             1.0,
@@ -2380,7 +2493,7 @@ mod tests {
         let doc_id = db
             .upsert_document("a.md", Some("a"), None, None, None, &[], None, "h")
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "hi", &dummy_embedding(0.1), 1.0)
+        db.insert_chunk(doc_id, 0, None, None, "hi", &dummy_embedding(0.1), 1.0)
             .unwrap();
         assert_eq!(db.chunk_count().unwrap(), 1);
         assert_eq!(db.document_count().unwrap(), 1);
@@ -2400,7 +2513,8 @@ mod tests {
             .upsert_document("b.md", Some("b"), None, None, None, &[], None, "h")
             .unwrap();
         let emb: Vec<f32> = vec![0.2; 1024];
-        db.insert_chunk(doc_id2, 0, None, "hi2", &emb, 1.0).unwrap();
+        db.insert_chunk(doc_id2, 0, None, None, "hi2", &emb, 1.0)
+            .unwrap();
         assert_eq!(db.chunk_count().unwrap(), 1);
     }
 
@@ -2434,7 +2548,7 @@ mod tests {
                 "h",
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "hi", &dummy_embedding(0.1), 1.0)
+        db.insert_chunk(doc_id, 0, None, None, "hi", &dummy_embedding(0.1), 1.0)
             .unwrap();
         assert!(db.read_embedding_meta().unwrap().is_none());
 
@@ -2609,7 +2723,7 @@ mod tests {
                 "h1",
             )
             .unwrap();
-        db.insert_chunk(doc_id, 0, None, "body", &dummy_embedding(0.1), 1.0)
+        db.insert_chunk(doc_id, 0, None, None, "body", &dummy_embedding(0.1), 1.0)
             .unwrap();
 
         let hits = db
@@ -2629,6 +2743,7 @@ mod tests {
             db.insert_chunk(
                 id,
                 0,
+                None,
                 None,
                 "body",
                 &dummy_embedding(0.1 + i as f32 * 0.01),
@@ -2670,6 +2785,7 @@ mod tests {
             db.insert_chunk(
                 id,
                 0,
+                None,
                 None,
                 "body",
                 &dummy_embedding(0.1 + i as f32 * 0.01),
@@ -2729,6 +2845,7 @@ mod tests {
                 id,
                 0,
                 None,
+                None,
                 "body",
                 &dummy_embedding(0.1 + i as f32 * 0.01),
                 1.0,
@@ -2768,6 +2885,7 @@ mod tests {
             db.insert_chunk(
                 id,
                 0,
+                None,
                 None,
                 "body",
                 &dummy_embedding(0.1 + i as f32 * 0.01),
@@ -2820,7 +2938,7 @@ mod tests {
                     &format!("h{i}"),
                 )
                 .unwrap();
-            db.insert_chunk(id, 0, None, "body", &dummy_embedding(emb_seed), 1.0)
+            db.insert_chunk(id, 0, None, None, "body", &dummy_embedding(emb_seed), 1.0)
                 .unwrap();
         }
         let include = globset::GlobSetBuilder::new()
@@ -2863,6 +2981,7 @@ mod tests {
             db.insert_chunk(
                 id,
                 0,
+                None,
                 None,
                 "kibarashi_unique_keyword body",
                 &dummy_embedding(0.1 + i as f32 * 0.01),
@@ -2925,6 +3044,7 @@ mod tests {
                 id,
                 0,
                 None,
+                None,
                 "kibarashi_unique_keyword body",
                 &dummy_embedding(0.1 + i as f32 * 0.01),
                 1.0,
@@ -2964,5 +3084,150 @@ mod tests {
         };
         let h: SearchHit = r.into();
         assert!(h.match_spans.is_none());
+    }
+
+    /// Local helper: create a temp directory unique to this test process /
+    /// invocation. Mirrors the pattern used in `tests/validate_cli.rs`
+    /// (`tempfile` crate is intentionally avoided per project policy).
+    struct TempPath {
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn tempdir_for_test() -> TempPath {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("kb-mcp-test-{pid}-{nanos}"));
+        std::fs::create_dir_all(&p).unwrap();
+        TempPath { path: p }
+    }
+
+    #[test]
+    fn test_ensure_chunk_level_column_idempotent() {
+        let tmp = tempdir_for_test();
+        let db_path = tmp.path.join("test.db");
+        let db_path_str = db_path.to_str().expect("utf-8 path");
+        // 新規作成 → ensure を 2 回呼ぶ (race / 重複呼びを模す)。
+        // 1 回目は init で列が既に作られているので no-op、2 回目も no-op で成功。
+        {
+            let db = Database::open(db_path_str).expect("open");
+            db.ensure_chunk_level_column().expect("first ensure");
+            db.ensure_chunk_level_column().expect("idempotent ensure");
+        }
+        // 列が存在することを PRAGMA で確認 (db wrapper を経由せず直接 reopen)。
+        let conn = rusqlite::Connection::open(&db_path).expect("re-open");
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(chunks)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "level"),
+            "level column missing: {cols:?}"
+        );
+    }
+
+    /// Roundtrip: a `level` value passed to `insert_chunk` lands in the
+    /// `chunks.level` column verbatim. Guards against future refactors of the
+    /// INSERT SQL silently dropping the bind. Re-opens the DB with a raw
+    /// rusqlite connection so we exercise the on-disk row, not just the
+    /// in-memory wrapper.
+    #[test]
+    fn test_insert_chunk_persists_level() {
+        let tmp = tempdir_for_test();
+        let db_path = tmp.path.join("test.db");
+        let db_path_str = db_path.to_str().expect("utf-8 path");
+
+        let chunk_id = {
+            let db = Database::open(db_path_str).expect("open");
+            // vec_chunks (sqlite-vec virtual table) is created lazily by
+            // `verify_embedding_meta`. Without it the INSERT into vec_chunks
+            // inside `insert_chunk` fails with "no such table".
+            db.verify_embedding_meta("bge-small-en-v1.5", 384)
+                .expect("verify_embedding_meta");
+            let doc_id = db
+                .upsert_document(
+                    "notes/level.md",
+                    Some("Level Test"),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    "hash_level",
+                )
+                .expect("upsert document");
+            db.insert_chunk(
+                doc_id,
+                0,
+                Some("Sec"),
+                Some(2),
+                "body",
+                &dummy_embedding(0.1),
+                1.0,
+            )
+            .expect("insert chunk")
+        };
+
+        // Re-open via raw rusqlite to confirm the value is on disk.
+        let conn = rusqlite::Connection::open(&db_path).expect("re-open");
+        let level: Option<i64> = conn
+            .query_row(
+                "SELECT level FROM chunks WHERE id = ?1",
+                rusqlite::params![chunk_id],
+                |row| row.get(0),
+            )
+            .expect("select level");
+        assert_eq!(level, Some(2));
+    }
+
+    /// Companion to the above: passing `None` for `level` stores SQL NULL
+    /// (this is the path used by .txt and frontmatter-only / pre-heading
+    /// chunks, and also by every test fixture site that doesn't care).
+    #[test]
+    fn test_insert_chunk_persists_level_none_as_null() {
+        let tmp = tempdir_for_test();
+        let db_path = tmp.path.join("test.db");
+        let db_path_str = db_path.to_str().expect("utf-8 path");
+
+        let chunk_id = {
+            let db = Database::open(db_path_str).expect("open");
+            db.verify_embedding_meta("bge-small-en-v1.5", 384)
+                .expect("verify_embedding_meta");
+            let doc_id = db
+                .upsert_document(
+                    "notes/level-none.md",
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    "hash_level_none",
+                )
+                .expect("upsert document");
+            db.insert_chunk(doc_id, 0, None, None, "body", &dummy_embedding(0.2), 1.0)
+                .expect("insert chunk")
+        };
+
+        let conn = rusqlite::Connection::open(&db_path).expect("re-open");
+        let level: Option<i64> = conn
+            .query_row(
+                "SELECT level FROM chunks WHERE id = ?1",
+                rusqlite::params![chunk_id],
+                |row| row.get(0),
+            )
+            .expect("select level");
+        assert_eq!(level, None);
     }
 }

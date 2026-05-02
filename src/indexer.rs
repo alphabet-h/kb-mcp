@@ -356,6 +356,7 @@ fn index_single_disk_entry(
             doc_id,
             chunk.index as i32,
             chunk.heading.as_deref(),
+            chunk.level,
             &chunk.content,
             embedding,
             score,
@@ -908,8 +909,16 @@ mod tests {
             )
             .unwrap();
         let emb = vec![0.0f32; 384];
-        db.insert_chunk(doc_id, 0, Some("intro"), "Hello world body.", &emb, 0.9)
-            .unwrap();
+        db.insert_chunk(
+            doc_id,
+            0,
+            Some("intro"),
+            None,
+            "Hello world body.",
+            &emb,
+            0.9,
+        )
+        .unwrap();
 
         // (2) 既存 chunks を比較用に取得
         let before = db.chunk_texts_for_path("notes/foo.md").unwrap();
