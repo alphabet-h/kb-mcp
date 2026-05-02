@@ -5,6 +5,7 @@ pub mod eval;
 pub mod graph;
 pub mod indexer;
 pub mod markdown;
+pub mod mmr;
 pub mod parser;
 pub mod quality;
 pub mod schema;
