@@ -4,7 +4,7 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-05-02
+## [0.7.0] - 2026-05-03
 
 ### Added
 - MMR (Maximal Marginal Relevance) diversity re-rank stage
