@@ -1106,18 +1106,21 @@ impl Database {
     /// せず候補プール全件を返す。MMR の候補プール用。
     ///
     /// 既存 `search_hybrid_candidates` の戻り値型 `Vec<(i64, SearchResult)>`
-    /// と互換 (truncate しないだけの違い)。`limit` を取らないので、
-    /// candidates は固定 50 を使う (= bounded 側の `.max(50)` 床と一致)。
-    /// MMR に対しては `top-k` が小さい (~10) 想定なので 50 件のプールで十分。
-    /// `top-k` が大きい場合の拡張は将来 candidates パラメタを足せば対応可能だが、
-    /// 現状のユースケース (Task 2.9 MMR 統合) では不要。
+    /// と互換 (truncate しないだけの違い)。candidates 取得幅は呼び出し側が
+    /// `desired_candidates` で指定する (典型: `limit.saturating_mul(5).max(50)`、
+    /// = bounded 側の overfetch ロジックと同じ)。
+    ///
+    /// MMR の場合、`top-k` が大きい (e.g. user が limit=100 を要求した) ケースに
+    /// 対応するため、固定 50 ハードキャップは置かない。呼び出し側が pool size を
+    /// 決める責務を持つ。
     pub fn search_hybrid_candidates_unbounded(
         &self,
         query_text: &str,
         query_embedding: &[f32],
+        desired_candidates: u32,
         filters: &SearchFilters<'_>,
     ) -> Result<Vec<(i64, SearchResult)>> {
-        let candidates = 50_u32;
+        let candidates = desired_candidates.max(50);
         let vec_hits = self.search_vec_candidates(query_embedding, candidates, filters)?;
         let fts_hits = self.search_fts_candidates(query_text, candidates, filters)?;
 
@@ -2597,7 +2600,7 @@ mod tests {
             .search_hybrid_candidates(query_text, &query_emb, 2, &filters)
             .unwrap();
         let unbounded = db
-            .search_hybrid_candidates_unbounded(query_text, &query_emb, &filters)
+            .search_hybrid_candidates_unbounded(query_text, &query_emb, 50, &filters)
             .unwrap();
 
         assert!(

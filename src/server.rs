@@ -731,10 +731,12 @@ pub(crate) fn run_search_pipeline(
     let use_rerank = reranker.is_some();
 
     // 1. RRF candidate pool. MMR on → unbounded (MMR が候補プール全件から
-    //    多様化選抜)、reranker on → overfetch (`limit*5.max(50)`)、どちらも
-    //    off → 最小コストで `limit` 件 (invariant #3 の bit-exact path)。
+    //    多様化選抜、user の `limit` を反映して overfetch を計算)、reranker
+    //    on → overfetch (`limit*5.max(50)`)、どちらも off → 最小コストで
+    //    `limit` 件 (invariant #3 の bit-exact path)。
+    let mmr_pool_size = limit.saturating_mul(5).max(50);
     let candidates_pool: Vec<(i64, crate::db::SearchResult)> = if resolved.mmr_enabled {
-        db.search_hybrid_candidates_unbounded(query, query_embedding, filters)?
+        db.search_hybrid_candidates_unbounded(query, query_embedding, mmr_pool_size, filters)?
     } else if use_rerank {
         db.search_hybrid_candidates(
             query,
@@ -749,9 +751,8 @@ pub(crate) fn run_search_pipeline(
     // 2. Optional reranker。MMR off の reranker 入力 limit は `limit` (元の挙動
     //    保持)、MMR on のときは MMR 側が select するので候補プール全体を保持
     //    する。**P1 fix**: ここで `u32::MAX` を渡すと `Vec::with_capacity(u32::MAX)`
-    //    で OOM 直行するので、候補プールサイズを上限とする (`unbounded` でも
-    //    `search_hybrid_candidates_unbounded` 内部の candidates=50 で頭打ちの
-    //    ため、現実的には ≤ 50)。
+    //    で OOM 直行するので、候補プールサイズを上限とする
+    //    (`limit*5.max(50)` で実用上 limit に追従)。
     let reranker_input_limit = if resolved.mmr_enabled {
         candidates_pool.len() as u32
     } else {
