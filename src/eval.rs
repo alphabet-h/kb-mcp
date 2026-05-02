@@ -433,6 +433,15 @@ pub struct RunOpts {
     pub write_history: bool,
     pub history_size: usize,
     pub regression_threshold: f64,
+    /// per-call overrides (CLI `--mmr` / `--mmr-lambda` etc).
+    /// CLI builds this from `EvalCliArgs`. Programmatic callers can pass
+    /// `SearchOverrides::default()` to get toml-only behavior.
+    pub overrides: crate::config::SearchOverrides,
+    /// `[search]` toml section snapshot. Combined with `overrides` to
+    /// resolve the effective MMR / parent_retriever config per query.
+    /// Programmatic callers can pass `SearchConfig::default()` to get
+    /// MMR-off behavior.
+    pub search_config: crate::config::SearchConfig,
 }
 
 // ---------- Formatters ----------
@@ -688,22 +697,21 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
             q.id.clone()
                 .unwrap_or_else(|| q.query.chars().take(32).collect());
         let qe = embedder.embed_single(&q.query)?;
-        let results = if let Some(r) = reranker.as_mut() {
-            let cands = db.search_hybrid_candidates(
-                &q.query,
-                &qe,
-                (max_k as u32).saturating_mul(5).max(50),
-                &crate::db::SearchFilters::default(),
-            )?;
-            r.rerank_candidates(&q.query, cands, max_k as u32)?
-        } else {
-            db.search_hybrid(
-                &q.query,
-                &qe,
-                max_k as u32,
-                &crate::db::SearchFilters::default(),
-            )?
-        };
+        // Eval shares the MMR-aware pipeline with MCP / CLI search so the
+        // golden YAML reflects the actual production retrieval (e.g. when
+        // `[search.mmr] enabled = true`).
+        let pipeline = crate::server::run_search_pipeline(
+            &db,
+            reranker.as_mut(),
+            &q.query,
+            &qe,
+            max_k as u32,
+            &crate::db::SearchFilters::default(),
+            &opts.overrides,
+            &opts.search_config,
+        )?;
+        let results: Vec<crate::db::SearchResult> =
+            pipeline.into_iter().map(|(_, sr)| sr).collect();
         let top_k: Vec<HitRecord> = results
             .into_iter()
             .enumerate()
@@ -725,6 +733,22 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
     }
 
     let aggregate = aggregate_metrics(&per_query, &opts.k_values);
+
+    // ConfigFingerprint.mmr is built from the **effective** resolved config
+    // (toml + per-call overrides), not just the toml. This matches what the
+    // pipeline actually executed for each query, so a `--mmr true` CLI flag
+    // gets recorded and a future re-run with the flag dropped (= MMR off)
+    // does not silently get treated as a "compatible" baseline.
+    let resolved = opts.overrides.resolve(&opts.search_config);
+    let mmr_fp = if resolved.mmr_enabled {
+        Some(MmrFingerprint {
+            lambda: resolved.mmr_lambda,
+            same_doc_penalty: resolved.mmr_same_doc_penalty,
+        })
+    } else {
+        None
+    };
+
     Ok(EvalRun {
         timestamp: Utc::now(),
         fingerprint: ConfigFingerprint {
@@ -737,13 +761,7 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
             limit: opts.limit,
             k_values: opts.k_values.clone(),
             golden_hash,
-            // TODO(feature-28 PR-2 Task 2.11/2.12): wire from cfg.search.mmr via RunOpts.
-            // 現状は production の eval pipeline が Config を保持していないため
-            // 常に None。これによりユーザが `[search.mmr] enabled = true` で
-            // eval を回しても fingerprint には反映されず、過去 baseline と
-            // 互換扱いになってしまう。RunOpts に Config or SearchConfig を
-            // 通すか、ConfigFingerprint::from_config を呼ぶよう書き換える。
-            mmr: None,
+            mmr: mmr_fp,
         },
         per_query,
         aggregate,

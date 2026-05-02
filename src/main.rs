@@ -561,30 +561,35 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Commands::Search(SearchCliArgs {
-            query,
-            kb_path,
-            model,
-            reranker,
-            limit,
-            category,
-            topic,
-            format,
-            min_quality,
-            include_low_quality,
-            path_globs,
-            tags_any,
-            tags_all,
-            date_from,
-            date_to,
-            min_confidence_ratio,
-            // MMR / parent-retriever flags are parsed-but-not-yet-pipeline-active
-            // (Task 2.9 wires them through `SearchOverrides` into the search path).
-            mmr: _,
-            mmr_lambda: _,
-            mmr_same_doc_penalty: _,
-            parent_retriever: _,
-        }) => {
+        Commands::Search(args) => {
+            // Build overrides BEFORE destructuring `args` so that the `&args`
+            // borrow is short-lived (we still need owned fields below).
+            let overrides: crate::config::SearchOverrides = (&args).into();
+
+            let SearchCliArgs {
+                query,
+                kb_path,
+                model,
+                reranker,
+                limit,
+                category,
+                topic,
+                format,
+                min_quality,
+                include_low_quality,
+                path_globs,
+                tags_any,
+                tags_all,
+                date_from,
+                date_to,
+                min_confidence_ratio,
+                // MMR / parent-retriever flags are wired through `overrides` above.
+                mmr: _,
+                mmr_lambda: _,
+                mmr_same_doc_penalty: _,
+                parent_retriever: _,
+            } = args;
+
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
             let reranker_choice = reranker.or(cfg.reranker).unwrap_or_default();
@@ -626,24 +631,29 @@ fn main() -> anyhow::Result<()> {
                 date_to: date_to.as_deref(),
             };
 
-            let results = if reranker_choice.is_enabled() {
-                let candidates = db.search_hybrid_candidates(
-                    &query,
-                    &query_embedding,
-                    limit.saturating_mul(5).max(50),
-                    &filters,
-                )?;
-                if let Some(mut r) = embedder::Reranker::try_new(reranker_choice)? {
-                    r.rerank_candidates(&query, candidates, limit)?
-                } else {
-                    db.search_hybrid(&query, &query_embedding, limit, &filters)?
-                }
+            // Both CLI and MCP go through the shared MMR-aware pipeline so the
+            // `--mmr` / `--mmr-lambda` / `--mmr-same-doc-penalty` /
+            // `--parent-retriever` flags actually take effect for CLI callers.
+            let toml_search = cfg.search.clone().unwrap_or_default();
+            let mut reranker_obj: Option<embedder::Reranker> = if reranker_choice.is_enabled() {
+                embedder::Reranker::try_new(reranker_choice)?
             } else {
-                db.search_hybrid(&query, &query_embedding, limit, &filters)?
+                None
             };
+            let pipeline = server::run_search_pipeline(
+                &db,
+                reranker_obj.as_mut(),
+                &query,
+                &query_embedding,
+                limit,
+                &filters,
+                &overrides,
+                &toml_search,
+            )?;
+            let results: Vec<db::SearchResult> = pipeline.into_iter().map(|(_, sr)| sr).collect();
 
             let effective_ratio = min_confidence_ratio
-                .or_else(|| cfg.search.as_ref().and_then(|s| s.min_confidence_ratio))
+                .or(toml_search.min_confidence_ratio)
                 .unwrap_or(1.5);
 
             print_search_results(
@@ -731,25 +741,30 @@ fn main() -> anyhow::Result<()> {
             )?;
             std::process::exit(exit);
         }
-        Commands::Eval(EvalCliArgs {
-            kb_path,
-            golden,
-            model,
-            reranker,
-            k,
-            limit,
-            format,
-            no_history,
-            no_diff,
-            no_color,
-            fail_on_regression,
-            // MMR / parent-retriever flags are parsed-but-not-yet-pipeline-active
-            // (Task 2.9 wires them through `SearchOverrides` into eval).
-            mmr: _,
-            mmr_lambda: _,
-            mmr_same_doc_penalty: _,
-            parent_retriever: _,
-        }) => {
+        Commands::Eval(args) => {
+            // Build overrides BEFORE destructuring `args` so the `&args` borrow
+            // is short-lived (we still need owned fields below).
+            let overrides: crate::config::SearchOverrides = (&args).into();
+
+            let EvalCliArgs {
+                kb_path,
+                golden,
+                model,
+                reranker,
+                k,
+                limit,
+                format,
+                no_history,
+                no_diff,
+                no_color,
+                fail_on_regression,
+                // MMR / parent-retriever flags are wired through `overrides` above.
+                mmr: _,
+                mmr_lambda: _,
+                mmr_same_doc_penalty: _,
+                parent_retriever: _,
+            } = args;
+
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model_choice = model.or(cfg.model).unwrap_or_default();
             let reranker_choice = reranker.or(cfg.reranker).unwrap_or_default();
@@ -775,6 +790,8 @@ fn main() -> anyhow::Result<()> {
                 write_history: !no_history,
                 history_size,
                 regression_threshold,
+                overrides,
+                search_config: cfg.search.clone().unwrap_or_default(),
             };
 
             let run = eval::run(&opts)?;
