@@ -480,10 +480,11 @@ impl KbServer {
             // 設計通り (lambda=0.7 = relevance 寄り) に働く。同点の場合
             // (max == min) は全 0 に潰れて diversity 項のみで選抜される。
             if !mmr_cands.is_empty() {
-                let (min_rel, max_rel) = mmr_cands.iter().fold(
-                    (f32::INFINITY, f32::NEG_INFINITY),
-                    |(lo, hi), c| (lo.min(c.relevance_score), hi.max(c.relevance_score)),
-                );
+                let (min_rel, max_rel) = mmr_cands
+                    .iter()
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), c| {
+                        (lo.min(c.relevance_score), hi.max(c.relevance_score))
+                    });
                 let range = max_rel - min_rel;
                 if range > f32::EPSILON {
                     for c in &mut mmr_cands {

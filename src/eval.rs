@@ -737,6 +737,12 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
             limit: opts.limit,
             k_values: opts.k_values.clone(),
             golden_hash,
+            // TODO(feature-28 PR-2 Task 2.11/2.12): wire from cfg.search.mmr via RunOpts.
+            // 現状は production の eval pipeline が Config を保持していないため
+            // 常に None。これによりユーザが `[search.mmr] enabled = true` で
+            // eval を回しても fingerprint には反映されず、過去 baseline と
+            // 互換扱いになってしまう。RunOpts に Config or SearchConfig を
+            // 通すか、ConfigFingerprint::from_config を呼ぶよう書き換える。
             mmr: None,
         },
         per_query,
