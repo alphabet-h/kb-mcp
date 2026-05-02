@@ -710,16 +710,37 @@ pub fn run(opts: &RunOpts) -> Result<EvalRun> {
             &opts.overrides,
             &opts.search_config,
         )?;
-        let results: Vec<crate::db::SearchResult> =
-            pipeline.into_iter().map(|(_, sr)| sr).collect();
-        let top_k: Vec<HitRecord> = results
+
+        // chunk_id を維持したまま SearchHit に変換し、Parent retriever 段を
+        // 適用する (enabled = false なら content / expanded_from は触らない)。
+        // eval は match_spans を計算しないので、Parent retriever 後の content
+        // のみ使う。HitRecord は path / heading / score / rank しか見ないため
+        // 表示拡張された content / expanded_from は読み捨てるが、retrieval
+        // pipeline 全段を実本番と揃えることで「eval 上は良いが production で
+        // parent enabled にすると挙動が変わる」を防ぐ。
+        let hits_with_id: Vec<(i64, crate::db::SearchHit)> = pipeline
+            .into_iter()
+            .map(|(id, sr)| (id, sr.into()))
+            .collect();
+        let resolved = opts.overrides.resolve(&opts.search_config);
+        let parent_params = crate::parent::ParentRetrieverParams {
+            whole_doc_threshold_tokens: resolved.parent_whole_doc_threshold_tokens,
+            max_expanded_tokens: resolved.parent_max_expanded_tokens,
+        };
+        let hits: Vec<crate::db::SearchHit> = crate::parent::apply_parent_retriever(
+            hits_with_id,
+            &db,
+            resolved.parent_retriever_enabled,
+            parent_params,
+        );
+        let top_k: Vec<HitRecord> = hits
             .into_iter()
             .enumerate()
-            .map(|(i, r)| HitRecord {
+            .map(|(i, h)| HitRecord {
                 rank: i + 1,
-                path: r.path,
-                heading: r.heading,
-                score: r.score,
+                path: h.path,
+                heading: h.heading,
+                score: h.score,
             })
             .collect();
         let metrics = compute_query_metrics(&q.expected, &top_k, &opts.k_values);

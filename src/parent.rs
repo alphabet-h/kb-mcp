@@ -22,6 +22,38 @@ pub struct ParentRetrieverParams {
     pub max_expanded_tokens: u32,
 }
 
+/// `Vec<(chunk_id, SearchHit)>` 全件に対して Parent retriever を適用する。
+///
+/// - `enabled = false` なら入力をそのまま `Vec<SearchHit>` に変換して返す
+///   (chunk_id を捨てるだけで content / expanded_from は触らない)。
+/// - `enabled = true` なら各 hit に対して `expand_parent` を呼び、`content`
+///   と `expanded_from` を rewrite した結果を返す。
+///
+/// 失敗 (DB error 等) があった hit は元の hit を返す (best-effort 拡張)。
+/// `expand_parent` は `SearchHit.match_spans` を defensive に `None` に
+/// クリアするので、呼び出し側は拡張後 `content` に対して
+/// `compute_match_spans` を再計算する責務がある。
+///
+/// 3 caller (MCP server / CLI search / eval) で同じ wire を 3 回書かないため
+/// の共通 helper。eval は match_spans を計算しないが、本 helper の責務外
+/// なので問題ない。
+pub fn apply_parent_retriever(
+    hits: Vec<(i64, SearchHit)>,
+    db: &Database,
+    enabled: bool,
+    params: ParentRetrieverParams,
+) -> Vec<SearchHit> {
+    if !enabled {
+        return hits.into_iter().map(|(_, h)| h).collect();
+    }
+    hits.into_iter()
+        .map(|(chunk_id, hit)| {
+            let fallback = hit.clone();
+            expand_parent(hit, chunk_id, db, params).unwrap_or(fallback)
+        })
+        .collect()
+}
+
 /// 1 hit の `content` を P4 戦略で拡張する。`chunk_id` を起点に DB から
 /// 前後 chunk (or 同 doc 全 chunk) を引き、連結後の `SearchHit` を返す。
 ///

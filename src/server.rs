@@ -400,11 +400,15 @@ impl KbServer {
             }
         };
 
-        // chunk_id を剥がして既存パイプラインに合流。
-        let results: Vec<crate::db::SearchResult> =
-            after_mmr.into_iter().map(|(_, sr)| sr).collect();
+        // chunk_id を維持したまま SearchHit に変換 (Parent retriever 用)。
+        // Parent retriever は relevance を変えないので scores は元 chunk
+        // (= 拡張前) のもので確定させる。
+        let hits_with_id: Vec<(i64, crate::db::SearchHit)> = after_mmr
+            .into_iter()
+            .map(|(id, sr)| (id, sr.into()))
+            .collect();
 
-        let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+        let scores: Vec<f32> = hits_with_id.iter().map(|(_, h)| h.score).collect();
 
         let effective_ratio = match params.min_confidence_ratio {
             Some(v) if v.is_finite() => v.max(0.0),
@@ -419,7 +423,21 @@ impl KbServer {
         };
         let low_confidence = compute_low_confidence(&scores, effective_ratio);
 
-        let mut hits: Vec<SearchHit> = results.into_iter().map(Into::into).collect();
+        // Parent retriever 段。enabled = false なら chunk_id を剥がすだけで
+        // content / expanded_from は触らない (= v0.6.1 と bit-exact 互換)。
+        let resolved = overrides.resolve(&self.search_config);
+        let parent_params = crate::parent::ParentRetrieverParams {
+            whole_doc_threshold_tokens: resolved.parent_whole_doc_threshold_tokens,
+            max_expanded_tokens: resolved.parent_max_expanded_tokens,
+        };
+        let mut hits: Vec<SearchHit> = crate::parent::apply_parent_retriever(
+            hits_with_id,
+            &db,
+            resolved.parent_retriever_enabled,
+            parent_params,
+        );
+        // match_spans は Parent retriever 拡張後の content に対して計算する
+        // (`expand_parent` は defensive に None クリアするので必ず再計算が要る)。
         for h in &mut hits {
             h.match_spans = compute_match_spans(&params.query, &h.content);
         }
@@ -841,9 +859,10 @@ pub(crate) fn run_search_pipeline(
         })
         .collect();
 
-    // 4. Parent retriever は Task 3.x で実装。ここでは noop。
-    let _ = resolved.parent_retriever_enabled;
-
+    // 4. Parent retriever は呼び出し側 (`apply_parent_retriever`) が
+    //    SearchHit 化後に適用する。`run_search_pipeline` の戻り値型
+    //    (`Vec<(i64, SearchResult)>`) を変えずに 3 caller (MCP / CLI / eval)
+    //    で wiring を共有するため、ここでは noop。
     Ok(after_mmr)
 }
 
