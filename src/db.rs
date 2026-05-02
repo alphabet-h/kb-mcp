@@ -279,6 +279,37 @@ pub struct Database {
     conn: Connection,
 }
 
+/// RRF score の HashMap と row HashMap を受け取り、score DESC + id ASC の
+/// 順序で `Vec<(i64, SearchResult)>` を返す。`limit=Some(n)` で上位 n 件に
+/// truncate、`None` なら全件返す (MMR-off bypass / `_unbounded` で利用)。
+///
+/// HashMap iteration の非決定性に依存しないよう、tie-break で id を使い
+/// プラットフォーム / 入力順に依存しない出力を保証する (invariant #1)。
+fn rrf_topk(
+    mut scores: HashMap<i64, f32>,
+    mut rows: HashMap<i64, SearchResult>,
+    limit: Option<u32>,
+) -> Vec<(i64, SearchResult)> {
+    let mut merged: Vec<(i64, f32)> = scores.drain().collect();
+    merged.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    if let Some(n) = limit {
+        merged.truncate(n as usize);
+    }
+    merged
+        .into_iter()
+        .filter_map(|(id, rrf)| {
+            rows.remove(&id).map(|mut r| {
+                r.score = rrf;
+                (id, r)
+            })
+        })
+        .collect()
+}
+
 impl Database {
     /// Open (or create) a file-backed database at `path`.
     pub fn open(path: &str) -> Result<Self> {
@@ -1003,20 +1034,7 @@ impl Database {
             rows.entry(chunk_id).or_insert(row);
         }
 
-        let mut merged: Vec<(i64, f32)> = scores.into_iter().collect();
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        merged.truncate(limit as usize);
-
-        let results = merged
-            .into_iter()
-            .filter_map(|(id, rrf)| {
-                rows.remove(&id).map(|mut r| {
-                    r.score = rrf;
-                    (id, r)
-                })
-            })
-            .collect();
-        Ok(results)
+        Ok(rrf_topk(scores, rows, Some(limit)))
     }
 
     /// RRF 用: ベクトル検索の候補を `(chunk_id, SearchResult)` で返す。
@@ -3229,5 +3247,63 @@ mod tests {
             )
             .expect("select level");
         assert_eq!(level, None);
+    }
+
+    #[test]
+    fn test_rrf_topk_tie_break_score_desc_id_asc() {
+        // 同じ score を持つ複数 chunk_id がある場合、id ASC で安定 sort される
+        use std::collections::HashMap;
+        let mut scores: HashMap<i64, f32> = HashMap::new();
+        scores.insert(3, 0.5);
+        scores.insert(1, 0.5);
+        scores.insert(2, 0.7); // top
+        scores.insert(5, 0.5);
+        let mut rows: HashMap<i64, SearchResult> = HashMap::new();
+        for &id in &[1, 2, 3, 5] {
+            rows.insert(
+                id,
+                SearchResult {
+                    score: 0.0,
+                    content: format!("c{id}"),
+                    heading: None,
+                    path: format!("p{id}"),
+                    title: None,
+                    topic: None,
+                    date: None,
+                    tags: vec![],
+                },
+            );
+        }
+        let result = rrf_topk(scores, rows, Some(10));
+        let ids: Vec<i64> = result.iter().map(|(id, _)| *id).collect();
+        // top: id=2 (0.7), 同 score 0.5 は id ASC = 1, 3, 5
+        assert_eq!(ids, vec![2, 1, 3, 5]);
+    }
+
+    #[test]
+    fn test_rrf_topk_no_truncation_when_limit_none() {
+        use std::collections::HashMap;
+        let mut scores: HashMap<i64, f32> = HashMap::new();
+        for id in 1..=10 {
+            scores.insert(id, 1.0 / id as f32);
+        }
+        let mut rows: HashMap<i64, SearchResult> = HashMap::new();
+        for id in 1..=10 {
+            rows.insert(
+                id,
+                SearchResult {
+                    score: 0.0,
+                    content: format!("c{id}"),
+                    heading: None,
+                    path: format!("p{id}"),
+                    title: None,
+                    topic: None,
+                    date: None,
+                    tags: vec![],
+                },
+            );
+        }
+        let result = rrf_topk(scores, rows, None);
+        assert_eq!(result.len(), 10, "limit=None should not truncate");
     }
 }
