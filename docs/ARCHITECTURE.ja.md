@@ -82,3 +82,4 @@ v0.7.0 のフルパイプラインは **`RRF → reranker → MMR → parent ret
 - **`notify`** 8 + **`notify-debouncer-full`** 0.6 — debounce 付きファイルウォッチャ
 - **`axum`** 0.8 — Streamable HTTP トランスポートの HTTP サーバ
 - **`dirs`** 6 — OS 標準キャッシュディレクトリ解決
+- **`wide`** 0.7 — pure-rust SIMD プリミティブ (`f32x8`)、MMR cosine kernel で使用 (v0.7.2 / feature-31 で追加)

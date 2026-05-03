@@ -4,8 +4,12 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+(empty)
+
+## [0.7.2] - 2026-05-04
+
 ### Performance
-- **MMR `cosine_similarity` SIMD kernel (F-42 reattempt)**: replaced
+- **MMR `cosine_similarity` SIMD kernel (F-42 reattempt, #43)**: replaced
   the scalar dot/norm with `wide::f32x8` (8-lane SIMD, pure-rust
   ~50 KB). On Coffee Lake (AVX2 + FMA) the criterion microbench
   shows **-53% on `pool=500/limit=50` (penalty=0.0/0.5)**, **-55%
@@ -640,7 +644,9 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.5.0...v0.6.0

@@ -83,3 +83,4 @@ If `fastembed-rs`'s native TLS to HuggingFace fails (corporate proxies / TLS ins
 - **`notify`** 8 + **`notify-debouncer-full`** 0.6 — file watcher with debouncing
 - **`axum`** 0.8 — HTTP server for the Streamable HTTP transport
 - **`dirs`** 6 — OS-standard cache directory resolution
+- **`wide`** 0.7 — pure-rust SIMD primitives (`f32x8`) used by the MMR cosine kernel (added in v0.7.2 / feature-31)
