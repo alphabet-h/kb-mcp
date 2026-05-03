@@ -4,7 +4,20 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
-(empty)
+### Security
+
+- **`get_best_practice` hardening to `validate_get_document_path` parity (F-45)**:
+  the path resolver `resolve_best_practice_path` now applies the full
+  4-stage defence (symlink reject / canonicalize+starts_with / extension
+  membership / size cap) for each candidate template. Symlink hits
+  return `Access denied: symlinks are not allowed.` immediately
+  (security event, no template fallback); other rejections (file not
+  found / outside-kb / extension denied / size exceeded) try the next
+  template. `validate_get_document_path`'s return type is lifted to
+  `ValidatePathOutcome { Found / NotFound(ErrorResponse) / Denied(ErrorResponse) }`
+  with each fail variant carrying the original error wording verbatim,
+  so existing `get_document` callers and 5 unit tests are
+  byte-identical in behaviour. closes the audit-todos mid-term section.
 
 ## [0.7.2] - 2026-05-04
 
