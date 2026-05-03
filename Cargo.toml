@@ -47,8 +47,8 @@ shellexpand = "3"
 # chunk_quality_score の値域 [0.0, 1.0] を proptest で固定)。
 proptest = "1"
 # [F-39 PR-B] criterion-based benchmarking infrastructure. The benches under
-# `benches/` are gated to the binary's *external* surface only (subprocess /
-# pure-function level), since kb-mcp is a binary crate with no lib target.
+# `benches/` call into the lib crate (and subprocess where needed), since the
+# lib surface is intentionally unstable (see src/lib.rs).
 # `default-features = false` skips the `rayon`-driven HTML report machinery,
 # trading ~30s of compile time per first build for (no HTML; we already use
 # the JSON output for trend tracking).
