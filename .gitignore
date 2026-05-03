@@ -10,6 +10,7 @@ CLAUDE.local.md
 .claude/scheduled_tasks.lock
 .agents/
 .remember/
+.playwright-mcp/
 .mcp.json
 
 # Runtime config placed next to the binary (user-local). Template is kb-mcp.toml.example.

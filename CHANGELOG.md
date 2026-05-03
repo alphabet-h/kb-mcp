@@ -4,7 +4,20 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
-(empty)
+### Performance
+- **MMR `cosine_similarity` SIMD kernel (F-42 reattempt)**: replaced
+  the scalar dot/norm with `wide::f32x8` (8-lane SIMD, pure-rust
+  ~50 KB). On Coffee Lake (AVX2 + FMA) the criterion microbench
+  shows **-53% on `pool=500/limit=50` (penalty=0.0/0.5)**, **-55%
+  on `pool=100`**, **-76% on `pool=50`** vs the `pre-f42-reattempt`
+  baseline. profile-first methodology revisited: partial profile
+  (function symbols unresolvable in MSVC PDB) + structure analysis
+  (cosine inner loop ops dominate HashMap by 50x) + bench AC gate.
+  See `.dev/knowledge/bench-and-perf-investigation-pitfalls.md`
+  trap 6 for the PDB-resolution fallback recipe. proptest 3 (incl.
+  `prop_mmr_tie_break_stable` regression catcher) green; new unit
+  tests guard NaN/Inf panic-only invariant and SIMD scalar-tail
+  fallback for non-8-aligned dims.
 
 ## [0.7.1] - 2026-05-03
 

@@ -6,6 +6,8 @@
 //! pipeline 順 (`SearchTool::search`):
 //! `RRF (search_hybrid_candidates_unbounded) → reranker → mmr_select → Parent retriever → match_spans`
 
+use wide::f32x8;
+
 #[derive(Debug, Clone)]
 pub struct MmrCandidate {
     pub chunk_id: i64,
@@ -136,9 +138,36 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    // feature-31 (F-42 reattempt): f32x8 SIMD kernel with 8-lane parallelism.
+    // production embedding (BGE-small=384, BGE-M3=1024) は両方 8 で割り切れるので
+    // chunks=48/128 で末尾 tail 不要。tail (n % 8 != 0) は scalar fallback で安全網。
+    let n = a.len();
+    let chunks = n / 8;
+    let mut dot_acc = f32x8::ZERO;
+    let mut na_acc = f32x8::ZERO;
+    let mut nb_acc = f32x8::ZERO;
+    for i in 0..chunks {
+        let mut a_buf = [0.0_f32; 8];
+        let mut b_buf = [0.0_f32; 8];
+        a_buf.copy_from_slice(&a[i * 8..i * 8 + 8]);
+        b_buf.copy_from_slice(&b[i * 8..i * 8 + 8]);
+        let va = f32x8::from(a_buf);
+        let vb = f32x8::from(b_buf);
+        dot_acc += va * vb;
+        na_acc += va * va;
+        nb_acc += vb * vb;
+    }
+    let mut dot: f32 = dot_acc.to_array().iter().sum();
+    let mut norm_a_sq: f32 = na_acc.to_array().iter().sum();
+    let mut norm_b_sq: f32 = nb_acc.to_array().iter().sum();
+    // tail (n % 8) の scalar fallback (将来別 model 投入時の安全網)
+    for i in (chunks * 8)..n {
+        dot += a[i] * b[i];
+        norm_a_sq += a[i] * a[i];
+        norm_b_sq += b[i] * b[i];
+    }
+    let norm_a = norm_a_sq.sqrt();
+    let norm_b = norm_b_sq.sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
         0.0
     } else {
@@ -243,6 +272,82 @@ mod tests {
         assert_eq!(sel.len(), 3);
         // 並びは relevance 順に倒れる (diversity 項が全て -1.0 で同点)
         assert_eq!(sel, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_cosine_similarity_does_not_panic_on_nan_inf_inputs() {
+        // proptest が catch しない panic-only invariant: f32::NAN / f32::INFINITY
+        // 入力時に panic しない (= regression catcher、F-54 と整合)。bit-exact な
+        // NaN/Inf 結果値は SIMD 累算順序で変化するので比較しない。
+        //
+        // ベクトル長は SIMD path (chunks > 0) と scalar tail (n % 8 != 0) の
+        // 両方を叩くサイズで網羅。
+
+        // 16-dim 全 NaN — SIMD path のみ (chunks=2, tail=0)
+        let a_nan_16 = vec![f32::NAN; 16];
+        let b_16 = vec![1.0_f32; 16];
+        let _ = cosine_similarity(&a_nan_16, &b_16);
+
+        // 9-dim 全 Infinity — SIMD chunk (1) + scalar tail (1)
+        let a_inf_9 = vec![f32::INFINITY; 9];
+        let b_9 = vec![1.0_f32; 9];
+        let _ = cosine_similarity(&a_inf_9, &b_9);
+
+        // 16-dim 単一 NaN 混入 — SIMD path
+        let mut a_partial_16 = vec![1.0_f32; 16];
+        a_partial_16[7] = f32::NAN;
+        let _ = cosine_similarity(&a_partial_16, &b_16);
+
+        // 16-dim 全 -Infinity — SIMD path
+        let a_neg_inf_16 = vec![f32::NEG_INFINITY; 16];
+        let _ = cosine_similarity(&a_neg_inf_16, &b_16);
+
+        // 4-dim NaN — short scalar (chunks=0, tail=4)
+        let a_nan_4 = vec![f32::NAN; 4];
+        let b_4 = vec![1.0_f32; 4];
+        let _ = cosine_similarity(&a_nan_4, &b_4);
+    }
+
+    #[test]
+    fn test_cosine_similarity_scalar_fallback_for_non_8_aligned() {
+        // (a) wide SIMD 実装の scalar fallback path (n % 8 != 0) が正しく動作することを確認。
+        // production embedding dim (BGE-small=384, BGE-M3=1024) は両方 8 で割り切れるので
+        // 本 path は production では発火しないが、将来別 model 投入時の安全網として残す。
+
+        // 7-dim (chunks=0、全 scalar tail)
+        let a = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let r1 = cosine_similarity(&a, &b);
+        assert!(
+            (r1 - 1.0).abs() < 1e-6,
+            "7-dim identical: expected 1.0, got {}",
+            r1
+        );
+
+        // 9-dim (chunks=1, tail=1)
+        // dot = 1 (index 8), norm_a = sqrt(2), norm_b = 1 → 1 / sqrt(2) = FRAC_1_SQRT_2
+        let a = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let b = vec![0.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let r2 = cosine_similarity(&a, &b);
+        let expected = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            (r2 - expected).abs() < 1e-6,
+            "9-dim mixed: expected FRAC_1_SQRT_2 ({}), got {}",
+            expected,
+            r2
+        );
+
+        // 385-dim (chunks=48, tail=1)
+        let mut a = vec![0.0_f32; 385];
+        let mut b = vec![0.0_f32; 385];
+        a[0] = 1.0;
+        b[0] = 1.0;
+        let r3 = cosine_similarity(&a, &b);
+        assert!(
+            (r3 - 1.0).abs() < 1e-6,
+            "385-dim identical at index 0: expected 1.0, got {}",
+            r3
+        );
     }
 
     proptest::proptest! {
