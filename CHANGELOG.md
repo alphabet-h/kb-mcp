@@ -4,9 +4,13 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+(empty)
+
+## [0.7.3] - 2026-05-04
+
 ### Security
 
-- **`get_best_practice` hardening to `validate_get_document_path` parity (F-45)**:
+- **`get_best_practice` hardening to `validate_get_document_path` parity (F-45, #44)**:
   the path resolver `resolve_best_practice_path` now applies the full
   4-stage defence (symlink reject / canonicalize+starts_with / extension
   membership / size cap) for each candidate template. Symlink hits
@@ -657,7 +661,8 @@ First public release. An MCP server providing semantic hybrid search (sqlite-vec
 - `cargo fmt` / `cargo clippy --all-targets` clean
 - Personal dev artifacts moved to `.dev/` (excluded via `.git/info/exclude`)
 
-[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/alphabet-h/kb-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/alphabet-h/kb-mcp/compare/v0.6.1...v0.7.0
