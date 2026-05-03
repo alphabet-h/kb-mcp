@@ -4,6 +4,29 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
 
 ## [Unreleased]
 
+(empty)
+
+## [0.7.1] - 2026-05-03
+
+### Performance
+- **Eliminate N+1 lookup in MMR pool builder (F-41)**: `SearchResult`
+  now carries `document_id: i64` from the candidate SQLs
+  (`search_vec_candidates` / `search_fts_candidates` /
+  `chunks_for_path`), so the MMR pool builder no longer calls
+  `lookup_document_id_by_path` per candidate. Side effect: the
+  `unwrap_or(0)` rename-race collision (F-44) disappears with the
+  helper. Internal API change only (`SearchResult` is not exposed
+  by the MCP tool).
+- **`mmr_select` API simplified (F-43)**: dropped the unused
+  `_query_emb: &[f32]` argument carried for historical symmetry.
+  Internal API change only; relevance source has been the hybrid
+  RRF + reranker score since feature-28.
+- **`token_count` saturate (F-46)**: replaced
+  `(content.len() / 4) as i32` with
+  `i32::try_from(...).unwrap_or(i32::MAX)`. Defense-in-depth for
+  the hypothetical 8 GiB+ chunk path; behaviour unchanged in
+  practice.
+
 ### Changed
 - `kb-mcp search` / `kb-mcp eval`: `--mmr-lambda` and
   `--mmr-same-doc-penalty` values outside `[0.0, 1.0]` (and
@@ -17,6 +40,25 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
   non-CLI callers, so the runtime contract is unchanged.
 
 ### Internal
+- **criterion bench infrastructure (F-60 partial)**: introduced
+  `src/lib.rs` to expose internal modules (`kb_mcp::*`) to
+  benches and integration tests. Added `benches/mmr_perf.rs`
+  (MMR microbench, drives `kb_mcp::mmr::mmr_select` directly)
+  and `benches/search_latency.rs` (subprocess wall-clock bench).
+  Reranker-on bench is gated behind a `heavy-bench` Cargo
+  feature to avoid a ~2.3 GB download on default
+  `cargo bench` runs. Side effect: 4 functions in `src/server.rs`
+  promoted from `pub(crate)` to `pub`
+  (`compile_path_globs` / `run_search_pipeline` /
+  `compute_match_spans` / `compute_low_confidence`), and
+  `resolve_db_path` moved from `src/main.rs` to `src/lib.rs`
+  (lib API is intentionally unstable).
+- **MMR tie-break stability proptest** (`prop_mmr_tie_break_stable`):
+  regression catcher for any future refactor to the greedy loop
+  data structure. The Vec-bool variant of F-42 was investigated
+  in this cycle but reverted (bench showed +5-8% regression on
+  pool=500; cosine-similarity inner loop dominates). F-42 is
+  deferred to a future cycle.
 - Test coverage for the codex-review trap cluster surfaced
   during feature-28: added a proptest for
   `compute_low_confidence` order invariance (F-47), a
@@ -28,7 +70,8 @@ All notable changes to kb-mcp are documented here. The format is based on [Keep 
   subprocess wire tests proving the new clap-level reject
   path (F-50). Test count: 393 → 400 unit + 3 new
   integration. No behavior change beyond the CLI early
-  reject above.
+  reject above. (Originally landed in PR #40 without a tag;
+  this release ships it.)
 
 ## [0.7.0] - 2026-05-03
 

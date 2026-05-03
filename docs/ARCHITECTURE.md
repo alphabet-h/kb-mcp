@@ -8,7 +8,8 @@ Source-level structure and data flow of kb-mcp, for contributors extending or mo
 
 | File | Responsibility |
 |---|---|
-| `src/main.rs` | clap CLI entry. Dispatches `index` / `status` / `serve` / `search` / `graph` / `validate` / `eval` subcommands. Loads `kb-mcp.toml` and merges with CLI args. JSON / text output formatting. |
+| `src/lib.rs` | (v0.7.1+) Library crate root. Re-exports the modules below as `kb_mcp::*` so benches under `benches/` and integration tests under `tests/` can drive internal APIs without subprocess. The library surface is intentionally unstable and not intended for external consumers. |
+| `src/main.rs` | Binary entry point. clap CLI dispatches `index` / `status` / `serve` / `search` / `graph` / `validate` / `eval` subcommands. Consumes the lib via `use kb_mcp::*;`. Loads `kb-mcp.toml` and merges with CLI args. JSON / text output formatting. |
 | `src/config.rs` | 4-tier `kb-mcp.toml` discovery (`--config` flag → CWD → `.git` ancestor (CWD + up to 19 ancestors) → binary-side legacy). `Config::discover()` returns a `ConfigSource` enum that `main.rs` logs at startup. Resolves `CLI > config > default` precedence. Injects `FASTEMBED_CACHE_DIR` env when the config sets it and the env is unset. |
 | `src/server.rs` | `rmcp::ServerHandler` impl. Dispatches six MCP tools. `search` routes to `db.search_hybrid` and wraps the result in a `SearchResponse` with `low_confidence` / `match_spans` / `filter_applied` (BREAKING in v0.3.0; see CHANGELOG). |
 | `src/indexer.rs` | `walkdir`-based file scan using `Registry::extensions()`. Parses via the Parser trait, embeds, stores. SHA-256 content-hash diff detection. Incremental APIs (`reindex_single_file` / `deindex_single_file` / `rename_single_file`) shared with the file watcher. |
