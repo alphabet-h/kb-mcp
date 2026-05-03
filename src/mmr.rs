@@ -51,6 +51,18 @@ pub fn mmr_select(
         if a <= b { (a, b) } else { (b, a) }
     }
 
+    // F-42 candidate (Vec<bool> active flag, deferred — see comment below).
+    //
+    // Originally feature-30 PR-2 spec § Q5 hypothesised that replacing
+    // `Vec<usize> remaining` + `retain` (O(N) per iter) with `Vec<bool>` active
+    // + `active_count` (O(1) per pick) would yield -10~20% on `pool=500`. In
+    // practice the bench ran +5-8% **slower** (cosine-similarity inner loop
+    // dominates; the bool-flag path scans all n indices every iter and pays
+    // a branch-predictor penalty that retain's "live elements only" walk
+    // avoids). The retain-based loop is retained until a future cycle re-
+    // evaluates with a different data structure (BTreeSet / SmallVec swap-
+    // remove / SIMD cosine kernel). The `prop_mmr_tie_break_stable` proptest
+    // added in this cycle stays as a regression catcher for any future try.
     let mut selected: Vec<usize> = Vec::with_capacity(target);
     let mut remaining: Vec<usize> = (0..n).collect();
 
@@ -266,6 +278,33 @@ mod tests {
             let unique: std::collections::HashSet<usize> = sel.iter().copied().collect();
             proptest::prop_assert_eq!(unique.len(), sel.len());
             proptest::prop_assert!(sel.iter().all(|&i| i < n_cands));
+        }
+
+        /// F-42 PR-2: bool 配列化後も既存 invariant 「mmr_value 同点 → input
+        /// 順 (= index 昇順)」が保たれることを fuzz。全候補 embedding が同一 +
+        /// relevance + document_id すべて同一の degenerate case を proptest 化、
+        /// 結果が **入力 index 昇順** であることを assert する。
+        ///
+        /// 旧 Vec::retain ベースも index 昇順を保つので本 proptest は当初 pass、
+        /// 新 Vec<bool> active flag への置換で regression が出れば即 catch。
+        #[test]
+        fn prop_mmr_tie_break_stable(
+            n_cands in 1_usize..15,
+            limit in 1_usize..20,
+        ) {
+            let cands: Vec<MmrCandidate> = (0..n_cands)
+                .map(|i| MmrCandidate {
+                    chunk_id: i as i64,
+                    document_id: 0,
+                    embedding: vec![1.0, 0.0, 0.0],
+                    relevance_score: 0.5,
+                })
+                .collect();
+            // PR-2 段階の旧 signature 互換、Task 2.4 で query 引数削除予定
+            let q = vec![1.0_f32, 0.0, 0.0];
+            let sel = mmr_select(&cands, &q, 0.7, 0.0, limit);
+            let expected: Vec<usize> = (0..limit.min(n_cands)).collect();
+            proptest::prop_assert_eq!(sel, expected);
         }
     }
 }
