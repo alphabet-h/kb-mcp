@@ -99,7 +99,7 @@ fn bench_search_with_reranker(c: &mut Criterion) {
                     "--mmr",
                     "true",
                     "--reranker",
-                    "bge-reranker-v2-m3",
+                    "bge-v2-m3",
                     "--limit",
                     "10",
                     "rust",
