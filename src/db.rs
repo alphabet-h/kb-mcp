@@ -670,8 +670,11 @@ impl Database {
         embedding: &[f32],
         quality_score: f32,
     ) -> Result<i64> {
-        // Rough token estimate: 1 token ~= 4 chars (English average)
-        let token_count = (content.len() / 4) as i32;
+        // Rough token estimate: 1 token ~= 4 chars (English average).
+        // F-46: saturate at i32::MAX rather than wrap on the rare 8 GiB+
+        // content path (chunker is hard-capped well below this in practice;
+        // defense-in-depth for diagnosing oversize indexing failures).
+        let token_count = i32::try_from(content.len() / 4).unwrap_or(i32::MAX);
 
         let local_tx = if self.conn.is_autocommit() {
             Some(self.conn.unchecked_transaction()?)
@@ -3866,5 +3869,21 @@ mod tests {
             !json.contains("expanded_from"),
             "None should omit field, got: {json}"
         );
+    }
+
+    #[test]
+    fn test_token_count_saturates_at_i32_max() {
+        // F-46 PR-2: 8 GiB+ content (現実には不発生だが defense-in-depth) で
+        // 旧 (content.len() / 4) as i32 reinterpret cast は wrap、
+        // 新 i32::try_from(...).unwrap_or(i32::MAX) は saturate。
+        // production code は呼ばず、本 test は cast 挙動だけを直接 assert する
+        // (F-29 / F-49 helper test と同じ pattern)。
+        let huge_len: usize = i32::MAX as usize + 1;
+        let result = i32::try_from(huge_len).unwrap_or(i32::MAX);
+        assert_eq!(result, i32::MAX, "must saturate, not wrap");
+
+        let normal_len: usize = 1024;
+        let normal_result = i32::try_from(normal_len).unwrap_or(i32::MAX);
+        assert_eq!(normal_result, 1024_i32);
     }
 }
