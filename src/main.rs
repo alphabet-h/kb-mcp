@@ -1,23 +1,7 @@
-pub mod config;
-pub mod db;
-pub mod embedder;
-pub mod eval;
-pub mod graph;
-pub mod indexer;
-pub mod markdown;
-pub mod mmr;
-pub mod parent;
-pub mod parser;
-pub mod quality;
-pub mod schema;
-pub mod server;
-pub mod transport;
-pub mod watcher;
-
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use config::Config;
-use embedder::{ModelChoice, RerankerChoice};
+use kb_mcp::config::Config;
+use kb_mcp::embedder::{ModelChoice, RerankerChoice};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -76,11 +60,11 @@ enum CliSeedStrategy {
     Centroid,
 }
 
-impl From<CliSeedStrategy> for graph::SeedStrategy {
+impl From<CliSeedStrategy> for kb_mcp::graph::SeedStrategy {
     fn from(c: CliSeedStrategy) -> Self {
         match c {
-            CliSeedStrategy::AllChunks => graph::SeedStrategy::AllChunks,
-            CliSeedStrategy::Centroid => graph::SeedStrategy::Centroid,
+            CliSeedStrategy::AllChunks => kb_mcp::graph::SeedStrategy::AllChunks,
+            CliSeedStrategy::Centroid => kb_mcp::graph::SeedStrategy::Centroid,
         }
     }
 }
@@ -118,7 +102,7 @@ enum Commands {
         /// Transport: stdio (default, 1 client) or http
         /// (Streamable HTTP, many clients). HTTP bind defaults to 127.0.0.1:3100.
         #[arg(long, value_enum)]
-        transport: Option<transport::TransportKind>,
+        transport: Option<kb_mcp::transport::TransportKind>,
         /// Full HTTP bind address when `--transport http`.
         /// Example: `--bind 0.0.0.0:3100`. Wins over `--port`.
         #[arg(long)]
@@ -159,13 +143,13 @@ enum Commands {
         #[arg(long, value_enum)]
         model: Option<ModelChoice>,
         /// BFS depth (default 2, clamped to max 3)
-        #[arg(long, default_value_t = graph::DEFAULT_DEPTH)]
+        #[arg(long, default_value_t = kb_mcp::graph::DEFAULT_DEPTH)]
         depth: u32,
         /// Max fan-out per node (default 5, clamped to max 20)
-        #[arg(long = "fan-out", default_value_t = graph::DEFAULT_FAN_OUT)]
+        #[arg(long = "fan-out", default_value_t = kb_mcp::graph::DEFAULT_FAN_OUT)]
         fan_out: u32,
         /// Minimum cosine similarity 0.0-1.0 (default 0.3)
-        #[arg(long = "min-similarity", default_value_t = graph::DEFAULT_MIN_SIMILARITY)]
+        #[arg(long = "min-similarity", default_value_t = kb_mcp::graph::DEFAULT_MIN_SIMILARITY)]
         min_similarity: f32,
         /// Seed strategy (all_chunks | centroid)
         #[arg(long = "seed-strategy", value_enum, default_value_t = CliSeedStrategy::AllChunks)]
@@ -360,7 +344,7 @@ pub(crate) struct EvalCliArgs {
     pub(crate) parent_retriever: Option<bool>,
 }
 
-impl From<&SearchCliArgs> for crate::config::SearchOverrides {
+impl From<&SearchCliArgs> for kb_mcp::config::SearchOverrides {
     fn from(a: &SearchCliArgs) -> Self {
         Self {
             mmr: a.mmr,
@@ -371,7 +355,7 @@ impl From<&SearchCliArgs> for crate::config::SearchOverrides {
     }
 }
 
-impl From<&EvalCliArgs> for crate::config::SearchOverrides {
+impl From<&EvalCliArgs> for kb_mcp::config::SearchOverrides {
     fn from(a: &EvalCliArgs) -> Self {
         Self {
             mmr: a.mmr,
@@ -380,17 +364,6 @@ impl From<&EvalCliArgs> for crate::config::SearchOverrides {
             parent_retriever: a.parent_retriever,
         }
     }
-}
-
-/// Resolve the database path from a knowledge-base directory.
-///
-/// The `.kb-mcp.db` file is placed in the **parent** of `kb_path`
-/// (i.e. the repository root when `kb_path` is `knowledge-base/`).
-pub fn resolve_db_path(kb_path: &Path) -> PathBuf {
-    kb_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(".kb-mcp.db")
 }
 
 /// `kb_path` が指定されていなければエラー。(CLI / config どちらからも無い場合)
@@ -464,8 +437,12 @@ fn main() -> anyhow::Result<()> {
             }
 
             // transport の解決: CLI > config > default (stdio)
-            let resolved_transport =
-                transport::Transport::resolve(cli_transport, bind, port, cfg.transport.as_ref())?;
+            let resolved_transport = kb_mcp::transport::Transport::resolve(
+                cli_transport,
+                bind,
+                port,
+                cfg.transport.as_ref(),
+            )?;
 
             // [search].min_confidence_ratio: 省略時 1.5、0.0 は判定無効。
             // CLI override (`--min-confidence-ratio`) は Task 8 で追加。
@@ -482,7 +459,7 @@ fn main() -> anyhow::Result<()> {
 
             // evaluator 指摘 High #2: `--bind` / `--port` が指定されているのに
             // 実効 transport が Stdio なら silent ignore は footgun なので reject。
-            if matches!(resolved_transport, transport::Transport::Stdio)
+            if matches!(resolved_transport, kb_mcp::transport::Transport::Stdio)
                 && (bind.is_some() || port.is_some())
             {
                 anyhow::bail!(
@@ -493,7 +470,7 @@ fn main() -> anyhow::Result<()> {
 
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                server::run_server(
+                kb_mcp::server::run_server(
                     &kb_path,
                     model,
                     reranker,
@@ -519,22 +496,22 @@ fn main() -> anyhow::Result<()> {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
 
-            let db_path = resolve_db_path(&kb_path);
-            let db = db::Database::open(&db_path.to_string_lossy())?;
+            let db_path = kb_mcp::resolve_db_path(&kb_path);
+            let db = kb_mcp::db::Database::open(&db_path.to_string_lossy())?;
             // モデル DL (BGE-M3 なら ~2.3 GB) の前に meta 整合性を先に確認する。
             // そうしないと不整合時にユーザが不要な DL を待たされる。
             let dim = model.dimension() as u32;
             if !force {
                 db.verify_embedding_meta(model.model_id(), dim)?;
             }
-            let mut embedder = embedder::Embedder::with_model(model)?;
+            let mut embedder = kb_mcp::embedder::Embedder::with_model(model)?;
             if force {
                 db.reset_for_model(embedder.model_id(), dim)?;
             }
             let registry = cfg.build_parser_registry()?;
             eprintln!("Indexing {}...", kb_path.display());
             let exclude_dirs = cfg.resolve_exclude_dirs();
-            let result = indexer::rebuild_index(
+            let result = kb_mcp::indexer::rebuild_index(
                 &db,
                 &mut embedder,
                 &kb_path,
@@ -556,7 +533,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Status { kb_path } => {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
 
-            let db_path = resolve_db_path(&kb_path);
+            let db_path = kb_mcp::resolve_db_path(&kb_path);
             if !db_path.exists() {
                 eprintln!(
                     "No index found. Run `kb-mcp index --kb-path {}` first.",
@@ -564,7 +541,7 @@ fn main() -> anyhow::Result<()> {
                 );
                 return Ok(());
             }
-            let db = db::Database::open(&db_path.to_string_lossy())?;
+            let db = kb_mcp::db::Database::open(&db_path.to_string_lossy())?;
             let total_docs = db.document_count()?;
             let total_chunks = db.chunk_count()?;
             eprintln!("Documents: {total_docs}");
@@ -582,7 +559,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Search(args) => {
             // Build overrides BEFORE destructuring `args` so that the `&args`
             // borrow is short-lived (we still need owned fields below).
-            let overrides: crate::config::SearchOverrides = (&args).into();
+            let overrides: kb_mcp::config::SearchOverrides = (&args).into();
 
             let SearchCliArgs {
                 query,
@@ -612,12 +589,12 @@ fn main() -> anyhow::Result<()> {
             let model = model.or(cfg.model).unwrap_or_default();
             let reranker_choice = reranker.or(cfg.reranker).unwrap_or_default();
 
-            let db_path = resolve_db_path(&kb_path);
-            let db = db::Database::open(&db_path.to_string_lossy())?;
+            let db_path = kb_mcp::resolve_db_path(&kb_path);
+            let db = kb_mcp::db::Database::open(&db_path.to_string_lossy())?;
             let dim = model.dimension() as u32;
             db.verify_embedding_meta(model.model_id(), dim)?;
 
-            let mut embedder = embedder::Embedder::with_model(model)?;
+            let mut embedder = kb_mcp::embedder::Embedder::with_model(model)?;
             let query_embedding = embedder.embed_single(&query)?;
 
             let server_default = cfg
@@ -625,7 +602,7 @@ fn main() -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_default()
                 .effective_threshold();
-            let effective_min_quality = quality::resolve_effective_threshold(
+            let effective_min_quality = kb_mcp::quality::resolve_effective_threshold(
                 include_low_quality,
                 min_quality,
                 server_default,
@@ -635,10 +612,10 @@ fn main() -> anyhow::Result<()> {
             let cpg = if path_globs.is_empty() {
                 None
             } else {
-                Some(server::compile_path_globs(&path_globs)?)
+                Some(kb_mcp::server::compile_path_globs(&path_globs)?)
             };
 
-            let filters = db::SearchFilters {
+            let filters = kb_mcp::db::SearchFilters {
                 category: category.as_deref(),
                 topic: topic.as_deref(),
                 min_quality: effective_min_quality,
@@ -653,12 +630,13 @@ fn main() -> anyhow::Result<()> {
             // `--mmr` / `--mmr-lambda` / `--mmr-same-doc-penalty` /
             // `--parent-retriever` flags actually take effect for CLI callers.
             let toml_search = cfg.search.clone().unwrap_or_default();
-            let mut reranker_obj: Option<embedder::Reranker> = if reranker_choice.is_enabled() {
-                embedder::Reranker::try_new(reranker_choice)?
-            } else {
-                None
-            };
-            let pipeline = server::run_search_pipeline(
+            let mut reranker_obj: Option<kb_mcp::embedder::Reranker> =
+                if reranker_choice.is_enabled() {
+                    kb_mcp::embedder::Reranker::try_new(reranker_choice)?
+                } else {
+                    None
+                };
+            let pipeline = kb_mcp::server::run_search_pipeline(
                 &db,
                 reranker_obj.as_mut(),
                 &query,
@@ -670,7 +648,7 @@ fn main() -> anyhow::Result<()> {
             )?;
 
             // chunk_id を維持したまま SearchHit に変換 (Parent retriever 用)。
-            let hits_with_id: Vec<(i64, db::SearchHit)> = pipeline
+            let hits_with_id: Vec<(i64, kb_mcp::db::SearchHit)> = pipeline
                 .into_iter()
                 .map(|(id, sr)| (id, sr.into()))
                 .collect();
@@ -678,11 +656,11 @@ fn main() -> anyhow::Result<()> {
             // Parent retriever 段。enabled = false なら chunk_id を剥がすだけで
             // content / expanded_from は触らない (= v0.6.1 と bit-exact 互換)。
             let resolved = overrides.resolve(&toml_search);
-            let parent_params = parent::ParentRetrieverParams {
+            let parent_params = kb_mcp::parent::ParentRetrieverParams {
                 whole_doc_threshold_tokens: resolved.parent_whole_doc_threshold_tokens,
                 max_expanded_tokens: resolved.parent_max_expanded_tokens,
             };
-            let mut hits: Vec<db::SearchHit> = parent::apply_parent_retriever(
+            let mut hits: Vec<kb_mcp::db::SearchHit> = kb_mcp::parent::apply_parent_retriever(
                 hits_with_id,
                 &db,
                 resolved.parent_retriever_enabled,
@@ -691,7 +669,7 @@ fn main() -> anyhow::Result<()> {
             // match_spans は Parent retriever 拡張後の content に対して計算する
             // (`expand_parent` は defensive に None クリアするので必ず再計算が要る)。
             for h in &mut hits {
-                h.match_spans = server::compute_match_spans(&query, &h.content);
+                h.match_spans = kb_mcp::server::compute_match_spans(&query, &h.content);
             }
 
             let effective_ratio = min_confidence_ratio
@@ -729,7 +707,7 @@ fn main() -> anyhow::Result<()> {
             let kb_path = require_kb_path(kb_path, cfg.kb_path.clone())?;
             let model = model.or(cfg.model).unwrap_or_default();
 
-            let db_path = resolve_db_path(&kb_path);
+            let db_path = kb_mcp::resolve_db_path(&kb_path);
             // Status と同じく、DB がまだ作られていない状態を親切なエラーで弾く。
             if !db_path.exists() {
                 anyhow::bail!(
@@ -738,12 +716,12 @@ fn main() -> anyhow::Result<()> {
                     kb_path.display()
                 );
             }
-            let db = db::Database::open(&db_path.to_string_lossy())?;
+            let db = kb_mcp::db::Database::open(&db_path.to_string_lossy())?;
             db.verify_embedding_meta(model.model_id(), model.dimension() as u32)?;
 
-            let opts = graph::GraphOptions {
-                depth: depth.min(graph::MAX_DEPTH),
-                fan_out: fan_out.min(graph::MAX_FAN_OUT),
+            let opts = kb_mcp::graph::GraphOptions {
+                depth: depth.min(kb_mcp::graph::MAX_DEPTH),
+                fan_out: fan_out.min(kb_mcp::graph::MAX_FAN_OUT),
                 min_similarity: min_similarity.clamp(0.0, 1.0),
                 seed_strategy: seed_strategy.into(),
                 category,
@@ -756,7 +734,7 @@ fn main() -> anyhow::Result<()> {
                     .unwrap_or_default()
                     .effective_threshold(),
             };
-            let g = graph::build_connection_graph(&db, &start, &opts)?;
+            let g = kb_mcp::graph::build_connection_graph(&db, &start, &opts)?;
             print_graph(g, format);
         }
         Commands::Validate {
@@ -785,7 +763,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Eval(args) => {
             // Build overrides BEFORE destructuring `args` so the `&args` borrow
             // is short-lived (we still need owned fields below).
-            let overrides: crate::config::SearchOverrides = (&args).into();
+            let overrides: kb_mcp::config::SearchOverrides = (&args).into();
 
             let EvalCliArgs {
                 kb_path,
@@ -821,7 +799,7 @@ fn main() -> anyhow::Result<()> {
             let history_size = eval_cfg.history_size.unwrap_or(10);
             let regression_threshold = eval_cfg.regression_threshold.unwrap_or(0.05);
 
-            let opts = eval::RunOpts {
+            let opts = kb_mcp::eval::RunOpts {
                 kb_path: kb_path.clone(),
                 golden_path,
                 model_choice,
@@ -835,13 +813,13 @@ fn main() -> anyhow::Result<()> {
                 search_config: cfg.search.clone().unwrap_or_default(),
             };
 
-            let run = eval::run(&opts)?;
+            let run = kb_mcp::eval::run(&opts)?;
 
-            let history_path = eval::default_history_path(&kb_path);
+            let history_path = kb_mcp::eval::default_history_path(&kb_path);
             let history = if no_history {
-                eval::History::default()
+                kb_mcp::eval::History::default()
             } else {
-                eval::History::load(&history_path)?
+                kb_mcp::eval::History::load(&history_path)?
             };
             // Clone the previous run so the `history` binding can be moved later
             // to push the new run. `EvalRun: Clone`, so this is cheap enough.
@@ -855,11 +833,16 @@ fn main() -> anyhow::Result<()> {
                 EvalFormat::Text => {
                     use std::io::IsTerminal;
                     let tty = std::io::stdout().is_terminal() && !no_color;
-                    let out = eval::format_text(&run, previous.as_ref(), tty, regression_threshold);
+                    let out = kb_mcp::eval::format_text(
+                        &run,
+                        previous.as_ref(),
+                        tty,
+                        regression_threshold,
+                    );
                     print!("{}", out);
                 }
                 EvalFormat::Json => {
-                    let v = eval::format_json(&run, previous.as_ref());
+                    let v = kb_mcp::eval::format_json(&run, previous.as_ref());
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
             }
@@ -879,7 +862,8 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     history.previous_compatible(&run)
                 };
-                prev_compat.is_some_and(|p| eval::is_regression(&run, p, regression_threshold))
+                prev_compat
+                    .is_some_and(|p| kb_mcp::eval::is_regression(&run, p, regression_threshold))
             } else {
                 false
             };
@@ -914,7 +898,7 @@ fn run_validate(
     exclude_dirs: &[String],
 ) -> Result<i32> {
     // スキーマ読み込み: 存在しなければ legacy 挙動 (exit 0)
-    let schema_obj = match schema::Schema::load_optional(schema_path) {
+    let schema_obj = match kb_mcp::schema::Schema::load_optional(schema_path) {
         Ok(Some(s)) => s,
         Ok(None) => {
             eprintln!(
@@ -931,7 +915,7 @@ fn run_validate(
 
     // parser registry は `[parsers].enabled` 準拠で .md ファイル列挙に再利用
     // (.txt は frontmatter 概念なしで対象外)。
-    let md_parser = parser::MarkdownParser;
+    let md_parser = kb_mcp::parser::MarkdownParser;
     let files = validate_collect_md_files(kb_path, exclude_dirs)?;
 
     let mut reports: Vec<FileReport> = Vec::new();
@@ -953,9 +937,9 @@ fn run_validate(
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        use parser::Parser as ParserTrait;
+        use kb_mcp::parser::Parser as ParserTrait;
         let parsed = md_parser.parse(&raw, &rel, &[]);
-        let violations = schema::validate(&parsed.frontmatter, &schema_obj);
+        let violations = kb_mcp::schema::validate(&parsed.frontmatter, &schema_obj);
         if !violations.is_empty() {
             violated += 1;
             has_violation = true;
@@ -1010,7 +994,7 @@ fn validate_collect_md_files(kb_path: &Path, exclude_dirs: &[String]) -> Result<
 
 struct FileReport {
     path: String,
-    violations: Vec<schema::Violation>,
+    violations: Vec<kb_mcp::schema::Violation>,
 }
 
 /// text format の色付けを stdout の TTY 状態に応じて自動 on/off。
@@ -1045,7 +1029,7 @@ fn print_validate_report(
             #[derive(serde::Serialize)]
             struct FileReportJson<'a> {
                 path: &'a str,
-                violations: &'a [schema::Violation],
+                violations: &'a [kb_mcp::schema::Violation],
             }
             let files: Vec<FileReportJson> = reports
                 .iter()
@@ -1104,7 +1088,7 @@ fn print_validate_report(
     }
 }
 
-fn print_graph(g: graph::ConnectionGraph, format: SearchFormat) {
+fn print_graph(g: kb_mcp::graph::ConnectionGraph, format: SearchFormat) {
     match format {
         SearchFormat::Json => {
             println!(
@@ -1143,7 +1127,7 @@ fn print_graph(g: graph::ConnectionGraph, format: SearchFormat) {
 
 #[allow(clippy::too_many_arguments)]
 fn print_search_results(
-    hits: Vec<db::SearchHit>,
+    hits: Vec<kb_mcp::db::SearchHit>,
     min_confidence_ratio: f32,
     path_globs: &[String],
     tags_any: &[String],
@@ -1156,7 +1140,7 @@ fn print_search_results(
     format: SearchFormat,
 ) {
     let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
-    let low_confidence = server::compute_low_confidence(&scores, min_confidence_ratio);
+    let low_confidence = kb_mcp::server::compute_low_confidence(&scores, min_confidence_ratio);
 
     match format {
         SearchFormat::Json => {
@@ -1289,7 +1273,7 @@ mod tests {
     #[test]
     fn test_search_cli_args_into_overrides_all_none() {
         let args = search_args_default();
-        let o: crate::config::SearchOverrides = (&args).into();
+        let o: kb_mcp::config::SearchOverrides = (&args).into();
         assert_eq!(o.mmr, None);
         assert_eq!(o.mmr_lambda, None);
         assert_eq!(o.mmr_same_doc_penalty, None);
@@ -1305,7 +1289,7 @@ mod tests {
             parent_retriever: Some(true),
             ..search_args_default()
         };
-        let o: crate::config::SearchOverrides = (&args).into();
+        let o: kb_mcp::config::SearchOverrides = (&args).into();
         assert_eq!(o.mmr, Some(true));
         assert_eq!(o.mmr_lambda, Some(0.5));
         assert_eq!(o.mmr_same_doc_penalty, Some(0.2));
@@ -1315,7 +1299,7 @@ mod tests {
     #[test]
     fn test_eval_cli_args_into_overrides_all_none() {
         let args = eval_args_default();
-        let o: crate::config::SearchOverrides = (&args).into();
+        let o: kb_mcp::config::SearchOverrides = (&args).into();
         assert_eq!(o.mmr, None);
         assert_eq!(o.mmr_lambda, None);
         assert_eq!(o.mmr_same_doc_penalty, None);
@@ -1331,7 +1315,7 @@ mod tests {
             parent_retriever: Some(false),
             ..eval_args_default()
         };
-        let o: crate::config::SearchOverrides = (&args).into();
+        let o: kb_mcp::config::SearchOverrides = (&args).into();
         assert_eq!(o.mmr, Some(false));
         assert_eq!(o.mmr_lambda, Some(0.7));
         assert_eq!(o.mmr_same_doc_penalty, Some(0.1));
