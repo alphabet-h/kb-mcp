@@ -32,7 +32,6 @@ pub struct MmrCandidate {
 /// `SearchHit.score` に永続化しない、invariant #5)。
 pub fn mmr_select(
     candidates: &[MmrCandidate],
-    _query_emb: &[f32],
     lambda: f32,
     same_doc_penalty: f32,
     limit: usize,
@@ -51,6 +50,18 @@ pub fn mmr_select(
         if a <= b { (a, b) } else { (b, a) }
     }
 
+    // F-42 candidate (Vec<bool> active flag, deferred — see comment below).
+    //
+    // Originally feature-30 PR-2 spec § Q5 hypothesised that replacing
+    // `Vec<usize> remaining` + `retain` (O(N) per iter) with `Vec<bool>` active
+    // + `active_count` (O(1) per pick) would yield -10~20% on `pool=500`. In
+    // practice the bench ran +5-8% **slower** (cosine-similarity inner loop
+    // dominates; the bool-flag path scans all n indices every iter and pays
+    // a branch-predictor penalty that retain's "live elements only" walk
+    // avoids). The retain-based loop is retained until a future cycle re-
+    // evaluates with a different data structure (BTreeSet / SmallVec swap-
+    // remove / SIMD cosine kernel). The `prop_mmr_tie_break_stable` proptest
+    // added in this cycle stays as a regression catcher for any future try.
     let mut selected: Vec<usize> = Vec::with_capacity(target);
     let mut remaining: Vec<usize> = (0..n).collect();
 
@@ -151,13 +162,12 @@ mod tests {
     #[test]
     fn test_mmr_lambda_1_returns_relevance_order() {
         // lambda=1.0 で diversity 項が消えるので relevance_score 降順そのまま
-        let q = vec![1.0, 0.0];
         let cands = vec![
             cand(1, 1, vec![1.0, 0.0], 0.3),
             cand(2, 2, vec![0.5, 0.5], 0.9),
             cand(3, 3, vec![0.0, 1.0], 0.6),
         ];
-        let sel = mmr_select(&cands, &q, 1.0, 0.0, 3);
+        let sel = mmr_select(&cands, 1.0, 0.0, 3);
         // relevance: index 1 (0.9) > index 2 (0.6) > index 0 (0.3)
         assert_eq!(sel, vec![1, 2, 0]);
     }
@@ -166,13 +176,12 @@ mod tests {
     fn test_mmr_lambda_0_maximizes_diversity() {
         // lambda=0.0 で 1 件目は relevance 度外視 (任意 = 通常 index 0 安定)、
         // 2 件目以降は最大 diversity (= 既選 set との sim 最小) を選ぶ
-        let q = vec![1.0, 0.0];
         let cands = vec![
             cand(1, 1, vec![1.0, 0.0], 0.5),
             cand(2, 2, vec![1.0, 0.0], 0.5), // 1 と完全同一 embedding
             cand(3, 3, vec![0.0, 1.0], 0.5), // 直交
         ];
-        let sel = mmr_select(&cands, &q, 0.0, 0.0, 2);
+        let sel = mmr_select(&cands, 0.0, 0.0, 2);
         // 1 件目: index 0 (id=1)
         // 2 件目: 1 と diversity 最大 → 直交の id=3 (index 2)
         assert_eq!(sel[0], 0);
@@ -182,13 +191,12 @@ mod tests {
     #[test]
     fn test_mmr_same_doc_penalty_zero_equals_pure_mmr() {
         // penalty=0 なら same-doc を意識しない (= U1 純 MMR)
-        let q = vec![1.0, 0.0];
         let cands = vec![
             cand(1, 100, vec![1.0, 0.0], 0.9),
             cand(2, 100, vec![0.99, 0.05], 0.85),
             cand(3, 200, vec![0.0, 1.0], 0.6),
         ];
-        let sel0 = mmr_select(&cands, &q, 0.7, 0.0, 3);
+        let sel0 = mmr_select(&cands, 0.7, 0.0, 3);
         // 同 doc penalty 無しでも diversity 項で id=2 は不利、id=3 が 2 番手
         assert_eq!(sel0[0], 0);
     }
@@ -196,13 +204,12 @@ mod tests {
     #[test]
     fn test_mmr_same_doc_penalty_strong_pushes_other_doc() {
         // penalty 大で同 doc 選択が強く抑制される
-        let q = vec![1.0, 0.0];
         let cands = vec![
             cand(1, 100, vec![1.0, 0.0], 0.9),
             cand(2, 100, vec![0.95, 0.1], 0.88), // 高 relevance、同 doc
             cand(3, 200, vec![0.5, 0.5], 0.5),   // 中 relevance、別 doc
         ];
-        let sel = mmr_select(&cands, &q, 0.7, 0.5, 2);
+        let sel = mmr_select(&cands, 0.7, 0.5, 2);
         // 1 件目 id=1 / 2 件目は same_doc_penalty で id=3 (別 doc) が優先
         assert_eq!(sel[0], 0);
         assert_eq!(sel[1], 2);
@@ -210,32 +217,29 @@ mod tests {
 
     #[test]
     fn test_mmr_empty_candidates() {
-        let q = vec![1.0, 0.0];
-        let sel = mmr_select(&[], &q, 0.7, 0.0, 5);
+        let sel = mmr_select(&[], 0.7, 0.0, 5);
         assert!(sel.is_empty());
     }
 
     #[test]
     fn test_mmr_limit_larger_than_candidates() {
-        let q = vec![1.0, 0.0];
         let cands = vec![
             cand(1, 1, vec![1.0, 0.0], 0.9),
             cand(2, 2, vec![0.0, 1.0], 0.5),
         ];
-        let sel = mmr_select(&cands, &q, 0.7, 0.0, 10);
+        let sel = mmr_select(&cands, 0.7, 0.0, 10);
         assert_eq!(sel.len(), 2); // truncate しない
     }
 
     #[test]
     fn test_mmr_identical_embeddings_no_panic_no_nan() {
         // 全候補 embedding が同一 (cos=1.0) の degenerate case
-        let q = vec![1.0, 0.0];
         let cands = vec![
             cand(1, 1, vec![1.0, 0.0], 0.9),
             cand(2, 2, vec![1.0, 0.0], 0.8),
             cand(3, 3, vec![1.0, 0.0], 0.7),
         ];
-        let sel = mmr_select(&cands, &q, 0.7, 0.0, 3);
+        let sel = mmr_select(&cands, 0.7, 0.0, 3);
         assert_eq!(sel.len(), 3);
         // 並びは relevance 順に倒れる (diversity 項が全て -1.0 で同点)
         assert_eq!(sel, vec![0, 1, 2]);
@@ -250,7 +254,7 @@ mod tests {
             let cands: Vec<MmrCandidate> = (0..n_cands)
                 .map(|i| cand(i as i64, (i % 3) as i64, vec![1.0, 0.0], 0.5))
                 .collect();
-            let sel = mmr_select(&cands, &[1.0, 0.0], 0.7, 0.0, limit);
+            let sel = mmr_select(&cands, 0.7, 0.0, limit);
             proptest::prop_assert!(sel.len() <= limit.min(n_cands));
         }
 
@@ -261,11 +265,36 @@ mod tests {
             let cands: Vec<MmrCandidate> = (0..n_cands)
                 .map(|i| cand(i as i64, (i % 3) as i64, vec![1.0, 0.0], 0.5))
                 .collect();
-            let sel = mmr_select(&cands, &[1.0, 0.0], 0.7, 0.0, n_cands);
+            let sel = mmr_select(&cands, 0.7, 0.0, n_cands);
             // 全 index が有効、重複なし
             let unique: std::collections::HashSet<usize> = sel.iter().copied().collect();
             proptest::prop_assert_eq!(unique.len(), sel.len());
             proptest::prop_assert!(sel.iter().all(|&i| i < n_cands));
+        }
+
+        /// 既存 invariant 「mmr_value 同点 → input 順 (= index 昇順)」が
+        /// 保たれることを fuzz。全候補 embedding が同一 + relevance +
+        /// document_id すべて同一の degenerate case を proptest 化、
+        /// 結果が **入力 index 昇順** であることを assert する。
+        ///
+        /// F-42 (Vec<bool> active flag への置換) 系の future refactor で
+        /// 順序が崩れたら即 catch するための regression catcher。
+        #[test]
+        fn prop_mmr_tie_break_stable(
+            n_cands in 1_usize..15,
+            limit in 1_usize..20,
+        ) {
+            let cands: Vec<MmrCandidate> = (0..n_cands)
+                .map(|i| MmrCandidate {
+                    chunk_id: i as i64,
+                    document_id: 0,
+                    embedding: vec![1.0, 0.0, 0.0],
+                    relevance_score: 0.5,
+                })
+                .collect();
+            let sel = mmr_select(&cands, 0.7, 0.0, limit);
+            let expected: Vec<usize> = (0..limit.min(n_cands)).collect();
+            proptest::prop_assert_eq!(sel, expected);
         }
     }
 }

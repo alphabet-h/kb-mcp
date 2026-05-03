@@ -379,6 +379,7 @@ mod tests {
             score: 0.0,
             content: content.to_string(),
             heading: None,
+            document_id: 0,
             path: "x.md".to_string(),
             title: None,
             topic: None,

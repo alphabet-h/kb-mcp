@@ -47,15 +47,11 @@ fn make_candidates(pool_size: usize) -> Vec<MmrCandidate> {
         .collect()
 }
 
-/// Dummy query embedding for the pre-F-43 signature. Task 2.4 removes
-/// this argument; the four call sites below will be updated then.
-const DUMMY_QUERY_EMB: [f32; 384] = [1.0_f32; 384];
-
 fn bench_mmr_select_pool50_limit10(c: &mut Criterion) {
     let cands = make_candidates(50);
     c.bench_function("mmr_select / pool=50 / limit=10 / penalty=0.0", |b| {
         b.iter(|| {
-            let sel = mmr_select(black_box(&cands), &DUMMY_QUERY_EMB, 0.7, 0.0, 10);
+            let sel = mmr_select(black_box(&cands), 0.7, 0.0, 10);
             black_box(sel)
         });
     });
@@ -65,7 +61,7 @@ fn bench_mmr_select_pool100_limit50(c: &mut Criterion) {
     let cands = make_candidates(100);
     c.bench_function("mmr_select / pool=100 / limit=50 / penalty=0.0", |b| {
         b.iter(|| {
-            let sel = mmr_select(black_box(&cands), &DUMMY_QUERY_EMB, 0.7, 0.0, 50);
+            let sel = mmr_select(black_box(&cands), 0.7, 0.0, 50);
             black_box(sel)
         });
     });
@@ -75,7 +71,7 @@ fn bench_mmr_select_pool500_limit50(c: &mut Criterion) {
     let cands = make_candidates(500);
     c.bench_function("mmr_select / pool=500 / limit=50 / penalty=0.0", |b| {
         b.iter(|| {
-            let sel = mmr_select(black_box(&cands), &DUMMY_QUERY_EMB, 0.7, 0.0, 50);
+            let sel = mmr_select(black_box(&cands), 0.7, 0.0, 50);
             black_box(sel)
         });
     });
@@ -85,7 +81,7 @@ fn bench_mmr_select_pool500_limit50_penalty(c: &mut Criterion) {
     let cands = make_candidates(500);
     c.bench_function("mmr_select / pool=500 / limit=50 / penalty=0.5", |b| {
         b.iter(|| {
-            let sel = mmr_select(black_box(&cands), &DUMMY_QUERY_EMB, 0.7, 0.5, 50);
+            let sel = mmr_select(black_box(&cands), 0.7, 0.5, 50);
             black_box(sel)
         });
     });
