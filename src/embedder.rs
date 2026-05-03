@@ -339,6 +339,28 @@ mod tests {
     }
 
     #[test]
+    fn test_reranker_value_enum_tag_matches_bench_arg() {
+        // F-60 PR-1 codex P1 regression: benches/search_latency.rs hard-codes
+        // `--reranker bge-v2-m3` as the heavy-bench subprocess argument. If
+        // the `#[value(name = "...")]` tag on RerankerChoice::BgeV2M3 ever
+        // diverges from this literal, the bench would fail at clap parse time.
+        // The HuggingFace model id `bge-reranker-v2-m3` must NOT be a valid
+        // CLI value (it lives behind `RerankerChoice::model_id()`).
+        use clap::ValueEnum;
+        assert!(
+            RerankerChoice::from_str("bge-v2-m3", false).is_ok(),
+            "CLI must accept the bench-hardcoded reranker tag 'bge-v2-m3'"
+        );
+        assert!(
+            RerankerChoice::from_str("bge-reranker-v2-m3", false).is_err(),
+            "the HuggingFace model id must not be a valid CLI value"
+        );
+        assert!(RerankerChoice::from_str("bge-base", false).is_ok());
+        assert!(RerankerChoice::from_str("jina-v2-ml", false).is_ok());
+        assert!(RerankerChoice::from_str("none", false).is_ok());
+    }
+
+    #[test]
     fn test_reranker_none_returns_none() {
         // DL を伴わない安全なテスト
         let r = Reranker::try_new(RerankerChoice::None).unwrap();

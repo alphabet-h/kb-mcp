@@ -755,7 +755,7 @@ fn compute_reranker_input_limit(mmr_enabled: bool, pool_size: usize, limit: u32)
 /// Caller-side early reject (e.g. for a richer error response shape) is OK
 /// — this is belt-and-suspenders.
 #[allow(clippy::too_many_arguments)] // 8 cohesive inputs; struct-of-args adds noise without grouping
-pub(crate) fn run_search_pipeline(
+pub fn run_search_pipeline(
     db: &Database,
     reranker: Option<&mut Reranker>,
     query: &str,
@@ -908,9 +908,7 @@ pub(crate) fn run_search_pipeline(
 ///
 /// Visible to the crate so the CLI (`src/main.rs`) can reuse the same
 /// validation path.
-pub(crate) fn compile_path_globs(
-    patterns: &[String],
-) -> anyhow::Result<crate::db::CompiledPathGlobs> {
+pub fn compile_path_globs(patterns: &[String]) -> anyhow::Result<crate::db::CompiledPathGlobs> {
     use anyhow::Context;
     if patterns.is_empty() {
         anyhow::bail!(
@@ -963,8 +961,8 @@ pub(crate) fn compile_path_globs(
 /// 実装は MMR off / on どちらでも同一結果を返す (NaN は std::f32 の
 /// `partial_cmp` 順守、`fold(NEG_INFINITY, f32::max)` で安定)。
 ///
-/// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
-pub(crate) fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
+/// `pub` (lib crate API) で CLI (`src/main.rs`) / benches からも再利用できるようにしておく。
+pub fn compute_low_confidence(scores: &[f32], min_ratio: f32) -> bool {
     if scores.len() < 2 || min_ratio == 0.0 {
         return false;
     }
@@ -996,8 +994,8 @@ pub(crate) const MATCH_SPAN_MAX_COUNT: usize = 100;
 /// - `Some(spans)` — 計算済みでマッチあり (start byte 順にソート + 重複除去、
 ///   `MATCH_SPAN_MAX_COUNT` 件で打ち切り)
 ///
-/// `pub(crate)` で CLI (`src/main.rs`) からも再利用できるようにしておく。
-pub(crate) fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crate::db::MatchSpan>> {
+/// `pub` (lib crate API) で CLI (`src/main.rs`) / benches からも再利用できるようにしておく。
+pub fn compute_match_spans(query: &str, content: &str) -> Option<Vec<crate::db::MatchSpan>> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return None;
