@@ -15,18 +15,14 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::process::Command;
 
-/// Path to the kb-mcp binary built by cargo. We assume `cargo build
-/// --release` has been run before `cargo bench` (criterion does NOT
-/// auto-build the binary the way `cargo test` builds test crates).
+/// Path to the kb-mcp binary built by cargo. Cargo provides this as an
+/// env var when building integration tests / benchmarks, so it is robust
+/// to `--target <triple>`, custom `build.target`, and profile-specific
+/// directory naming (e.g. `target/<triple>/release/...`). The macro is
+/// resolved at compile time of this bench file, which means cargo will
+/// always rebuild the binary as a dependency of the bench target.
 fn kb_mcp_binary() -> String {
-    let target = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".into());
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    format!("{target}/{profile}/kb-mcp{suffix}")
+    env!("CARGO_BIN_EXE_kb-mcp").to_string()
 }
 
 /// Path to a small test KB. Devs can override with their own KB via env.
