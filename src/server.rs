@@ -510,8 +510,13 @@ impl KbServer {
             &self.parser_registry,
             GET_DOCUMENT_MAX_BYTES,
         ) {
-            Ok(p) => p,
-            Err(e) => return serde_json::to_string_pretty(&e).unwrap_or_default(),
+            ValidatePathOutcome::Found(p) => p,
+            ValidatePathOutcome::NotFound(e) => {
+                return serde_json::to_string_pretty(&e).unwrap_or_default();
+            }
+            ValidatePathOutcome::Denied(e) => {
+                return serde_json::to_string_pretty(&e).unwrap_or_default();
+            }
         };
         let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
         match std::fs::read_to_string(&canonical) {
@@ -544,6 +549,8 @@ impl KbServer {
             &self.kb_path,
             &self.best_practice_templates,
             &params.target,
+            &self.parser_registry,
+            GET_DOCUMENT_MAX_BYTES,
         ) {
             ResolveOutcome::Found(p) => p,
             ResolveOutcome::NotFound(tried) => {
@@ -555,6 +562,9 @@ impl KbServer {
                     ),
                 })
                 .unwrap_or_default();
+            }
+            ResolveOutcome::Denied(err) => {
+                return serde_json::to_string_pretty(&err).unwrap_or_default();
             }
         };
 
@@ -1050,6 +1060,26 @@ pub(crate) const GET_DOCUMENT_MAX_BYTES: u64 = 1024 * 1024;
 /// `compute_match_spans` の O(N×M) を query 側からも抑制できる。F-35。
 pub(crate) const SEARCH_QUERY_MAX_BYTES: usize = 1024;
 
+/// `validate_get_document_path` の結果。各 fail variant に既存の
+/// `ErrorResponse` を内蔵することで、caller (`get_document` /
+/// `resolve_best_practice_path`) は文言生成や prefix 追加なしで
+/// `ErrorResponse` を直接 JSON 化できる (= 既存 5 unit test の
+/// `err.error.contains("...")` assertion 完全保持)。
+///
+/// - `Found(PathBuf)` — 4 段階防御を通過、canonical な絶対パス
+/// - `NotFound(ErrorResponse)` — file-not-found / canonicalize-failed /
+///   outside-kb / extension-denied / size-exceeded の総称。`get_best_practice`
+///   の template loop では「次 template を試す」価値ありと解釈
+/// - `Denied(ErrorResponse)` — symlink hit のみ (security event)。
+///   `get_best_practice` の template loop では即 break = 攻撃 indicator を
+///   surface
+#[derive(Debug)]
+pub(crate) enum ValidatePathOutcome {
+    Found(PathBuf),
+    NotFound(ErrorResponse),
+    Denied(ErrorResponse),
+}
+
 /// `get_document` のパス検証 + size cap。成功時は canonical な絶対パスを返す。
 /// 拒否時は `ErrorResponse` を返し、呼び出し側が JSON 化する。
 ///
@@ -1064,19 +1094,19 @@ pub(crate) fn validate_get_document_path(
     rel_path: &str,
     registry: &Registry,
     max_bytes: u64,
-) -> std::result::Result<PathBuf, ErrorResponse> {
+) -> ValidatePathOutcome {
     let file_path = kb_path.join(rel_path);
 
     // 1. Symlink reject (canonicalize の前に判定)
     match std::fs::symlink_metadata(&file_path) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(ErrorResponse {
+            return ValidatePathOutcome::Denied(ErrorResponse {
                 error: "Access denied: symlinks are not allowed.".to_string(),
             });
         }
         Ok(_) => {}
         Err(_) => {
-            return Err(ErrorResponse {
+            return ValidatePathOutcome::NotFound(ErrorResponse {
                 error: format!(
                     "File not found: {rel_path}. Path should be relative to knowledge-base/ (e.g. \"deep-dive/mcp/overview.md\")."
                 ),
@@ -1088,7 +1118,7 @@ pub(crate) fn validate_get_document_path(
     let canonical = match file_path.canonicalize() {
         Ok(p) => p,
         Err(_) => {
-            return Err(ErrorResponse {
+            return ValidatePathOutcome::NotFound(ErrorResponse {
                 error: format!(
                     "File not found: {rel_path}. Path should be relative to knowledge-base/ (e.g. \"deep-dive/mcp/overview.md\")."
                 ),
@@ -1096,7 +1126,7 @@ pub(crate) fn validate_get_document_path(
         }
     };
     if !canonical.starts_with(kb_path) {
-        return Err(ErrorResponse {
+        return ValidatePathOutcome::NotFound(ErrorResponse {
             error: "Access denied: path is outside the knowledge base.".to_string(),
         });
     }
@@ -1104,7 +1134,7 @@ pub(crate) fn validate_get_document_path(
     // 3. Extension membership check
     let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !registry.has_extension(ext) {
-        return Err(ErrorResponse {
+        return ValidatePathOutcome::NotFound(ErrorResponse {
             error: format!(
                 "Access denied: extension {ext:?} is not in the indexed parser registry. Allowed: {:?}",
                 registry.extensions()
@@ -1115,7 +1145,7 @@ pub(crate) fn validate_get_document_path(
     // 4. Size cap
     match std::fs::metadata(&canonical) {
         Ok(meta) if meta.len() > max_bytes => {
-            return Err(ErrorResponse {
+            return ValidatePathOutcome::NotFound(ErrorResponse {
                 error: format!(
                     "File too large: {} bytes (max {} bytes).",
                     meta.len(),
@@ -1125,13 +1155,13 @@ pub(crate) fn validate_get_document_path(
         }
         Ok(_) => {}
         Err(e) => {
-            return Err(ErrorResponse {
+            return ValidatePathOutcome::NotFound(ErrorResponse {
                 error: format!("Failed to stat file: {e}"),
             });
         }
     }
 
-    Ok(canonical)
+    ValidatePathOutcome::Found(canonical)
 }
 
 ///
@@ -1159,37 +1189,47 @@ fn build_document_response(
 }
 
 /// `get_best_practice` のパス解決結果。
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 enum ResolveOutcome {
     /// `canonicalize` 済みのファイル絶対パス。
     Found(PathBuf),
     /// どのテンプレートにもマッチしなかった。試行した相対パス列。
     NotFound(Vec<String>),
+    /// security event (= symlink hit) で即 break した。`validate_get_document_path`
+    /// から bubble up した `ErrorResponse` を内蔵し、handler は文言生成や prefix 追加
+    /// なしで `serde_json::to_string_pretty(&err)` で直接 client に返却する。
+    Denied(ErrorResponse),
 }
 
 /// Best-practice resolver: テンプレート列に `{target}` を置換してファイルを探す。
-/// 先頭から順に試し、`canonicalize` 成功 & `kb_path` 配下に収まる最初の
+/// 先頭から順に試し、`validate_get_document_path` の 4 段階防御 (symlink reject /
+/// canonicalize+starts_with / extension membership / size cap) を通過した最初の
 /// 候補を返す。`kb_path` は呼び出し側で既に canonicalize されている前提
 /// (`run_server` / tests で事前処理)。
+///
+/// fail 種別の挙動 (F-45):
+/// - `Found(p)` → 即 return
+/// - `NotFound(_)` (file not found / canonicalize failed / outside-kb / extension
+///   denied / size exceeded) → 次 template を試行 (err 文言は捨てて `tried` に
+///   rel path のみ記録、info leak ゼロ)
+/// - `Denied(err)` (symlink hit = security event) → 即 return `ResolveOutcome::Denied(err)`
+///   (= 文言保持、template ordering より security event 優先)
 fn resolve_best_practice_path(
     kb_path: &std::path::Path,
     templates: &[String],
     target: &str,
+    registry: &Registry,
+    max_bytes: u64,
 ) -> ResolveOutcome {
     let mut tried: Vec<String> = Vec::new();
     for tmpl in templates {
         let rel = tmpl.replace("{target}", target);
         tried.push(rel.clone());
-        let candidate = kb_path.join(&rel);
-        let canon = match candidate.canonicalize() {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if !canon.starts_with(kb_path) {
-            // path traversal reject
-            continue;
+        match validate_get_document_path(kb_path, &rel, registry, max_bytes) {
+            ValidatePathOutcome::Found(p) => return ResolveOutcome::Found(p),
+            ValidatePathOutcome::NotFound(_) => continue,
+            ValidatePathOutcome::Denied(err) => return ResolveOutcome::Denied(err),
         }
-        return ResolveOutcome::Found(canon);
     }
     ResolveOutcome::NotFound(tried)
 }
@@ -1405,7 +1445,13 @@ mod tests {
         let kb = TempKb::new("bp1");
         kb.write("best-practices/claude-code/PERFECT.md", "# CC\n");
         let templates = vec!["best-practices/{target}/PERFECT.md".to_string()];
-        let r = resolve_best_practice_path(&kb.path, &templates, "claude-code");
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            "claude-code",
+            &md_only_registry(),
+            1024 * 1024,
+        );
         match r {
             ResolveOutcome::Found(p) => {
                 assert!(
@@ -1425,7 +1471,13 @@ mod tests {
             "best-practices/{target}/PERFECT.md".to_string(), // 不存在
             "docs/{target}.md".to_string(),                   // ヒット
         ];
-        let r = resolve_best_practice_path(&kb.path, &templates, "cursor");
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            "cursor",
+            &md_only_registry(),
+            1024 * 1024,
+        );
         match r {
             ResolveOutcome::Found(p) => {
                 assert!(p.ends_with("docs/cursor.md") || p.ends_with("docs\\cursor.md"))
@@ -1451,13 +1503,19 @@ mod tests {
         // `{target}` に `../<ファイル名>` を入れて kb 外を指す
         let target_rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
         let templates = vec!["{target}".to_string()];
-        let r = resolve_best_practice_path(&kb.path, &templates, &target_rel);
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            &target_rel,
+            &md_only_registry(),
+            1024 * 1024,
+        );
         // 実ファイルは存在するが kb_path 配下ではないので拒否される
         match r {
             ResolveOutcome::NotFound(tried) => {
                 assert_eq!(tried.len(), 1);
             }
-            ResolveOutcome::Found(p) => panic!("traversal was not rejected: {p:?}"),
+            other => panic!("traversal was not rejected: {other:?}"),
         }
         let _ = fs::remove_file(&outside);
     }
@@ -1466,7 +1524,13 @@ mod tests {
     fn test_resolve_best_practice_all_missing_returns_tried_list() {
         let kb = TempKb::new("bp4");
         let templates = vec!["a/{target}.md".to_string(), "b/{target}.md".to_string()];
-        let r = resolve_best_practice_path(&kb.path, &templates, "nope");
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            "nope",
+            &md_only_registry(),
+            1024 * 1024,
+        );
         match r {
             ResolveOutcome::NotFound(tried) => {
                 assert_eq!(
@@ -1474,18 +1538,134 @@ mod tests {
                     vec!["a/nope.md".to_string(), "b/nope.md".to_string()]
                 );
             }
-            ResolveOutcome::Found(p) => panic!("expected NotFound, got {p:?}"),
+            other => panic!("expected NotFound, got {other:?}"),
         }
     }
 
     #[test]
     fn test_resolve_best_practice_empty_templates_returns_empty_tried() {
         let kb = TempKb::new("bp5");
-        let r = resolve_best_practice_path(&kb.path, &[], "any");
+        let r = resolve_best_practice_path(&kb.path, &[], "any", &md_only_registry(), 1024 * 1024);
         match r {
             ResolveOutcome::NotFound(tried) => assert!(tried.is_empty()),
-            ResolveOutcome::Found(_) => panic!("expected NotFound"),
+            other => panic!("expected NotFound, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-45: get_best_practice hardening (4 段階防御 integration smoke)
+    //
+    // 役割分担: validate_get_document_path の specific branch evidence は
+    // 既存 5 `test_validate_get_document_path_*` (`err.error.contains("...")`
+    // で branch 識別) でカバー済。本 4 test は resolve_best_practice_path の
+    // template loop semantics (NotFound → try next / Denied → break) が
+    // 正しく動作する integration smoke。
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_best_practice_rejects_symlink_template() {
+        // best-practice template が symlink を指す場合は Denied で即 break
+        let kb = TempKb::new("bp-sym");
+        let target = kb.write("real.md", "# real\n");
+        let link = kb.path.join("link.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let templates = vec!["link.md".to_string()];
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            "any",
+            &md_only_registry(),
+            1024 * 1024,
+        );
+        match r {
+            ResolveOutcome::Denied(err) => {
+                assert!(
+                    err.error.contains("symlinks are not allowed"),
+                    "expected symlink Denied, got: {}",
+                    err.error
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_best_practice_rejects_oversized_file() {
+        // max_bytes=1024 + 2 KiB ファイル で size branch を踏ませる
+        // (= NotFound 経由 try next / 全 template fail で NotFound(tried))
+        let kb = TempKb::new("bp-size");
+        let big = "a".repeat(2 * 1024);
+        kb.write("docs/big.md", &big);
+        let templates = vec!["docs/big.md".to_string()];
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            "any",
+            &md_only_registry(),
+            1024, // max_bytes を small にして size cap を発火
+        );
+        match r {
+            ResolveOutcome::NotFound(tried) => {
+                assert_eq!(tried.len(), 1);
+                assert_eq!(tried[0], "docs/big.md");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_best_practice_rejects_extension_outside_registry() {
+        // registry が .md のみ、template が .txt を指す → NotFound 経由 try next
+        let kb = TempKb::new("bp-ext");
+        kb.write("notes.txt", "plain text\n");
+        let templates = vec!["notes.txt".to_string()];
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            "any",
+            &md_only_registry(),
+            1024 * 1024,
+        );
+        match r {
+            ResolveOutcome::NotFound(tried) => {
+                assert_eq!(tried.len(), 1);
+                assert_eq!(tried[0], "notes.txt");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_best_practice_rejects_traversal_outside_kb() {
+        // kb_path 外に実ファイル + template に "../<filename>" 形式
+        // (canonicalize 成功 → starts_with 失敗 branch、Windows でも portable)
+        let kb = TempKb::new("bp-trav");
+        let outside = kb.path.parent().unwrap().join(format!(
+            "kb-mcp-srvtest-bp-outside-{}-{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&outside, "secret").unwrap();
+        let target_rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let templates = vec!["{target}".to_string()];
+        let r = resolve_best_practice_path(
+            &kb.path,
+            &templates,
+            &target_rel,
+            &md_only_registry(),
+            1024 * 1024,
+        );
+        match r {
+            ResolveOutcome::NotFound(tried) => {
+                assert_eq!(tried.len(), 1);
+            }
+            other => panic!("traversal was not rejected: {other:?}"),
+        }
+        let _ = fs::remove_file(&outside);
     }
 
     // -----------------------------------------------------------------------
@@ -1780,7 +1960,10 @@ mod tests {
         let kb = TempKb::new("gd-ok");
         kb.write("docs/a.md", "# A\nbody\n");
         let r = validate_get_document_path(&kb.path, "docs/a.md", &md_only_registry(), 1024 * 1024);
-        assert!(r.is_ok(), "normal .md should pass: {r:?}");
+        assert!(
+            matches!(r, ValidatePathOutcome::Found(_)),
+            "normal .md should pass: {r:?}"
+        );
     }
 
     #[test]
@@ -1788,9 +1971,15 @@ mod tests {
         let kb = TempKb::new("gd-ext");
         // .git/config を作って read 可能にしてみる
         kb.write(".git/config", "[user]\n  email = test@example.com\n");
-        let err =
-            validate_get_document_path(&kb.path, ".git/config", &md_only_registry(), 1024 * 1024)
-                .unwrap_err();
+        let err = match validate_get_document_path(
+            &kb.path,
+            ".git/config",
+            &md_only_registry(),
+            1024 * 1024,
+        ) {
+            ValidatePathOutcome::NotFound(e) => e,
+            other => panic!("expected NotFound, got {other:?}"),
+        };
         assert!(
             err.error.contains("not in the indexed parser registry"),
             "expected extension reject, got: {}",
@@ -1804,8 +1993,10 @@ mod tests {
         // max を 1 KiB にして 2 KiB のファイルで超過させる
         let big = "a".repeat(2 * 1024);
         kb.write("big.md", &big);
-        let err =
-            validate_get_document_path(&kb.path, "big.md", &md_only_registry(), 1024).unwrap_err();
+        let err = match validate_get_document_path(&kb.path, "big.md", &md_only_registry(), 1024) {
+            ValidatePathOutcome::NotFound(e) => e,
+            other => panic!("expected NotFound, got {other:?}"),
+        };
         assert!(
             err.error.contains("File too large"),
             "expected size reject, got: {}",
@@ -1827,8 +2018,11 @@ mod tests {
         ));
         fs::write(&outside, "secret").unwrap();
         let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
-        let err = validate_get_document_path(&kb.path, &rel, &md_only_registry(), 1024 * 1024)
-            .unwrap_err();
+        let err = match validate_get_document_path(&kb.path, &rel, &md_only_registry(), 1024 * 1024)
+        {
+            ValidatePathOutcome::NotFound(e) => e,
+            other => panic!("expected NotFound, got {other:?}"),
+        };
         // Either "outside the knowledge base" (canonicalize succeeded) or
         // "File not found" (canonicalize failed because traversal escaped before existing).
         assert!(
@@ -1847,8 +2041,12 @@ mod tests {
         let target = kb.write("target.md", "# target\n");
         let link = kb.path.join("link.md");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let err = validate_get_document_path(&kb.path, "link.md", &md_only_registry(), 1024 * 1024)
-            .unwrap_err();
+        let err =
+            match validate_get_document_path(&kb.path, "link.md", &md_only_registry(), 1024 * 1024)
+            {
+                ValidatePathOutcome::Denied(e) => e,
+                other => panic!("expected Denied, got {other:?}"),
+            };
         assert!(
             err.error.contains("symlinks are not allowed"),
             "expected symlink reject, got: {}",
