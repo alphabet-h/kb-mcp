@@ -863,7 +863,6 @@ pub fn run_search_pipeline(
 
     let selected = crate::mmr::mmr_select(
         &mmr_cands,
-        query_embedding,
         resolved.mmr_lambda,
         resolved.mmr_same_doc_penalty,
         limit as usize,
