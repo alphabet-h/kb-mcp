@@ -42,6 +42,12 @@ globset = "0.4"
 # [feature 27] config discovery: cross-platform `~` 展開
 shellexpand = "3"
 
+[features]
+# Reranker (~2.3 GB) を要求する bench を default 起動から除外する gate。
+# `cargo bench --features heavy-bench --bench search_latency` で reranker bench fn が
+# compile + 実行される (criterion 0.5 には #[ignore] 機構がないため Cargo feature で gate)。
+heavy-bench = []
+
 [dev-dependencies]
 # Property-based testing for f64 invariant guards (recall_at_k / ndcg_at_k /
 # chunk_quality_score の値域 [0.0, 1.0] を proptest で固定)。
