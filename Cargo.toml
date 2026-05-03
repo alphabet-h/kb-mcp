@@ -71,6 +71,11 @@ harness = false
 name = "mmr_perf"
 harness = false
 
+# F-60 PR-1: search latency subprocess bench. reranker bench は heavy-bench feature gate
+[[bench]]
+name = "search_latency"
+harness = false
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

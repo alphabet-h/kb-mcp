@@ -15,6 +15,10 @@ CLAUDE.local.md
 # Runtime config placed next to the binary (user-local). Template is kb-mcp.toml.example.
 kb-mcp.toml
 
+# Generated SQLite DB files (one per kb_path.parent()). Bench fixtures under
+# tests/fixtures/kb-bench/ generate `.kb-mcp.db` next to them when indexed.
+**/.kb-mcp.db
+
 # Deployment recipe templates under examples/deployments/ are meant to be
 # committed (they are example artifacts, not user-local runtime files).
 !examples/deployments/**/.mcp.json
