@@ -33,6 +33,10 @@ pub struct SearchResult {
     pub score: f32,
     pub content: String,
     pub heading: Option<String>,
+    /// F-41 PR-2: `chunks.document_id` を SQL の `SELECT` で carry し、
+    /// MMR pool 構築時の N+1 lookup (`lookup_document_id_by_path`) を回避。
+    /// rename race の `unwrap_or(0)` collision (F-44) も同時に消える。
+    pub document_id: i64,
     pub path: String,
     pub title: Option<String>,
     pub topic: Option<String>,
@@ -803,7 +807,7 @@ impl Database {
     pub fn chunks_for_path(&self, path: &str) -> Result<Vec<(i64, Vec<f32>, SearchResult)>> {
         let sql = "
             SELECT c.id, vec_to_json(v.embedding),
-                   c.content, c.heading,
+                   c.content, c.heading, c.document_id,
                    d.path, d.title, d.topic, d.date, d.tags
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
@@ -818,16 +822,18 @@ impl Database {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(4)?, // document_id
+                row.get::<_, String>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, embedding_json, content, heading, path, title, topic, date, tags_json) = r?;
+            let (id, embedding_json, content, heading, doc_id, path, title, topic, date, tags_json) =
+                r?;
             let embedding: Vec<f32> = serde_json::from_str(&embedding_json)
                 .with_context(|| format!("failed to parse embedding json for chunk {id}"))?;
             out.push((
@@ -837,6 +843,7 @@ impl Database {
                     score: 1.0,
                     content,
                     heading,
+                    document_id: doc_id,
                     path,
                     title,
                     topic,
@@ -920,26 +927,12 @@ impl Database {
         Ok(out)
     }
 
-    /// `documents.path` から `documents.id` を引く軽量 lookup。
-    /// MMR の `same_doc_penalty` 計算で chunk → document_id を解決するために使う。
-    /// 不存在なら `Ok(None)`。
-    ///
-    /// 計算量は path カラムへの index 引き 1 回。MMR の候補プール (≤ 50 件) に
-    /// 対して chunk ごとに呼ばれるが、in-memory cache が効くため実測コストは低い。
-    /// 将来 hot path 化したら `Vec<&str>` 入力 → `HashMap<String, i64>` 出力に
-    /// バッチ化するか、search_hybrid_candidates の戻り値型に document_id を
-    /// 同梱する案あり (feature-28 plan Step 2 の note 参照)。
-    pub fn lookup_document_id_by_path(&self, path: &str) -> Result<Option<i64>> {
-        use rusqlite::OptionalExtension;
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT id FROM documents WHERE path = ?1",
-                rusqlite::params![path],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
+    // F-41 PR-2: lookup_document_id_by_path was the per-candidate N+1 lookup
+    // used by the MMR pool builder. SearchResult.document_id is now carried by
+    // the candidate SQLs (search_vec_candidates / search_fts_candidates /
+    // chunks_for_path), so the helper is removed entirely. Side effect: the
+    // `unwrap_or(0)` rename-race collision flagged as F-44 also disappears
+    // (no fallback path = no collision).
 
     /// Parent retriever 用: `chunk_id` から `(document_id, chunk_index, token_count)`
     /// を引く軽量 lookup。`token_count` は legacy 行で NULL になり得るので
@@ -1065,7 +1058,7 @@ impl Database {
         let sql = format!(
             "
             SELECT c.id, bm25(fts_chunks, {h}, {c}) AS score,
-                   c.content, c.heading, c.quality_score,
+                   c.content, c.heading, c.quality_score, c.document_id,
                    d.path, d.title, d.topic, d.date, d.category, d.tags
             FROM fts_chunks f
             JOIN chunks c ON c.id = f.rowid
@@ -1087,12 +1080,13 @@ impl Database {
                 row.get::<_, String>(2)?,          // content
                 row.get::<_, Option<String>>(3)?,  // heading
                 row.get::<_, f32>(4)?,             // quality_score
-                row.get::<_, String>(5)?,          // path
-                row.get::<_, Option<String>>(6)?,  // title
-                row.get::<_, Option<String>>(7)?,  // topic
-                row.get::<_, Option<String>>(8)?,  // date
-                row.get::<_, Option<String>>(9)?,  // category
-                row.get::<_, Option<String>>(10)?, // tags (JSON)
+                row.get::<_, i64>(5)?,             // document_id (F-41)
+                row.get::<_, String>(6)?,          // path
+                row.get::<_, Option<String>>(7)?,  // title
+                row.get::<_, Option<String>>(8)?,  // topic
+                row.get::<_, Option<String>>(9)?,  // date
+                row.get::<_, Option<String>>(10)?, // category
+                row.get::<_, Option<String>>(11)?, // tags (JSON)
             ))
         })?;
 
@@ -1104,6 +1098,7 @@ impl Database {
                 content,
                 heading,
                 quality_score,
+                doc_id,
                 path,
                 title,
                 r_topic,
@@ -1148,6 +1143,7 @@ impl Database {
                     score, // 一旦 bm25 を入れておく (呼び出し側で RRF に上書き)
                     content,
                     heading,
+                    document_id: doc_id,
                     path,
                     title,
                     topic: r_topic,
@@ -1273,7 +1269,7 @@ impl Database {
         let embedding_json = serde_json::to_string(query_embedding)?;
         let sql = "
             SELECT v.chunk_id, v.distance,
-                   c.content, c.heading, c.quality_score,
+                   c.content, c.heading, c.quality_score, c.document_id,
                    d.path, d.title, d.topic, d.date, d.category, d.tags
             FROM vec_chunks v
             JOIN chunks c ON c.id = v.chunk_id
@@ -1291,12 +1287,13 @@ impl Database {
                 row.get::<_, String>(2)?,          // content
                 row.get::<_, Option<String>>(3)?,  // heading
                 row.get::<_, f32>(4)?,             // quality_score
-                row.get::<_, String>(5)?,          // path
-                row.get::<_, Option<String>>(6)?,  // title
-                row.get::<_, Option<String>>(7)?,  // topic
-                row.get::<_, Option<String>>(8)?,  // date
-                row.get::<_, Option<String>>(9)?,  // category
-                row.get::<_, Option<String>>(10)?, // tags (JSON)
+                row.get::<_, i64>(5)?,             // document_id (F-41)
+                row.get::<_, String>(6)?,          // path
+                row.get::<_, Option<String>>(7)?,  // title
+                row.get::<_, Option<String>>(8)?,  // topic
+                row.get::<_, Option<String>>(9)?,  // date
+                row.get::<_, Option<String>>(10)?, // category
+                row.get::<_, Option<String>>(11)?, // tags (JSON)
             ))
         })?;
 
@@ -1308,6 +1305,7 @@ impl Database {
                 content,
                 heading,
                 quality_score,
+                doc_id,
                 path,
                 title,
                 r_topic,
@@ -1352,6 +1350,7 @@ impl Database {
                     score: distance,
                     content,
                     heading,
+                    document_id: doc_id,
                     path,
                     title,
                     topic: r_topic,
@@ -3611,6 +3610,7 @@ mod tests {
             score: 0.1,
             content: "abc".into(),
             heading: None,
+            document_id: 0,
             path: "x.md".into(),
             title: None,
             topic: None,
@@ -3783,6 +3783,7 @@ mod tests {
                     score: 0.0,
                     content: format!("c{id}"),
                     heading: None,
+                    document_id: 0,
                     path: format!("p{id}"),
                     title: None,
                     topic: None,
@@ -3812,6 +3813,7 @@ mod tests {
                     score: 0.0,
                     content: format!("c{id}"),
                     heading: None,
+                    document_id: 0,
                     path: format!("p{id}"),
                     title: None,
                     topic: None,

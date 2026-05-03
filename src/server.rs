@@ -817,8 +817,9 @@ pub fn run_search_pipeline(
         return Ok(reranked.into_iter().take(limit as usize).collect());
     }
 
-    // MmrCandidate を構築するため chunk_id 群の embedding を一括取得し、
-    // path → documents.id を chunk ごとに 1 SELECT 引く (≤ 50 件で許容コスト)。
+    // MmrCandidate を構築するため chunk_id 群の embedding を一括取得。
+    // F-41 PR-2: path → documents.id の N+1 lookup は廃止、SearchResult.document_id を
+    // candidate SQL で carry 済 (rename race の unwrap_or(0) collision = F-44 も同時消失)。
     let chunk_ids: Vec<i64> = reranked.iter().map(|(id, _)| *id).collect();
     let emb_map = {
         use anyhow::Context;
@@ -830,17 +831,9 @@ pub fn run_search_pipeline(
         .iter()
         .filter_map(|(id, sr)| {
             let emb = emb_map.get(id).cloned()?;
-            // path 引きの document_id 解決失敗 (削除済 race 等) は 0 を入れて
-            // degrade。same_doc_penalty が誤解釈になるが panic / drop よりは
-            // 安全 (MMR は best-effort 多様化)。
-            let doc_id = db
-                .lookup_document_id_by_path(&sr.path)
-                .ok()
-                .flatten()
-                .unwrap_or(0);
             Some(crate::mmr::MmrCandidate {
                 chunk_id: *id,
-                document_id: doc_id,
+                document_id: sr.document_id,
                 embedding: emb,
                 relevance_score: sr.score,
             })
