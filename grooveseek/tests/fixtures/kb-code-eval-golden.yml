@@ -79,11 +79,27 @@ queries:
 
   # --- the chunk budget -----------------------------------------------------
   # A container that fits `max_chunk_chars` is emitted whole and its nested definitions
-  # produce no chunks of their own; lower the budget and it splits, and the sentence
-  # this query is written to moves into a chunk headed for the nested function. So this
-  # entry is satisfiable only while the budget holds the container together.
+  # produce no chunks of their own, so at the shipped budget all three sentences below
+  # live in one chunk headed `module width`. Lower the budget and the container splits:
+  # each sentence moves into a chunk headed for the nested function that holds it, and
+  # all three entries stop being satisfiable together. Three rather than one because a
+  # floor set two queries below a clean sweep cannot be tripped by fewer.
+  #
+  # The module's own doc comment is deliberately bare. It survives a split as an
+  # interstitial that keeps the parent heading, so anything written there would go on
+  # answering under `module width` and hide the very change this group is for.
   - id: code-widest-entry-sets-the-room
     query: "what decides how much room a column gets, and what happens to an entry too big for the page"
+    expected:
+      - path: "src/tabular.rs"
+        heading: "module width"
+  - id: code-underscoring-stops-with-its-column
+    query: "does the line beneath the headings run the whole way across or stop where each heading does"
+    expected:
+      - path: "src/tabular.rs"
+        heading: "module width"
+  - id: code-exact-fit-is-not-too-big
+    query: "an entry that exactly fills what it was given, does that count as needing more"
     expected:
       - path: "src/tabular.rs"
         heading: "module width"
@@ -99,7 +115,7 @@ queries:
     expected:
       - path: "src/glyphs.rs"
   - id: code-absent-value-placeholder
-    query: "what gets printed in a column where the value is absent"
+    query: "telling a figure that was never recorded apart from one that was recorded empty"
     expected:
       - path: "src/glyphs.rs"
   - id: code-one-horizontal-line

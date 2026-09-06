@@ -2,11 +2,12 @@
 //!
 //! Bare values only; the body that arranges them lives elsewhere.
 
-/// Stands in where a value is missing.
+/// Stands in where there is nothing to show.
 ///
-/// Two dashes rather than emptiness, so that a hole in one column still occupies the room
-/// the column was given and the eye can follow a single row all the way across without
-/// losing its place halfway along.
+/// Two dashes rather than whitespace, because whitespace cannot be told apart from a
+/// figure that is itself empty. A reader who sees blankness has no way to know whether
+/// nothing was recorded or whether what was recorded was the empty string, and those two
+/// call for different next steps: one is a gap in the data, the other is the data.
 pub const BLANK_FIELD: &str = "--";
 
 /// Repeated to draw the one horizontal line the grid is allowed.

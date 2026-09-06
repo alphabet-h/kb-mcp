@@ -22,9 +22,9 @@ pub mod width {
 
     /// Stretch one cell out to the room its column was given.
     ///
-    /// Padding is added on the right so that the first character of every entry begins at
-    /// the same offset down the page; an entry already at or past the room it was given is
-    /// handed back untouched, which is how an over-wide entry survives step one.
+    /// Filler is appended after the text rather than before it, so that every entry in a
+    /// column starts in the same place and the reader's eye has a straight edge to run
+    /// down. An entry already at or past the room it was given is handed back untouched.
     pub fn pad_to(cell: &str, room: usize) -> String {
         let seen = cell.chars().count();
         if seen >= room {
@@ -39,8 +39,23 @@ pub mod width {
     }
 
     /// Draw the horizontal line that sits under the first row.
+    ///
+    /// The line stops where its own column stops, so a narrow column gets a short line and
+    /// the underscoring is as ragged on the right as the heading row above it. Running one
+    /// unbroken line across the whole listing instead would suggest a boundary that spans
+    /// the columns, when what is being separated is the headings from the values.
     pub fn rule(room: usize) -> String {
         "-".repeat(room)
+    }
+
+    /// Say whether an entry needs no more room than it has been given.
+    ///
+    /// The comparison counts an entry that exactly fills what it was given as needing no
+    /// more, so a set of entries that already line up is never granted one extra position
+    /// on account of the longest of them. Treating an exact fit as too big would widen
+    /// every well-behaved set by one and leave a trailing gap down the whole listing.
+    pub fn fits(taken: usize, room: usize) -> bool {
+        taken <= room
     }
 }
 
