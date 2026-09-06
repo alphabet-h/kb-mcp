@@ -209,12 +209,16 @@ jobs:
         # ONNX を各 OS 上で実行する経路自体は BGE-small を使う他テストが踏むので、
         # 除外しても OS 固有の死角は生まれない — BU-11 の品質ゲートも BGE-small 版
         # (kb_eval_retrieval_quality_bge_small) が全 leg で走る。
+        # AV-15 の code 版も同じ形で、BGE-small 版が全 leg。**`--skip` は部分一致
+        # だが `kb_code_eval_...` は `kb_eval_...` を含まない**ので、code 側は
+        # 自分の行が要る。行を落とすと windows / macOS が 2.3 GB を引きに行く。
         shell: bash
         run: |
           if [ "${{ matrix.big_models }}" = "skip" ]; then
             SKIP='--skip test_bge_m3_produces_1024_dim
                   --skip test_bge_reranker_v2_m3_reorders_ja
                   --skip kb_eval_retrieval_quality_bge_m3
+                  --skip kb_code_eval_retrieval_quality_bge_m3
                   --skip groove_search_reads_rerank_by_default_from_the_config_file'
           else
             SKIP=''

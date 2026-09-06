@@ -110,11 +110,17 @@ See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for a detailed walkthrough.
 
 When adding behavior that needs the embedder or reranker, mark the test `#[ignore]` and add a comment explaining what it exercises. When a test touches the OS (services, autostart, the registry), say so in the `#[ignore = "…"]` reason itself so the cost is visible at the call site.
 
-### Retrieval quality gate
+### Retrieval quality gates
 
-`grooveseek/tests/eval_corpus_quality.rs` is the one test that measures whether a change made search *worse* rather than broken. It indexes `tests/fixtures/kb-eval/` — 20 committed Japanese/English documents — runs the committed golden set in `tests/fixtures/kb-eval-golden.yml` through `groove eval`, and fails when aggregate recall@1 or MRR drops below a measured floor. The BGE-small run is the sensitive one and executes on both nightly legs; the BGE-M3 run guards the Japanese semantic path and is Linux-only.
+Two tests measure whether a change made search *worse* rather than broken, one per kind of thing that has to stay findable.
 
-If you change retrieval — query compilation, fusion, chunking, the parser, MMR — expect this gate to move, and read the failure output before adjusting a threshold: it names every query that lost rank 1, what it expected, and what won instead. Lowering a floor is a decision to accept worse search, so it belongs in the pull request description together with the new measurement. The module docs record the current baseline and how it was taken.
+`grooveseek/tests/eval_corpus_quality.rs` covers documents. It indexes `tests/fixtures/kb-eval/` — committed Japanese/English prose — runs the golden set in `tests/fixtures/kb-eval-golden.yml` through `groove eval`, and fails when aggregate recall@1 or MRR drops below a measured floor. The BGE-small run is the sensitive one and executes on every nightly leg; the BGE-M3 run guards the Japanese semantic path and is Linux-only.
+
+`grooveseek/tests/code_eval_quality.rs` covers definitions, over `tests/fixtures/kb-code-eval/` and its own golden. Most of its entries name a `heading` as well as a path, which is what lets it see a regression the other gate structurally cannot: a source file that stops being cut one definition at a time still ranks first for a path-only query, out of whatever chunks it was reduced to. It also has a model-free half that runs on every pull request, asserting that parsing each fixture still produces the headings the golden names.
+
+The corpora are deliberately separate. Adding source files to `kb-eval` was tried and measured, and it cost that gate most of its headroom: reciprocal-rank fusion scores by position in a candidate list, so a document added anywhere re-rolls every near-tie in the corpus.
+
+If you change retrieval — query compilation, fusion, chunking, the parser, MMR — expect these gates to move, and read the failure output before adjusting a threshold: it names every query that lost rank 1, what it expected, and what won instead. Lowering a floor is a decision to accept worse search, so it belongs in the pull request description together with the new measurement. The module docs record the current baselines and how they were taken.
 
 ### Coverage floor
 
