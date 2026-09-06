@@ -69,6 +69,7 @@ Architecture Decision Record — 何を選び、どの代替案を退け、そ�
 | 15. 定義は短くてよい | [en](decisions/0015-let-a-definition-be-short.md) | [ja](decisions/0015-let-a-definition-be-short.ja.md) |
 | 16. plugin の置き場は知識ベースの外に置く | [en](decisions/0016-keep-the-plugin-directory-outside-the-knowledge-base.md) | [ja](decisions/0016-keep-the-plugin-directory-outside-the-knowledge-base.ja.md) |
 | 17. chunk 数の上限を、バイトを捨てずに守る | [en](decisions/0017-bound-the-chunk-count-without-dropping-bytes.md) | [ja](decisions/0017-bound-the-chunk-count-without-dropping-bytes.ja.md) |
+| 18. 同じ範囲は 1 つの定義として扱う | [en](decisions/0018-one-range-is-one-definition.md) | [ja](decisions/0018-one-range-is-one-definition.ja.md) |
 
 ADR-0003 のファイル名は今も `kb-mcpignore` のままです。そこで説明されているファイルは
 現在 `.grooveignore` ですが、**ADR は merge 後に編集しません**。2026-08-17 より前の

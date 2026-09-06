@@ -22,6 +22,7 @@ pub(crate) mod plugin;
 #[cfg(feature = "grammar-rust")]
 pub(crate) mod static_rust;
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -345,7 +346,14 @@ fn chunk_source_capped(
             "a definition is nested deeper than the limit; chunking this file by lines instead"
         );
     } else {
+        drop_repeated_ranges(&mut defs);
         link_containment(&mut defs);
+        // What bounds `emit_def`'s recursion. Containment nests no deeper than the syntax tree
+        // once repeats are gone, and `scope_chain` already refused anything past the bound.
+        debug_assert!(
+            defs.iter().all(|d| d.depth <= bounds.scope_depth),
+            "containment nested deeper than the scope bound allows"
+        );
         let roots: Vec<usize> = (0..defs.len()).filter(|i| defs[*i].depth == 0).collect();
         for i in &roots {
             emit_def(*i, &defs, text, budget, &title, &mut pieces);
@@ -486,7 +494,35 @@ fn scope_chain(node: Node, text: &str, limit: usize) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Drop definitions that cover bytes an earlier one already covers.
+///
+/// A tags query may bind one `@name` per repeated child under a single `@definition.*` node.
+/// `public $a, $b, $c;` in the PHP grammar this project publishes is one `property_declaration`
+/// holding three names, and tree-sitter-tags keeps one tag per name, so the same byte range
+/// arrives once per name. Those are one definition seen under several names rather than one
+/// nested inside another, and [`link_containment`] cannot tell the two apart: a range never
+/// ends before itself, so each repeat becomes the child of the one before it and the forest
+/// degenerates into a chain as long as the declaration is wide.
+///
+/// Collapsing them here is what keeps [`emit_def`]'s recursion bounded, because containment
+/// can then nest no deeper than the syntax tree does and [`MAX_DEFINITION_SCOPE_DEPTH`] already
+/// refused anything past its own bound.
+//
+// Measured 2026-09-06, release build on Windows: a 22,923 byte `.php` file whose class declares
+// 3,000 properties in one statement ended the run with STATUS_STACK_OVERFLOW (exit 0xC00000FD),
+// against a 1 MiB raw-byte cap that never came close to firing. The same shape with 2,000
+// properties indexed in 262 ms.
+//   target/release/groove.exe --config <cfg> index --force
+fn drop_repeated_ranges(defs: &mut Vec<Def>) {
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    defs.retain(|d| seen.insert((d.covered.start, d.covered.end)));
+}
+
 /// Turn the flat definition list into a containment forest.
+///
+/// Definitions covering the same bytes must already have been collapsed by
+/// [`drop_repeated_ranges`]; this treats a range that does not end before another starts as
+/// containing it, which is true of a repeat as well as of a genuinely nested definition.
 fn link_containment(defs: &mut [Def]) {
     let mut order: Vec<usize> = (0..defs.len()).collect();
     order.sort_by(|a, b| {
@@ -1660,5 +1696,248 @@ impl Counter {
         // chunk is the shape this module exists to avoid, so it must not be what happens.
         let doc = parser.parse(SRC, "src/lib.rs", &[]);
         assert!(doc.chunks.is_empty());
+    }
+
+    /// A grammar over the compiled-in Rust parse table with a hand-written tags query, so a
+    /// test can produce tag shapes the shipped query never produces.
+    fn grammar_with_query(query: &str) -> LoadedGrammar {
+        LoadedGrammar::new(
+            "rust",
+            Language::from(static_rust::DESCRIPTOR.language),
+            query,
+        )
+        .expect("the hand-written tags query compiles against the Rust grammar")
+    }
+
+    /// One `@definition.*` on the outer node, one `@name` per repeated inner child: the shape
+    /// tree-sitter-php's `@definition.field` has for `public $a, $b;`.
+    const FIELD_QUERY: &str = "(struct_item body: (field_declaration_list (field_declaration name: (field_identifier) @name))) @definition.class";
+
+    fn wide_struct(fields: usize) -> String {
+        let mut s = String::from("pub struct Row {\n");
+        for i in 0..fields {
+            s.push_str(&format!("    field_number_{i}: u32,\n"));
+        }
+        s.push('}');
+        s.push('\n');
+        s
+    }
+
+    fn def_at(name: &str, covered: Range<usize>) -> Def {
+        Def {
+            kind: "field".to_string(),
+            name: name.to_string(),
+            covered,
+            scope: Vec::new(),
+            children: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn definitions_that_cover_the_same_bytes_collapse_to_the_first() {
+        let mut defs = vec![
+            def_at("a0", 10..50),
+            def_at("a1", 10..50),
+            def_at("a2", 10..50),
+            def_at("later", 60..80),
+        ];
+        drop_repeated_ranges(&mut defs);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        // The leftmost name stands for the declaration, and a definition covering different
+        // bytes is untouched -- this drops repeats, not neighbours.
+        assert_eq!(names, ["a0", "later"]);
+    }
+
+    /// A repeat covers the same bytes at both ends. Two definitions that merely begin together
+    /// -- which the sort in [`link_containment`] expects, since it breaks a tie on the start by
+    /// putting the wider one first -- are a real nesting and both have to survive.
+    #[test]
+    fn a_definition_sharing_only_its_start_with_another_is_not_a_repeat() {
+        let mut defs = vec![def_at("outer", 10..80), def_at("inner", 10..40)];
+        drop_repeated_ranges(&mut defs);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["outer", "inner"]);
+    }
+
+    /// Without [`drop_repeated_ranges`] the repeats become a chain (each the child of the one
+    /// before it), [`emit_def`] recurses once per link, and the heading of every chunk comes
+    /// from the deepest link rather than the declaration's first name.
+    #[test]
+    fn a_wide_declaration_is_one_definition_rather_than_a_chain_of_them() {
+        let grammar = grammar_with_query(FIELD_QUERY);
+        let src = wide_struct(200);
+        assert!(
+            non_ws(&src, &(0..src.len())) > DEFAULT_MAX_CHUNK_CHARS,
+            "the fixture has to outweigh the budget or emit_def never looks at the children"
+        );
+        let doc = chunk_source(
+            &grammar,
+            DEFAULT_MAX_CHUNK_CHARS,
+            src.as_bytes(),
+            &src,
+            "src/lib.rs",
+        )
+        .expect("parses");
+        assert!(
+            doc.chunks.len() > 1,
+            "the split never happened, so this proves nothing about which name won"
+        );
+        for chunk in &doc.chunks {
+            assert_eq!(
+                chunk.heading.as_deref(),
+                Some("class field_number_0"),
+                "every piece of one declaration is headed by its first name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_declaration_still_covers_every_byte() {
+        let grammar = grammar_with_query(FIELD_QUERY);
+        let src = wide_struct(200);
+        let doc = chunk_source(
+            &grammar,
+            DEFAULT_MAX_CHUNK_CHARS,
+            src.as_bytes(),
+            &src,
+            "src/lib.rs",
+        )
+        .expect("parses");
+        assert!(
+            doc.chunks.len() > 1,
+            "the split never happened, so this proves nothing about what falls between chunks"
+        );
+        let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+        let seen_ws_free: String = seen.chars().filter(|c| !c.is_whitespace()).collect();
+        let want: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(seen_ws_free, want, "collapsing the repeats dropped content");
+    }
+
+    /// One line the grammar has to read in full. The byte cap refuses anything over
+    /// [`MAX_RAW_CODE_BYTES`] before tree-sitter sees it, so a case that tests the parser
+    /// rather than the gate has to sit under it.
+    #[test]
+    fn a_source_file_that_is_one_enormous_line_still_yields_its_definition() {
+        let src = format!("pub fn f() -> u32 {{ {} 7 }}\n", "1 + ".repeat(20_000));
+        assert!(
+            (src.len() as u64) < MAX_RAW_CODE_BYTES,
+            "the fixture has to stay under the byte cap to reach the parser at all"
+        );
+        assert_eq!(
+            src.lines().count(),
+            1,
+            "the point of the fixture is one line"
+        );
+        let doc = parse(&src, DEFAULT_MAX_CHUNK_CHARS);
+        assert!(
+            doc.chunks
+                .iter()
+                .any(|c| c.heading.as_deref() == Some("function f")),
+            "got {:?}",
+            doc.chunks.iter().map(|c| &c.heading).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn source_that_is_not_valid_utf8_is_refused_rather_than_parsed() {
+        let grammar = static_rust::grammar().expect("rust grammar builds");
+        let parser = CodeParser::new(grammar, "rs", DEFAULT_MAX_CHUNK_CHARS);
+        let err = parser
+            .parse_bytes(&[0xff, 0xfe, 0x00], "src/lib.rs", &[])
+            .expect_err("not UTF-8");
+        assert!(err.to_string().contains("not valid UTF-8"), "got {err}");
+    }
+
+    /// The same refusal for the shape a chunk boundary produces: a multibyte character cut in
+    /// half, which is valid up to its last byte.
+    #[test]
+    fn a_truncated_multibyte_character_is_refused_like_any_other_bad_utf8() {
+        let grammar = static_rust::grammar().expect("rust grammar builds");
+        let parser = CodeParser::new(grammar, "rs", DEFAULT_MAX_CHUNK_CHARS);
+        let mut bytes = "pub fn f() -> u32 { 7 } // ".as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xe3, 0x81]);
+        let err = parser
+            .parse_bytes(&bytes, "src/lib.rs", &[])
+            .expect_err("cut in the middle of a character");
+        assert!(err.to_string().contains("not valid UTF-8"), "got {err}");
+    }
+
+    /// A quote that is never closed swallows the rest of the file as far as the grammar is
+    /// concerned. The definitions before it survive and the document says it was degraded.
+    #[test]
+    fn an_unterminated_string_literal_is_marked_degraded_rather_than_dropped() {
+        let src = "pub fn good() {}\n\npub fn bad() { let s = \"oops;\n}\n";
+        let doc = parse(src, DEFAULT_MAX_CHUNK_CHARS);
+        assert!(
+            doc.frontmatter.tags.iter().any(|t| t == "parse:degraded"),
+            "tags were {:?}",
+            doc.frontmatter.tags
+        );
+        assert!(
+            doc.chunks
+                .iter()
+                .any(|c| c.heading.as_deref() == Some("function good")),
+            "the definition before the break is still found"
+        );
+        let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(seen.contains("oops"), "the unreadable region is still text");
+    }
+
+    #[test]
+    fn an_empty_source_file_yields_no_chunks() {
+        let grammar = static_rust::grammar().expect("rust grammar builds");
+        let parser = CodeParser::new(grammar, "rs", DEFAULT_MAX_CHUNK_CHARS);
+        let doc = parser.parse_bytes(b"", "src/lib.rs", &[]).expect("parses");
+        // The indexer skips a document with no chunks before it writes a row, so an empty
+        // source never reaches the database rather than arriving there with nothing in it.
+        assert!(doc.chunks.is_empty());
+        assert_eq!(doc.raw_content, "");
+    }
+
+    #[test]
+    fn a_file_of_only_whitespace_yields_no_chunks() {
+        let doc = parse("   \n\n  \n", DEFAULT_MAX_CHUNK_CHARS);
+        assert!(doc.chunks.is_empty());
+    }
+
+    #[test]
+    fn a_file_of_only_comments_still_contributes_its_text() {
+        let src = "// one comment that is long enough to stand alone\n// and a second one\n";
+        let doc = parse(src, DEFAULT_MAX_CHUNK_CHARS);
+        // No definition to head it, so it arrives as a gap chunk rather than not at all.
+        assert!(
+            !doc.chunks.is_empty(),
+            "a file of comments is still content"
+        );
+        let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(seen.contains("one comment"), "got {seen:?}");
+    }
+
+    #[test]
+    fn a_file_with_no_definitions_still_contributes_its_text() {
+        let src = "use std::io;\nuse std::fmt;\nuse std::collections::HashMap;\n";
+        let doc = parse(src, DEFAULT_MAX_CHUNK_CHARS);
+        assert!(!doc.chunks.is_empty());
+        let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(seen.contains("HashMap"), "got {seen:?}");
+    }
+
+    /// A file saved with a byte order mark is a file, not a broken one: the mark is valid
+    /// UTF-8, so it reaches the grammar as a leading character and must not cost the first
+    /// definition its heading.
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_definition_after_it() {
+        let doc = parse(
+            "\u{feff}pub fn first() -> u32 { 7 }\n",
+            DEFAULT_MAX_CHUNK_CHARS,
+        );
+        assert!(
+            doc.chunks
+                .iter()
+                .any(|c| c.heading.as_deref() == Some("function first")),
+            "got {:?}",
+            doc.chunks.iter().map(|c| &c.heading).collect::<Vec<_>>()
+        );
     }
 }
