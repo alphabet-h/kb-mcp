@@ -156,9 +156,13 @@ pub(crate) fn plugin_dir_undecidable_message(id: &str) -> String {
 #[cfg(feature = "grammar-rust")]
 fn rust_parser(code: &CodeParsersConfig) -> Result<Box<dyn Parser>> {
     let grammar = super::code::static_rust::grammar()?;
+    // The extension comes from the descriptor rather than from a literal here, so that the one
+    // grammar compiled in registers itself under the extension it declares — the same thing the
+    // loader insists on for a plugin, which is refused when what it declares is not the id it was
+    // found by. A literal here would leave the declaration with no reader at all.
     Ok(Box::new(super::CodeParser::new(
         grammar,
-        "rs",
+        super::code::static_rust::DESCRIPTOR.extension,
         code.max_chunk_chars,
     )))
 }
@@ -341,11 +345,19 @@ impl Registry {
             };
             // No collision check here, deliberately. Every id above registers a parser whose
             // extension **is** that id — the built-ins by construction, the compiled-in Rust
-            // grammar by the literal it is built with, and a plugin because the loader refuses
-            // one that declares anything else. Together with the duplicate-id check above, two
-            // parsers claiming one extension is not a state this loop can reach, so a guard
-            // against it would be a branch no test could enter. What holds the property up is
-            // `every_registered_parser_answers_to_the_id_that_enabled_it` below.
+            // grammar because it registers the extension its own descriptor declares (and that
+            // descriptor does not compile unless that extension is one groove can key a parser
+            // by), and a plugin because the loader refuses one that declares anything else.
+            // Together with the duplicate-id check above, two parsers claiming one extension is
+            // not a state this loop can reach, so a guard against it would be a branch no test
+            // could enter. What holds the property up is
+            // `every_registered_parser_answers_to_the_id_that_enabled_it` below, which is also
+            // where the compiled-in grammar meets the extension-mismatch refusal the loader
+            // applies to a plugin: it compares the extension the descriptor declares against the
+            // id `available_ids` lists, and that comparison is the only thing keeping those two
+            // strings the same. So `available_ids` keeps its own literal on purpose — reading the
+            // descriptor there as well would make both sides one expression and leave the
+            // comparison asserting nothing.
             debug_assert_eq!(
                 parser.extension(),
                 lower,
