@@ -5657,8 +5657,8 @@ mod tests {
 
     /// The counting wrapper adds counting and nothing else.
     ///
-    /// Both readers of `documents.tags` -- search through the wrapper, `doctor` through the
-    /// decoder alone -- have to agree about what the column says, or the two surfaces would
+    /// Both readers of `documents.tags` -- search through the wrapper, `groove doctor`
+    /// through the decoder alone -- have to agree about what the column says, or the two would
     /// classify different documents while looking at the same row (codex P1, round 1). Pinned
     /// by comparing the two on the shapes the column actually takes.
     #[test]
