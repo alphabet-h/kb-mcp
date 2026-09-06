@@ -109,9 +109,15 @@ embedder / reranker が必要なテストを追加するときは `#[ignore]` �
 
 ### retrieval 品質ゲート
 
-`grooveseek/tests/eval_corpus_quality.rs` は、変更が検索を**壊した**かではなく**悪くした**かを測る唯一のテスト。`tests/fixtures/kb-eval/` (commit 済みの日英 20 文書) を index し、`tests/fixtures/kb-eval-golden.yml` の golden を `groove eval` に通して、集計 recall@1 / MRR が実測由来の下限を割ったら fail する。BGE-small 版が感度の高い方で nightly の両 leg で走り、BGE-M3 版は日本語の意味検索経路を守る Linux 専用。
+変更が検索を**壊した**かではなく**悪くした**かを測るテストが 2 本ある。「見つかり続けなければならないもの」の種類ごとに 1 本。
 
-retrieval に触れる変更 (クエリのコンパイル、fusion、chunk 分割、parser、MMR) はこのゲートを動かす。閾値を触る前に必ず失敗出力を読むこと — rank 1 を落としたクエリ、期待していた文書、代わりに 1 位になった文書がすべて出る。**下限を下げるのは「検索が悪くなるのを受け入れる」という判断**なので、新しい実測値と併せて PR の説明に書く。現在の baseline と測り方はモジュール doc に記録してある。
+`grooveseek/tests/eval_corpus_quality.rs` は**文書**を見る。`tests/fixtures/kb-eval/` (commit 済みの日英散文) を index し、`tests/fixtures/kb-eval-golden.yml` の golden を `groove eval` に通して、集計 recall@1 / MRR が実測由来の下限を割ったら fail する。BGE-small 版が感度の高い方で nightly の全 leg で走り、BGE-M3 版は日本語の意味検索経路を守る Linux 専用。
+
+`grooveseek/tests/code_eval_quality.rs` は**定義**を見る。corpus は `tests/fixtures/kb-code-eval/` で golden も別。エントリの多くが path だけでなく `heading` も名指ししており、それが前者には構造的に見えない退行を見せる — ソースが定義単位で切られなくなっても、そのファイルは残ったチャンクで path-only のクエリに 1 位で答え続けるため。モデル不要の半分もあり、**PR ごとに**各 fixture を実際にパースして golden が名指しした heading が出ることを assert する。
+
+**corpus を分けているのは意図的**。`kb-eval` にソースを混ぜる案は実際に試して測り、前者の余裕をほぼ食い潰した — RRF は候補リスト内の**順位**から score を作るので、どこに何を足しても corpus 中の近接タイが振り直される。
+
+retrieval に触れる変更 (クエリのコンパイル、fusion、chunk 分割、parser、MMR) はこれらのゲートを動かす。閾値を触る前に必ず失敗出力を読むこと — rank 1 を落としたクエリ、期待していた文書、代わりに 1 位になった文書がすべて出る。**下限を下げるのは「検索が悪くなるのを受け入れる」という判断**なので、新しい実測値と併せて PR の説明に書く。現在の baseline と測り方はモジュール doc に記録してある。
 
 ### カバレッジの下限
 

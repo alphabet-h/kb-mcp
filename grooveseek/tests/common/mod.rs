@@ -23,6 +23,11 @@
 //!   layout guard.
 //! - [`crate::common::workflow`] — the `run:` steps of a GitHub Actions
 //!   workflow, read from its YAML. Shared by the pin guard and the bench guard.
+//! - [`crate::common::eval_gate`] — walking a fixture corpus, pinning the configuration a
+//!   measurement is taken under, driving `groove index` / `groove eval`, and
+//!   reading the run back. Shared by the prose retrieval gate
+//!   (`eval_corpus_quality.rs`) and the code one (`code_eval_quality.rs`).
+//!   How a golden is grouped and where its floors sit stays with each gate.
 //!
 //! Note: this module is referenced from PR-B's `benches/` after F-39 is
 //! complete. The intent is for `benches/*.rs` to also share the same
@@ -32,6 +37,7 @@
 
 pub mod ansi;
 pub mod docs;
+pub mod eval_gate;
 pub mod mcp;
 pub mod source;
 pub mod temp;

@@ -122,10 +122,10 @@
 //! is what makes the tighter slack safe: this metric held at 0.80 across three
 //! deliberate breakages, so it is not a number that drifts.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 mod common;
+use common::eval_gate as gate;
 use common::temp::TempKbLayout;
 
 use grooveseek::eval::{AggregateMetrics, GoldenSet, QueryResult, aggregate_metrics, is_hit};
@@ -215,103 +215,49 @@ const BGE_M3_MIN_MULTI_RECALL_AT_5: f64 = 0.90;
 // Paths
 // ---------------------------------------------------------------------------
 
-fn fixtures_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-}
-
 fn corpus_root() -> PathBuf {
-    fixtures_root().join("kb-eval")
+    gate::fixtures_root().join("kb-eval")
 }
 
 /// The golden lives *beside* the corpus, not inside it, so that editing the
 /// query set can never change the document set being measured.
 fn golden_file() -> PathBuf {
-    fixtures_root().join("kb-eval-golden.yml")
-}
-
-fn grooveseek_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_groove"))
+    gate::fixtures_root().join("kb-eval-golden.yml")
 }
 
 // ---------------------------------------------------------------------------
 // Corpus helpers
 // ---------------------------------------------------------------------------
 
-/// Relative paths of every file under `root`, `/`-separated and sorted.
-fn collect_relative_files(root: &Path) -> Vec<String> {
-    fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
-        let entries = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("read fixture directory {}: {e}", dir.display()));
-        for entry in entries {
-            let entry = entry.unwrap_or_else(|e| panic!("read entry under {}: {e}", dir.display()));
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, base, out);
-            } else {
-                let rel = path
-                    .strip_prefix(base)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                out.push(rel);
-            }
-        }
-    }
-
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
-    out.sort();
-    out
-}
-
 /// Assert the fixture directory still holds exactly [`KB_EVAL_FILES`], and
 /// return that list.
 fn corpus_files() -> Vec<String> {
-    let root = corpus_root();
-    let actual = collect_relative_files(&root);
-    let mut expected: Vec<String> = KB_EVAL_FILES.iter().map(|s| (*s).to_string()).collect();
-    expected.sort();
-    assert_eq!(
-        actual,
-        expected,
-        "the kb-eval fixture corpus drifted from KB_EVAL_FILES. Update the \
-         manifest in tests/eval_corpus_quality.rs and add or remove the \
-         matching golden query, then re-measure the baseline recorded in this \
-         file's module docs. Corpus root: {}",
-        root.display()
-    );
-    actual
+    gate::assert_corpus_matches(
+        &corpus_root(),
+        KB_EVAL_FILES,
+        "kb-eval",
+        "tests/eval_corpus_quality.rs",
+    )
 }
 
 /// Copy the fixture corpus into `layout.kb()`, recreating its subdirectories.
 fn setup_corpus(layout: &TempKbLayout) {
-    let root = corpus_root();
-    for rel in corpus_files() {
-        let dst = layout.kb().join(&rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)
-                .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
-        }
-        let src = root.join(&rel);
-        std::fs::copy(&src, &dst)
-            .unwrap_or_else(|e| panic!("copy fixture {} -> {}: {e}", src.display(), dst.display()));
-    }
+    let files = corpus_files();
+    gate::copy_corpus(&corpus_root(), &files, layout.kb());
 }
 
-/// Write an empty `groove.toml` and return its path, to be passed as
+/// Write the pinned `groove.toml` and return its path, to be passed as
 /// `--config`.
 ///
-/// Without it the run would take whatever `groove.toml` config discovery finds
-/// from the test process's working directory upwards. That file is user-local
-/// and git-ignored, so a developer who has one with, say, `[search.mmr]`
-/// enabled would measure a different pipeline than CI and see this gate fail
-/// for a reason that has nothing to do with their change.
+/// Empty, because this corpus is Markdown and Markdown is what `[parsers]`
+/// enables by default. The point of writing the file at all is that without it
+/// the run would take whatever `groove.toml` config discovery finds from the
+/// test process's working directory upwards; that file is user-local and
+/// git-ignored, so a developer who has one with, say, `[search.mmr]` enabled
+/// would measure a different pipeline than CI and see this gate fail for a
+/// reason that has nothing to do with their change.
 fn pinned_config(layout: &TempKbLayout) -> PathBuf {
-    let path = layout.root().join("groove.toml");
-    std::fs::write(&path, "").expect("write empty groove.toml");
-    path
+    gate::pinned_config(layout.root(), &[])
 }
 
 fn has_cjk(s: &str) -> bool {
@@ -328,64 +274,6 @@ fn has_cjk(s: &str) -> bool {
 // Running the pipeline
 // ---------------------------------------------------------------------------
 
-fn index_corpus(kb: &Path, config: &Path, model: &str) {
-    let out = Command::new(grooveseek_bin())
-        .arg("index")
-        .arg("--kb-path")
-        .arg(kb)
-        .arg("--config")
-        .arg(config)
-        .arg("--model")
-        .arg(model)
-        .output()
-        .expect("spawn groove index");
-    assert!(
-        out.status.success(),
-        "groove index failed for {model}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// Run `groove eval` over the committed golden and return its JSON.
-///
-/// `--no-history` keeps the run stateless: no `.groove-eval-history.json` is
-/// written or read, so the gate measures this build only and never compares
-/// against a stale neighbouring run.
-fn run_eval(kb: &Path, config: &Path, model: &str) -> serde_json::Value {
-    let out = Command::new(grooveseek_bin())
-        .arg("eval")
-        .arg("--kb-path")
-        .arg(kb)
-        .arg("--config")
-        .arg(config)
-        .arg("--golden")
-        .arg(golden_file())
-        .arg("--model")
-        .arg(model)
-        .arg("--format")
-        .arg("json")
-        .arg("--no-history")
-        .output()
-        .expect("spawn groove eval");
-    assert!(
-        out.status.success(),
-        "groove eval failed for {model}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
-        panic!(
-            "groove eval did not print JSON for {model}: {e}\nstdout was:\n{}",
-            String::from_utf8_lossy(&out.stdout)
-        )
-    })
-}
-
-fn metric(run: &serde_json::Value, pointer: &str) -> f64 {
-    run.pointer(pointer)
-        .and_then(|v| v.as_f64())
-        .unwrap_or_else(|| panic!("no numeric metric at {pointer} in eval JSON:\n{run}"))
-}
-
 /// **The** definition of which group a golden query belongs to.
 ///
 /// Both callers reach this one: the model-free sync test, which has
@@ -396,22 +284,6 @@ fn metric(run: &serde_json::Value, pointer: &str) -> f64 {
 /// while the nightly averages a different population.
 fn is_multi_answer(expected_count: usize) -> bool {
     expected_count > 1
-}
-
-/// The run's per-query results, as the types `groove eval` serialised them
-/// from. Parsed once and handed to everything below, so nothing here digs
-/// through the JSON a second time with its own idea of the shape.
-fn per_query(run: &serde_json::Value) -> Vec<QueryResult> {
-    serde_json::from_value(run["per_query"].clone())
-        .unwrap_or_else(|e| panic!("eval JSON `per_query` did not parse: {e}\n{run}"))
-}
-
-/// The `k` values this run scored, taken from its own fingerprint rather than
-/// written out here — a second list would be the same metric computed over a
-/// different set of `k` without anything saying so.
-fn k_values(run: &serde_json::Value) -> Vec<usize> {
-    serde_json::from_value(run["fingerprint"]["k_values"].clone())
-        .unwrap_or_else(|e| panic!("eval JSON `fingerprint.k_values` did not parse: {e}\n{run}"))
 }
 
 /// One group's results, and its means — from `eval::aggregate_metrics`, the
@@ -442,20 +314,6 @@ fn group(all: &[QueryResult], multi: bool, ks: &[usize]) -> (Vec<QueryResult>, A
     (queries, metrics)
 }
 
-/// One mean out of an [`AggregateMetrics`], by `k`.
-///
-/// Panics rather than defaulting: a `k` the run did not score would otherwise
-/// read as 0.0 and fail the gate for a reason that has nothing to do with
-/// retrieval.
-fn at_k(metrics: &AggregateMetrics, k: usize, what: &str) -> f64 {
-    *metrics.recall_at_k.get(&k).unwrap_or_else(|| {
-        panic!(
-            "the {what} group has no recall@{k}; the run scored {:?}",
-            metrics.recall_at_k.keys().collect::<Vec<_>>()
-        )
-    })
-}
-
 /// Human-readable list of the multi-answer queries that did not get every
 /// expected document into the top 5.
 ///
@@ -478,10 +336,7 @@ fn incomplete_report(multi: &[QueryResult]) -> String {
             .expected
             .iter()
             .filter(|e| !q.top_k.iter().take(5).any(|h| is_hit(e, h)))
-            .map(|e| match &e.heading {
-                Some(h) => format!("{} ({h})", e.path),
-                None => e.path.clone(),
-            })
+            .map(gate::describe_expected)
             .collect();
         report.push_str(&format!(
             "  {}: recall@5 {at_5:.2}; missing from the top 5: {}\n",
@@ -495,51 +350,6 @@ fn incomplete_report(multi: &[QueryResult]) -> String {
     report
 }
 
-/// Human-readable list of the queries that did not rank their expected
-/// document first. Included in every failure message: a nightly failure has to
-/// be diagnosable from the log alone, without re-running a 2.3 GB model.
-fn ranking_report(all: &[QueryResult]) -> String {
-    let mut report = String::new();
-    for q in all {
-        let rr = q.metrics.reciprocal_rank;
-        if rr >= 1.0 {
-            continue;
-        }
-        // Every expected path, not just the first: `reciprocal_rank` is the
-        // rank of the *earliest* expected hit, so naming one of several would
-        // leave the reader guessing which one the rank refers to.
-        let expected: Vec<&str> = q.expected.iter().map(|e| e.path.as_str()).collect();
-        let expected = if expected.is_empty() {
-            "<none>".to_string()
-        } else {
-            expected.join(", ")
-        };
-        let top1 = q
-            .top_k
-            .first()
-            .map(|h| h.path.as_str())
-            .unwrap_or("<nothing returned>");
-        // "the earliest of them", because a multi-answer query names two and
-        // one rank cannot belong to both. Writing "at rank 2" after a list of
-        // two reads as though both sat there.
-        let position = if rr > 0.0 {
-            // `reciprocal_rank` is 1/rank of the first expected hit inside the
-            // retrieved window; 0.0 means no expected hit was retrieved at all.
-            format!("earliest of them at rank {}", (1.0 / rr).round() as i64)
-        } else {
-            "none of them inside the retrieved window".to_string()
-        };
-        report.push_str(&format!(
-            "  {}: expected {expected}; {position}; top-1 was {top1}\n",
-            q.id
-        ));
-    }
-    if report.is_empty() {
-        report.push_str("  (every query ranked its expected document first)\n");
-    }
-    report
-}
-
 /// The gate itself. `min_recall_at_1` / `min_mrr` come from the per-model
 /// constants; everything else is shared.
 fn assert_retrieval_quality(
@@ -549,7 +359,7 @@ fn assert_retrieval_quality(
     min_mrr: f64,
     min_multi_recall_at_5: f64,
 ) {
-    let query_count = metric(run, "/aggregate/query_count") as usize;
+    let query_count = gate::metric(run, "/aggregate/query_count") as usize;
     assert_eq!(
         query_count, GOLDEN_QUERY_COUNT,
         "{model}: eval measured {query_count} queries but the golden holds \
@@ -561,18 +371,18 @@ fn assert_retrieval_quality(
     // blends the two groups, and a blend of a metric whose ceiling differs
     // between them is not a measurement of anything (module docs, "The golden
     // has two groups").
-    let all = per_query(run);
-    let ks = k_values(run);
+    let all = gate::per_query(run);
+    let ks = gate::k_values(run);
     let (_single, single_metrics) = group(&all, false, &ks);
     let (multi, multi_metrics) = group(&all, true, &ks);
 
     let single_count = single_metrics.query_count;
     let multi_count = multi_metrics.query_count;
-    let recall_at_1 = at_k(&single_metrics, 1, "single-answer");
-    let recall_at_5 = at_k(&single_metrics, 5, "single-answer");
+    let recall_at_1 = gate::at_k(&single_metrics, 1, "single-answer");
+    let recall_at_5 = gate::at_k(&single_metrics, 5, "single-answer");
     let mrr = single_metrics.mrr;
-    let multi_recall_at_1 = at_k(&multi_metrics, 1, "multi-answer");
-    let multi_recall_at_5 = at_k(&multi_metrics, 5, "multi-answer");
+    let multi_recall_at_1 = gate::at_k(&multi_metrics, 1, "multi-answer");
+    let multi_recall_at_5 = gate::at_k(&multi_metrics, 5, "multi-answer");
     let multi_mrr = multi_metrics.mrr;
 
     assert_eq!(
@@ -595,7 +405,7 @@ fn assert_retrieval_quality(
          recall@5={multi_recall_at_5:.3} MRR={multi_mrr:.3}\n\
          queries that missed rank 1:\n{}\
          multi-answer queries that did not return everything expected:\n{}",
-        ranking_report(&all),
+        gate::ranking_report(&all),
         incomplete_report(&multi)
     );
 
@@ -767,8 +577,8 @@ fn kb_eval_retrieval_quality_bge_small() {
     setup_corpus(&layout);
     let config = pinned_config(&layout);
 
-    index_corpus(layout.kb(), &config, "bge-small-en-v1.5");
-    let run = run_eval(layout.kb(), &config, "bge-small-en-v1.5");
+    gate::index_corpus(layout.kb(), &config, "bge-small-en-v1.5");
+    let run = gate::run_eval(layout.kb(), &config, &golden_file(), "bge-small-en-v1.5");
 
     assert_retrieval_quality(
         &run,
@@ -790,8 +600,8 @@ fn kb_eval_retrieval_quality_bge_m3() {
     setup_corpus(&layout);
     let config = pinned_config(&layout);
 
-    index_corpus(layout.kb(), &config, "bge-m3");
-    let run = run_eval(layout.kb(), &config, "bge-m3");
+    gate::index_corpus(layout.kb(), &config, "bge-m3");
+    let run = gate::run_eval(layout.kb(), &config, &golden_file(), "bge-m3");
 
     assert_retrieval_quality(
         &run,
