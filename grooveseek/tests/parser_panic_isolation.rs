@@ -1,4 +1,6 @@
-//! Adversarial-input battery for the binary parsers (full-audit 2026-07-26 AU-21).
+//! Adversarial-input battery for the parsers that read a knowledge base with a
+//! third-party library: the binary formats (full-audit 2026-07-26 AU-21) and
+//! source code, which tree-sitter parses in C (full-audit 2026-09-02 AV-13).
 //!
 //! `Parser::parse_bytes` must **never unwind into its caller**: `indexer.rs`
 //! indexes files sequentially, so a panic escaping one file aborts the whole
@@ -24,7 +26,7 @@
 use std::io::Write;
 
 use grooveseek::parser::{
-    DocxParser, Parser, ParserExt, PdfParser, PptxParser, XlsParser, XlsxParser,
+    DocxParser, Parser, ParserExt, PdfParser, PptxParser, Registry, XlsParser, XlsxParser,
 };
 use zip::write::SimpleFileOptions;
 
@@ -283,4 +285,41 @@ fn test_parsers_do_not_unwind_on_cross_format_payloads() {
             &format!("text-payload.{ext}"),
         );
     }
+}
+
+/// Source files reach tree-sitter, a C library, from the same untrusted place the binary
+/// formats come from, so they belong in this battery for the same reason.
+///
+/// Reached through the registry rather than by naming the parser: its constructor is private
+/// to the crate, and `Registry` is how the indexer gets a `&dyn Parser` for an extension.
+#[test]
+fn test_code_adversarial_inputs_do_not_unwind() {
+    let registry = Registry::from_enabled(&["rs".into()]).expect("the rs parser builds");
+    let rs = registry.by_extension("rs").expect("rs is registered");
+
+    must_not_unwind(rs, b"", "empty.rs");
+    must_not_unwind(rs, b"   \n\n\t\n", "whitespace-only.rs");
+    must_not_unwind(rs, &[0xff, 0xfe, 0x00], "not-utf8.rs");
+    must_not_unwind(rs, "\u{feff}pub fn f() {}\n".as_bytes(), "leading-bom.rs");
+    must_not_unwind(rs, b"pub fn f(", "truncated-signature.rs");
+    must_not_unwind(
+        rs,
+        b"pub fn f() { let s = \"never closed;\n}\n",
+        "unterminated-string.rs",
+    );
+    must_not_unwind(rs, "日本語のプレーンテキスト".as_bytes(), "text-payload.rs");
+
+    // The two shapes that cost the chunker the most per byte: everything on one line, and
+    // nothing but nesting. Both stay under the raw-byte cap so the parser sees them.
+    let one_line = format!("pub fn f() -> u32 {{ {} 7 }}\n", "1 + ".repeat(20_000));
+    must_not_unwind(rs, one_line.as_bytes(), "one-enormous-line.rs");
+
+    let depth = 500;
+    let mut nested = String::new();
+    for i in 0..depth {
+        nested.push_str(&format!("mod a{i} {{"));
+    }
+    nested.push_str("pub fn leaf() -> u32 { 7 }");
+    nested.push_str(&"}".repeat(depth));
+    must_not_unwind(rs, nested.as_bytes(), "deeply-nested.rs");
 }

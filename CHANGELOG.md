@@ -16,6 +16,23 @@ Do not reach for `format-local` here: it renders in the *reader's* timezone, so 
 
 ### Fixed
 
+- **A PHP file declaring many properties in one statement no longer ends the
+  run.** A tags query may report one definition per name over the same bytes,
+  and the PHP grammar this project publishes does exactly that for
+  `public $a, $b, $c;`. The chunker nests definitions by byte range, and a range
+  never ends before itself, so those repeats were recorded as each containing
+  the one before it. The chain that produced was as long as the declaration was
+  wide, and the recursion that walks it followed. A class declaring three
+  thousand properties in one statement — a 22,923 byte file, against a 1 MiB cap
+  meant to be the defence — ended `groove index` with a stack overflow, which is
+  not a panic and so was never caught and skipped the way an unreadable file is.
+  Over the MCP transport the server went down with it. Definitions covering
+  bytes an earlier one already covers are now collapsed into one, headed by the
+  first of their names; the rest of the names stay in the chunk's text. Where
+  such a declaration was small enough to chunk whole, nothing changes. Where it
+  had to be split, its pieces were headed by the *last* name and are now headed
+  by the first, which `groove index --force` refreshes. See
+  [ADR-0018](docs/decisions/0018-one-range-is-one-definition.md).
 - **A wide source file no longer loses its tail to the chunk bound.** One file
   may contribute at most 512 chunks, and that bound used to be applied by
   keeping the first 512 and dropping the rest. Since the pieces are sorted by
