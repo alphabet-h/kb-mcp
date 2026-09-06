@@ -105,6 +105,11 @@ avoid.
 - The bound does not touch a different pathological shape: a file with tens of
   thousands of definitions at ordinary depth. That cost is dominated by the
   tags query rather than the scope walk, and is bounded by the 1 MiB ceiling.
+  *(Since v1.6.0, see [ADR-0017](0017-bound-the-chunk-count-without-dropping-bytes.md):
+  such a file does reach a different bound — how many chunks one file may
+  contribute — and takes the same line fallback this decision introduced.
+  That bound used to be applied by truncation, which cut the output of this
+  fallback too; it no longer does.)*
 
 ## More Information
 

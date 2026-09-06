@@ -354,7 +354,9 @@ groove doctor --kb-path ... --format json | jq '.findings[]'
 
 Search reads three tables that have to agree about a chunk — its text, its embedding, and its full-text row. When they stop agreeing nothing errors: a chunk with no embedding is simply never a vector hit, and one with no full-text row is never a keyword hit. Until now the only way to find out was to run a full index and watch it repair things. `doctor` asks directly, and also reports which indexed documents the MCP resource surface is holding back and why — an extension no longer in `[parsers].enabled`, a document larger than a resource read returns, or a size not recorded yet because it was indexed by an earlier version.
 
-Exit codes: `0` (nothing to report), `1` (findings), `2` (could not run — usually no index). Findings are reported, never repaired: each one names the command that fixes it, which is `groove index` or `groove index --force` for everything structural.
+It also names the source files that were chunked by lines rather than at their definitions — because a definition sat past the nesting bound, or because the file wanted more chunks than one file may contribute. Those files are whole and searchable; what their chunks lack is the symbol kind, heading and scope a definition carries, so a query shaped like a definition cannot reach them. The remedy is the file rather than a command: an index run reaches the same bound and makes the same choice. Note that a file whose content has not changed is never re-chunked, so an index built before v1.6.0 answers this one about the chunks it already has — `groove index --force` rebuilds them.
+
+Exit codes: `0` (nothing to report), `1` (findings), `2` (could not run — usually no index). Findings are reported, never repaired: each one names what fixes it, which is `groove index` or `groove index --force` for everything structural, and a change to the document itself where no command can.
 
 > Like `search` and `eval`, this opens the database, and opening it applies any pending schema migration. It is read-only about its findings, not about the file.
 

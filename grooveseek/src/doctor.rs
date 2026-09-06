@@ -1,6 +1,6 @@
 //! `groove doctor` — ask the index whether it is in the state it should be.
 //!
-//! Two groups of question, and one deliberate omission.
+//! Three groups of question, and one deliberate omission.
 //!
 //! **Integrity.** Search reads three tables that have to agree about a chunk:
 //! `chunks` holds the text, `vec_chunks` the embedding, `fts_chunks` the
@@ -17,6 +17,16 @@
 //! server answers `resources/list` from. A doctor that computed its own
 //! equivalent would eventually disagree with the thing it is reporting on,
 //! which is the failure mode this whole feature is about.
+//!
+//! **What the chunker gave up on.** Which source files were chunked by lines
+//! rather than at their definitions, because one sat past the scope bound or
+//! because the file wanted more chunks than one file may contribute. Those
+//! files are whole and searchable — every byte reaches the index, which is what
+//! [ADR-0012] requires — but their chunks carry no symbol kind, heading or
+//! scope, so a query shaped like a definition cannot reach them. The parser
+//! says so with a tag on the document; until now nothing read it back.
+//!
+//! [ADR-0012]: https://github.com/alphabet-h/grooveseek/blob/main/docs/decisions/0012-chunk-code-at-its-definitions-and-fill-the-gaps-by-line.md
 //!
 //! **It does not repair.** Every finding names the command that fixes it. That
 //! is the contract `paths_with_unregistered_extension` already states for the
@@ -107,9 +117,10 @@ fn finding(
 
 /// Run every check against `db` and collect what it found.
 ///
-/// Findings come out in the order below — integrity, then servability —
-/// because the first group means something is broken and the second means
-/// something is merely unavailable.
+/// Findings come out in the order below — integrity, then servability, then
+/// what the chunker gave up on — because the first group means something is
+/// broken, the second means something is merely unavailable, and the third
+/// means everything arrived but in a coarser shape than usual.
 pub fn run(db: &Database, registry: &Registry) -> Result<Report> {
     let mut findings = Vec::new();
 
@@ -254,6 +265,39 @@ pub fn run(db: &Database, registry: &Registry) -> Result<Report> {
             remedy: "groove index (one run fills them in, without re-embedding)",
         });
     }
+
+    // -- what the chunker gave up on ----------------------------------------
+
+    let without_definitions = crate::parser::code::TAGS_WITHOUT_DEFINITIONS;
+    let chunked_by_lines: Vec<String> = db
+        .all_document_tags()?
+        .into_iter()
+        .filter(|(_, tags)| {
+            // The `code` tag as well, and not as a nicety: `tags` is frontmatter for a
+            // Markdown document, so anyone can write `parse:too-deep` into a note by hand.
+            // Only the code parser writes both.
+            tags.iter().any(|t| t == crate::parser::code::TAG_CODE)
+                && tags
+                    .iter()
+                    .any(|t| without_definitions.contains(&t.as_str()))
+        })
+        .map(|(path, _)| path)
+        .collect();
+    findings.extend(finding(
+        "chunked-without-definitions",
+        Severity::Warning,
+        format!(
+            "{} indexed source file(s) were chunked by lines rather than at their definitions, \
+             so their chunks carry no symbol kind, heading or scope",
+            chunked_by_lines.len()
+        ),
+        truncated(chunked_by_lines),
+        // Not an index command: re-running one reaches the same bound and makes the same
+        // choice. What changes the answer is the file (`doctor.rs` already carries the same
+        // caution for the oversize finding).
+        "split the file, or flatten its nesting -- the text stays searchable either way, \
+         it is the definition metadata that is missing",
+    ));
 
     Ok(Report {
         documents: db.document_count()?,
@@ -568,5 +612,89 @@ mod tests {
         assert_eq!(f.count, 1);
         // Not an error: nothing is broken, the answer is just not known yet.
         assert_eq!(f.severity, Severity::Warning);
+    }
+
+    /// Add a second document carrying `tags`, so a check that reads them has something to
+    /// find beside the plain Markdown one every fixture starts with.
+    fn with_tagged_document(db: &Database, path: &str, tags: &[&str]) {
+        let owned: Vec<String> = tags.iter().map(|t| (*t).to_string()).collect();
+        let doc = db
+            .upsert_document(path, Some("T"), None, None, None, &owned, None, "h2", 12)
+            .expect("upsert");
+        db.insert_chunk(doc, 0, Some("H"), None, "body", None, &vec![0.1; 384], 1.0)
+            .expect("chunk");
+    }
+
+    fn chunked_without_definitions(report: &Report) -> Option<&Finding> {
+        report
+            .findings
+            .iter()
+            .find(|f| f.check == "chunked-without-definitions")
+    }
+
+    #[test]
+    fn a_source_file_chunked_by_lines_is_reported_whichever_bound_stopped_it() {
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/deep.rs", &["code", "parse:too-deep"]);
+        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"]);
+
+        let report = run(&db, &registry_md()).expect("run");
+        let f = chunked_without_definitions(&report)
+            .expect("both files gave up their definitions, so both belong to this finding");
+        assert_eq!(f.severity, Severity::Warning);
+        assert_eq!(f.count, 2);
+        assert_eq!(
+            f.samples,
+            vec!["src/deep.rs".to_string(), "src/wide.rs".to_string()]
+        );
+        // Naming an index command here would send someone to a remedy that cannot work: the
+        // next run reaches the same bound and makes the same choice.
+        assert!(
+            !f.remedy.contains("groove index"),
+            "remedy was {:?}",
+            f.remedy
+        );
+    }
+
+    #[test]
+    fn a_note_that_merely_spells_the_tag_by_hand_is_not_reported() {
+        // `documents.tags` is frontmatter for a Markdown document, so anyone can write these
+        // strings into a note. Only a file the code parser produced carries `code` as well.
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "notes/about-parsing.md", &["parse:too-deep"]);
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            chunked_without_definitions(&report).is_none(),
+            "findings were {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn a_document_with_unreadable_tags_does_not_stop_the_report() {
+        // The column is fail-open everywhere else it is read; a diagnostic is the last place
+        // that should turn one bad row into "could not look".
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"]);
+        db.execute_for_test("UPDATE documents SET tags = '{not json' WHERE path = 'notes/a.md'")
+            .expect("update");
+
+        let report = run(&db, &registry_md()).expect("run");
+        let f = chunked_without_definitions(&report).expect("the readable row is still found");
+        assert_eq!(f.count, 1);
+    }
+
+    #[test]
+    fn an_index_whose_files_kept_their_definitions_says_nothing_about_them() {
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"]);
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            chunked_without_definitions(&report).is_none(),
+            "findings were {:?}",
+            report.findings
+        );
     }
 }

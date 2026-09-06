@@ -689,6 +689,36 @@ impl Database {
         Ok(())
     }
 
+    /// Return every indexed document path beside the tags recorded with it, in path order.
+    ///
+    /// Malformed `tags` JSON reads as no tags rather than as an error, which is what every
+    /// other reader of that column does. It is **not** read through
+    /// [`Self::parse_tags_json_recording`]: that one increments the counter `groove status`
+    /// reports, and it is flushed to `index_meta` when the database closes, so a diagnostic
+    /// calling it would move a number every time it ran.
+    ///
+    /// Which tags mean what is not decided here: this hands back the column and the caller
+    /// applies its own rule to it, so the database layer does not have to learn what the code
+    /// parser writes.
+    pub fn all_document_tags(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, tags FROM documents ORDER BY path")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, tags) = row?;
+            let tags: Vec<String> = tags
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            out.push((path, tags));
+        }
+        Ok(out)
+    }
+
     /// Return every indexed document path.
     pub fn all_document_paths(&self) -> Result<Vec<String>> {
         let mut stmt = self

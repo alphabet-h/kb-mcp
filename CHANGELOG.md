@@ -14,6 +14,40 @@ Do not reach for `format-local` here: it renders in the *reader's* timezone, so 
 
 ## [Unreleased]
 
+### Fixed
+
+- **A wide source file no longer loses its tail to the chunk bound.** One file
+  may contribute at most 512 chunks, and that bound used to be applied by
+  keeping the first 512 and dropping the rest. Since the pieces are sorted by
+  position, what it dropped was always the end of the file: everything past the
+  512th chunk stopped being searchable while `get_document` went on returning
+  the whole file, and nothing but a log line said so. That contradicts
+  [ADR-0012](docs/decisions/0012-chunk-code-at-its-definitions-and-fill-the-gaps-by-line.md),
+  which promises a file contributes every byte it has whether or not it parses.
+  A file over the bound is now chunked by lines instead — the same fallback a
+  file nested past the scope bound already took — and tagged
+  `parse:too-many-chunks`. The line budget is widened where it has to be so the
+  result fits the bound, so both promises hold at once: the file keeps every
+  byte, and the index gets a bounded number of chunks out of it. What such a
+  file loses is its definition metadata, not its content. The same truncation
+  applied to files stopped by the scope bound, and is gone for them too. See
+  [ADR-0017](docs/decisions/0017-bound-the-chunk-count-without-dropping-bytes.md).
+
+### Added
+
+- **`groove doctor` reports the source files it chunked by lines.** A new
+  `chunked-without-definitions` finding names the indexed files carrying
+  `parse:too-deep` or `parse:too-many-chunks` — whole and searchable, but with
+  chunks that carry no symbol kind, heading or scope, so a query shaped like a
+  definition cannot reach them. `parse:too-deep` has been written on documents
+  since v1.3.0 and nothing read it back. The remedy it names is the file rather
+  than a command, because an index run reaches the same bound and makes the same
+  choice. **This can turn a previously clean `groove doctor` into exit 1** on an
+  index that already holds such files. Note also that a file whose content has
+  not changed is never re-chunked, so an index built before this release answers
+  the new finding about the chunks it already has; `groove index --force`
+  rebuilds them.
+
 ### Security
 
 - **A grammar plugin can no longer be read from inside the knowledge base.**
