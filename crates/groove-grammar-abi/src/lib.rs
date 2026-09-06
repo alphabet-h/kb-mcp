@@ -175,17 +175,36 @@ macro_rules! groove_grammar_plugin {
 /// A plugin is arbitrary native code, so the strings it hands back are checked like any
 /// other untrusted input before they reach a filesystem walk.
 ///
-/// A free function rather than only a method on [`GrammarDescriptor`]:
-/// [`GrammarDescriptor::extension`] is `&'static str`, which a compiled-in grammar has and a
-/// string just copied out of a freshly opened library does not. The rule is one rule, so it is
-/// written once and takes whatever lifetime the caller has.
-pub fn extension_is_valid(extension: &str) -> bool {
-    !extension.is_empty()
-        && extension.len() <= 64
-        && !extension.contains(EXTENSION_SEPARATOR)
-        && extension
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+/// A free function as well as a method on [`GrammarDescriptor`], because the two paths hold the
+/// extension in different forms. The loader has a `String` it copied out of a freshly opened
+/// library and calls this; a compiled-in grammar has the `&'static str` of its own
+/// [`GrammarDescriptor::extension`] and calls [`GrammarDescriptor::extension_is_valid`]. The
+/// rule is one rule, so it is written once here and takes whatever lifetime the caller has.
+///
+/// A `const fn`, so that the compiled-in path can apply it while groove is built rather than
+/// while it runs: its extension is a literal in this workspace, and a value settled at compile
+/// time deserves a check settled there too. That is why the bytes are walked with a loop —
+/// neither `str::bytes` nor `str::contains` can be called in a const context, so the iterator
+/// form would put this rule out of reach of the path whose value exists before anything runs.
+pub const fn extension_is_valid(extension: &str) -> bool {
+    let bytes = extension.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // `as u8` is exact because the separator is ASCII. The character test below would refuse
+        // it anyway today; this clause is what keeps that true if that set ever widens.
+        if b == EXTENSION_SEPARATOR as u8 {
+            return false;
+        }
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit()) {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Whether a declared language name is one groove will accept.
@@ -199,26 +218,38 @@ pub fn extension_is_valid(extension: &str) -> bool {
 /// Slightly wider than [`extension_is_valid`], because a language name is prose where an
 /// extension is a file suffix: `-` and `_` are allowed, so `c-sharp` and `objective_c` are
 /// spellable.
-pub fn name_is_valid(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+///
+/// A `const fn` for the reason [`extension_is_valid`] gives, and written the same way.
+pub const fn name_is_valid(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 impl GrammarDescriptor {
     /// Whether this descriptor's declared extension is one groove will accept.
     ///
-    /// See [`extension_is_valid`], which holds the rule.
-    pub fn extension_is_valid(&self) -> bool {
+    /// See [`extension_is_valid`], which holds the rule. A `const fn`, so a descriptor built from
+    /// literals can be held to that rule beside the literals themselves.
+    pub const fn extension_is_valid(&self) -> bool {
         extension_is_valid(self.extension)
     }
 
     /// Whether this descriptor's declared language name is one groove will accept.
     ///
-    /// See [`name_is_valid`], which holds the rule.
-    pub fn name_is_valid(&self) -> bool {
+    /// See [`name_is_valid`], which holds the rule. A `const fn` for the reason
+    /// [`GrammarDescriptor::extension_is_valid`] gives.
+    pub const fn name_is_valid(&self) -> bool {
         name_is_valid(self.name)
     }
 }
@@ -227,17 +258,40 @@ impl GrammarDescriptor {
 mod tests {
     use super::*;
 
-    /// The compiled-in path is held to the same contract the loader enforces on a plugin.
+    /// The rules accept the shapes an ordinary grammar declares.
     ///
-    /// Without this, the rules could tighten on one side only, and the grammar nobody has to
-    /// place would be the one that stopped satisfying them.
+    /// Only the rules, and only that: the dependency runs from `grooveseek` to this crate, so
+    /// nothing here can reach the descriptor a compiled-in grammar builds and hold it to them.
+    /// What this asserts is literals. A comment here used to say otherwise — that the compiled-in
+    /// path was held to the same contract the loader enforces on a plugin — which is what such a
+    /// claim reads like from the side that cannot keep it.
+    ///
+    /// It is kept on the side that can. `grooveseek/src/parser/code/static_rust.rs` holds its own
+    /// descriptor to these rules in a `const` item, so a compiled-in grammar that would be refused
+    /// from a plugin fails to build rather than shipping.
     #[test]
-    fn the_rules_a_plugin_must_satisfy_accept_an_ordinary_descriptor() {
+    fn the_rules_accept_the_shapes_an_ordinary_grammar_declares() {
         assert!(extension_is_valid("py"));
         assert!(extension_is_valid("rs"));
         assert!(name_is_valid("python"));
         assert!(name_is_valid("c-sharp"));
         assert!(name_is_valid("objective_c"));
+    }
+
+    /// A digit is part of both alphabets, and only an input carrying one says so.
+    ///
+    /// Every other case in this module spells its subject with letters, so the clause admitting
+    /// `0-9` is the one thing about these two rules that no assertion here reached.
+    //
+    // Measured 2026-09-07 by removing one clause at a time and running
+    // `cargo test -p groove-grammar-abi` after each: of the eleven clauses across the two rules,
+    // this was what the two silent removals had in common. The third, the separator test in
+    // `extension_is_valid`, is refused by the character test as well and so cannot be told apart
+    // by any input — it is answered where it is written rather than here.
+    #[test]
+    fn a_digit_is_accepted_in_an_extension_and_in_a_name() {
+        assert!(extension_is_valid("py3"));
+        assert!(name_is_valid("html5"));
     }
 
     #[test]
