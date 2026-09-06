@@ -1,0 +1,121 @@
+# Golden query set for the `kb-code-eval` fixture corpus (AV-15).
+#
+# The prose gate next door measures whether documents stay findable. This one measures
+# whether *definitions* do, and it is a separate corpus for a reason that was measured
+# rather than assumed: adding five source files to `kb-eval` moved four of that gate's
+# six floors to one query of headroom or less, and one of them to none at all. The cause
+# is not the fixtures. Reciprocal-rank fusion scores a chunk by its position in each
+# leg's candidate list, so any document added anywhere re-rolls every near-tie in the
+# corpus — a single added chunk was enough to flip `en-restore-pitr`, whose top six did
+# not contain a code chunk at all. See the module docs of `tests/code_eval_quality.rs`.
+#
+# Every query names exactly one document. There is no multi-answer group here: the
+# question that group exists to ask is about a corpus built out of distractor pairs, and
+# this corpus is built out of sibling definitions instead.
+#
+# ## The heading field, and why this file uses it
+#
+# `eval::is_hit` compares the path, and when an entry carries a `heading` it compares
+# that too — an entry with a heading is never satisfied by a chunk that has none. A code
+# chunk is headed "<kind> <name>", so a heading-scoped entry stops being satisfiable the
+# moment the file stops being chunked one definition at a time. That is the regression
+# this corpus exists for, and no path-only golden can see it: a file that has collapsed
+# into headingless line chunks still answers a path-only query from whatever survived.
+#
+# ## Rules these queries are written to
+#
+# - No query contains a word from the heading it expects. The keyword leg indexes the
+#   heading column, so a query naming its own target would be answered out of the
+#   heading with the body broken — the failure this file is supposed to catch.
+# - The sentence a query is written to appears in exactly one chunk of the corpus.
+# - `docs/` holds two prose documents on the same subjects as the code. They are the
+#   cross-modal near miss: if definitions stop being retrievable, a prose document that
+#   describes the same library is what wins instead, and the failure report says so.
+#
+# Consumed by `tests/code_eval_quality.rs` via `groove eval --golden`. It is not copied
+# into the indexed corpus, so adding a query never changes the document set.
+
+queries:
+  # --- definition structure -------------------------------------------------
+  # Heading-scoped. Each is answerable only from the body of the definition it names,
+  # and each stops being satisfiable if that body stops being a chunk of its own.
+  - id: code-no-marker-means-minutes
+    query: "someone typed a bare number into a schedule field with no letter after it, how is that read"
+    expected:
+      - path: "src/duration.rs"
+        heading: "function parse_span"
+  - id: code-too-fresh-to-number
+    query: "a listing that would otherwise tick over every second says something else for very fresh entries"
+    expected:
+      - path: "src/duration.rs"
+        heading: "function humanize"
+  # `push` and `snapshot` are the within-file discriminator: two expectations on one
+  # path that differ only by heading, so a hit on the wrong one is a miss.
+  - id: code-eldest-gives-way
+    query: "when there is no room left, which entry gives way so the new one can be stored"
+    expected:
+      - path: "src/ring.rs"
+        heading: "method push"
+  - id: code-comes-back-in-arrival-order
+    query: "what order the held items come back in when nothing is taken out"
+    expected:
+      - path: "src/ring.rs"
+        heading: "method snapshot"
+  - id: code-narrowed-partway
+    query: "why the halves are narrowed every twenty bytes instead of only once at the very end"
+    expected:
+      - path: "src/checksum.rs"
+        heading: "method update"
+  - id: code-larger-half-goes-last
+    query: "an odd amount of slack has to fall somewhere, which side gets the bigger piece"
+    expected:
+      - path: "src/align.rs"
+        heading: "function offset"
+  - id: code-repeating-parts-left-out
+    query: "why the year is left off a reading that falls inside the current one"
+    expected:
+      - path: "src/clock.rs"
+        heading: "function stamp"
+
+  # --- the chunk budget -----------------------------------------------------
+  # A container that fits `max_chunk_chars` is emitted whole and its nested definitions
+  # produce no chunks of their own; lower the budget and it splits, and the sentence
+  # this query is written to moves into a chunk headed for the nested function. So this
+  # entry is satisfiable only while the budget holds the container together.
+  - id: code-widest-entry-sets-the-room
+    query: "what decides how much room a column gets, and what happens to an entry too big for the page"
+    expected:
+      - path: "src/tabular.rs"
+        heading: "module width"
+
+  # --- gap filling ----------------------------------------------------------
+  # `src/glyphs.rs` holds no definitions at all, so every chunk it has comes out of gap
+  # filling. These three are path-only because a gap chunk has no heading to scope to,
+  # and they fail together for a different reason than the ones above: if gap filling
+  # stops producing pieces the file yields no chunks and the indexer drops the document
+  # before the database, so all three miss at once.
+  - id: code-space-not-a-divider
+    query: "why a space and not a drawn divider stands between one column and the next"
+    expected:
+      - path: "src/glyphs.rs"
+  - id: code-absent-value-placeholder
+    query: "what gets printed in a column where the value is absent"
+    expected:
+      - path: "src/glyphs.rs"
+  - id: code-one-horizontal-line
+    query: "how many horizontal lines are drawn and where the one line goes"
+    expected:
+      - path: "src/glyphs.rs"
+
+  # --- prose in the same corpus ---------------------------------------------
+  # The two documents under `docs/` are answered by their own queries as well as acting
+  # as near misses for the ones above, so that a document going missing is a named
+  # failure here in the way it is in the prose gate.
+  - id: doc-constants-instead-of-settings
+    query: "why the choices are frozen into the source rather than exposed for callers to change"
+    expected:
+      - path: "docs/overview.md"
+  - id: doc-nothing-brings-the-process-down
+    query: "what happens when a value runs past the end of the type that holds it"
+    expected:
+      - path: "docs/conventions.md"
