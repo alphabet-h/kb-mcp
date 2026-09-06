@@ -218,3 +218,36 @@ fn serve_starts_its_watcher_without_an_index_so_the_watcher_can_seed_one() {
         "serve created no index, so nothing the watcher adds could land in one: {stderr}"
     );
 }
+
+/// Every way a document enters an index goes through one function, which is where the
+/// chunking policy is resolved.
+///
+/// Resolving it at the callers instead is what left the rename branch uncovered: it reaches
+/// [`grooveseek::indexer`]'s shared entry directly rather than through
+/// [`grooveseek::indexer::reindex_single_file`] (codex P2, round 5). This reads the source
+/// because the function is private, and the point is the shape of the call graph rather than
+/// any one behaviour: if a fourth way in appears, it inherits the policy by arriving here.
+#[test]
+fn the_chunk_policy_is_resolved_where_the_insertion_paths_meet() {
+    let src = include_str!("../src/indexer.rs");
+    let entry = src
+        .split("fn index_single_disk_entry(")
+        .nth(1)
+        .expect("the shared insertion path still exists");
+    let body = entry.split("\nfn ").next().unwrap_or(entry);
+    assert!(
+        body.contains("resolve_code_chunk_policy(db, false)"),
+        "the shared insertion path no longer resolves the chunking policy, so a caller that \
+         does not do it itself would leave the index unable to say what chunked it"
+    );
+    // And not at the callers, where it would be one path away from being missed again.
+    let reindex = src
+        .split("pub fn reindex_single_file(")
+        .nth(1)
+        .expect("reindex_single_file still exists");
+    let reindex_body = reindex.split("\npub fn ").next().unwrap_or(reindex);
+    assert!(
+        !reindex_body.contains("resolve_code_chunk_policy"),
+        "the policy is resolved twice; the shared path already covers this caller"
+    );
+}

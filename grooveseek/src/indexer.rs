@@ -738,6 +738,13 @@ fn index_single_disk_entry(
     force: bool,
     context_mode: ContextMode,
 ) -> Result<SingleResult> {
+    // (AV-12) Every path that can put a document into an index arrives here, which is why the
+    // chunking policy is resolved here rather than at each caller: the first attempt covered
+    // `reindex_single_file` and missed the rename branch, which reaches this function directly
+    // (codex P2, round 5). Ahead of the unchanged check on purpose -- what it has to answer is
+    // "was there a source file here before this run", and after the insert there would be.
+    resolve_code_chunk_policy(db, false)?;
+
     // Skip unchanged files unless forced.
     // rename で path UPDATE 済のものは「DB 側 hash == disk hash」なので
     // ここで自然に skip される (embedding 再計算なし)。
@@ -992,12 +999,6 @@ pub fn reindex_single_file(
     exclude_headings: Option<&[String]>,
     registry: &Registry,
 ) -> Result<SingleResult> {
-    // `groove serve` does not require an index to exist, and its watcher reaches this function
-    // without ever going through [`rebuild_index`] -- so a knowledge base whose first source
-    // file arrives this way would hold one in an index that never recorded a policy, and
-    // `groove doctor` would call it possibly-truncated legacy data (codex P2, round 3).
-    resolve_code_chunk_policy(db, false)?;
-
     let full = kb_path.join(rel);
     if !full.exists() {
         return Ok(SingleResult::Skipped {
