@@ -179,15 +179,16 @@ fn a_missing_index_exits_two_rather_than_reporting_a_clean_bill() {
     );
 }
 
-/// `serve` starts its watcher without an index, which is why the chunking policy cannot be
-/// recorded by `groove index` alone.
+/// `groove serve` starts its watcher without an index, which is why the chunking policy
+/// cannot be recorded by `groove index` alone.
 ///
-/// `status`, `graph` and `doctor` all refuse a knowledge base with no index; `serve` does
-/// not, and its watcher reaches `reindex_single_file` without ever going through
-/// `rebuild_index`. So the first source file a knowledge base ever gets can arrive there,
-/// and the policy has to be recorded on that path too (codex P2, round 3). This pins the
-/// premise: if `serve` ever starts refusing, that call becomes dead weight rather than a
-/// silent gap, and someone should be told which it is.
+/// `groove status`, `groove graph` and `groove doctor` all refuse a knowledge base with no
+/// index; `groove serve` does not, and its watcher reaches
+/// [`grooveseek::indexer::reindex_single_file`] without ever going through
+/// [`grooveseek::indexer::rebuild_index`]. So the first source file a knowledge base ever
+/// gets can arrive there, and the policy has to be recorded on that path too (codex P2,
+/// round 3). This pins the premise: if `groove serve` ever starts refusing, that call
+/// becomes dead weight rather than a silent gap, and someone should be told which it is.
 #[test]
 fn serve_starts_its_watcher_without_an_index_so_the_watcher_can_seed_one() {
     let layout = TempKbLayout::new("groove-serve-noindex");
