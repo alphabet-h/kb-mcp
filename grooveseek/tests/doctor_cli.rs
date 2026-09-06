@@ -200,14 +200,21 @@ fn serve_starts_its_watcher_without_an_index_so_the_watcher_can_seed_one() {
         .expect("groove serve");
 
     // It exits non-zero because nothing is speaking MCP on its stdin, not because it declined
-    // to look at the knowledge base -- the watcher line is what says it got that far.
+    // to look at the knowledge base. What says it got that far is the database: `serve` opens
+    // one, and opening one creates it.
+    //
+    // Asserted on the file rather than on a log line. The first version of this looked for
+    // the word "watching" and passed here while failing on the macOS runner, which printed
+    // "watcher started" instead: the watcher announces itself twice from two lines of
+    // `watcher.rs`, and which of them a run shows is not this test's business. The property
+    // is about the index.
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("No index found"),
         "serve is not supposed to require an index: {stderr}"
     );
     assert!(
-        stderr.contains("watching"),
-        "the watcher is what can seed an index, so it has to have started: {stderr}"
+        grooveseek::resolve_db_path(layout.kb()).exists(),
+        "serve created no index, so nothing the watcher adds could land in one: {stderr}"
     );
 }
