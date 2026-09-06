@@ -5655,6 +5655,31 @@ mod tests {
         assert_eq!(db.tags_parse_failure_count(), 0);
     }
 
+    /// The counting wrapper adds counting and nothing else.
+    ///
+    /// Both readers of `documents.tags` -- search through the wrapper, `doctor` through the
+    /// decoder alone -- have to agree about what the column says, or the two surfaces would
+    /// classify different documents while looking at the same row (codex P1, round 1). Pinned
+    /// by comparing the two on the shapes the column actually takes.
+    #[test]
+    fn the_counting_tag_reader_decodes_exactly_what_the_plain_one_does() {
+        let db = Database::open_in_memory().unwrap();
+        for raw in [
+            None,
+            Some(String::new()),
+            Some(r#"["mcp","rust"]"#.to_string()),
+            Some("[]".to_string()),
+            Some("not-a-json".to_string()),
+            Some("{broken".to_string()),
+            // Valid JSON of the wrong shape: an object rather than an array of strings.
+            Some(r#"{"a":1}"#.to_string()),
+        ] {
+            let plain = Database::decode_tags_json(raw.clone()).unwrap_or_default();
+            let counted = db.parse_tags_json_recording(raw.clone());
+            assert_eq!(counted, plain, "the two readers disagree about {raw:?}");
+        }
+    }
+
     #[test]
     fn test_parse_tags_failure_counter_persists_across_sessions() {
         let tmp = F63TempDir::new("groove-f63-persist");

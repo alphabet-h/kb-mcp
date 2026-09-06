@@ -244,21 +244,30 @@ impl Database {
     }
 
     /// `documents.tags` 列 (JSON 文字列) を `Vec<String>` に展開する。
-    /// NULL / 空文字 / 不正 JSON は空 Vec として扱う (検索フィルタでヒット 0 件に
-    /// なるだけで、エラーで検索を中断させない)。
+    /// NULL / 空文字は空 Vec、不正 JSON は `Err` (中身は parse 失敗の理由)。
+    ///
+    /// **副作用が無いのがこの関数の役目。** どの caller も列の読み方をここに 1 本化する
+    /// ため、「何を tags と認めるか」「壊れた値をどう畳むか」が経路ごとに分岐しない
+    /// (codex P1 round 1)。カウンタと warning を足したい caller は
+    /// [`Self::parse_tags_json_recording`] を、要らない caller (= 診断) は本関数を直接呼ぶ。
+    pub(crate) fn decode_tags_json(json: Option<String>) -> serde_json::Result<Vec<String>> {
+        match json {
+            Some(s) if !s.is_empty() => serde_json::from_str(&s),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// [`Self::decode_tags_json`] に「失敗を数える」だけを足したもの。
     /// 不正 JSON 時は `tags_parse_failures` カウンタを atomic increment し、
     /// `tracing::warn!` も併発する (F-63: silent fail-open 可視化)。
     pub(crate) fn parse_tags_json_recording(&self, json: Option<String>) -> Vec<String> {
-        match json {
-            Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(error = %e, "malformed documents.tags JSON, treating as empty");
-                    self.tags_parse_failures.fetch_add(1, Ordering::Relaxed);
-                    Vec::new()
-                }
-            },
-            _ => Vec::new(),
+        match Self::decode_tags_json(json) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "malformed documents.tags JSON, treating as empty");
+                self.tags_parse_failures.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
         }
     }
 
@@ -689,32 +698,38 @@ impl Database {
         Ok(())
     }
 
-    /// Return every indexed document path beside the tags recorded with it, in path order.
+    /// The tags recorded beside every document that a parser gave line numbers to, in path
+    /// order.
     ///
-    /// Malformed `tags` JSON reads as no tags rather than as an error, which is what every
-    /// other reader of that column does. It is **not** read through
-    /// [`Self::parse_tags_json_recording`]: that one increments the counter `groove status`
-    /// reports, and it is flushed to `index_meta` when the database closes, so a diagnostic
-    /// calling it would move a number every time it ran.
+    /// The line numbers are the point of the restriction. `tags` is frontmatter — a Markdown
+    /// note can declare `code` or `parse:too-deep` by hand, and a caller reading only tags
+    /// would believe it — while `chunks.start_line` is written from a parser's own account of
+    /// where in the file a chunk came from, which no document can ask for. Today the code
+    /// parser is the only one that fills it in; a prose parser leaves it NULL.
+    ///
+    /// The column is decoded by [`Self::decode_tags_json`], the same reader search goes
+    /// through, so the two cannot come to disagree about what counts as a tag. What it skips
+    /// is the counting wrapper [`Self::parse_tags_json_recording`]: that one increments a
+    /// number `groove status` reports and flushes to `index_meta` when the database closes,
+    /// so a diagnostic calling it would move that number every time it ran.
     ///
     /// Which tags mean what is not decided here: this hands back the column and the caller
     /// applies its own rule to it, so the database layer does not have to learn what the code
     /// parser writes.
-    pub fn all_document_tags(&self) -> Result<Vec<(String, Vec<String>)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path, tags FROM documents ORDER BY path")?;
+    pub fn tags_of_documents_with_line_numbers(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT d.path, d.tags FROM documents d \
+             JOIN chunks c ON c.document_id = d.id \
+             WHERE c.start_line IS NOT NULL \
+             ORDER BY d.path",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })?;
         let mut out = Vec::new();
         for row in rows {
             let (path, tags) = row?;
-            let tags: Vec<String> = tags
-                .filter(|s| !s.is_empty())
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            out.push((path, tags));
+            out.push((path, Self::decode_tags_json(tags).unwrap_or_default()));
         }
         Ok(out)
     }

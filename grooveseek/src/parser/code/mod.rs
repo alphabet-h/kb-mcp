@@ -62,9 +62,12 @@ pub(crate) const MAX_RAW_CODE_BYTES: u64 = 1024 * 1024;
 // about three-quarters before it meets this.
 const MAX_CHUNKS_PER_FILE: usize = 512;
 
-/// Tag every document this parser produces carries, and the one thing that separates a source
-/// file from a note whose frontmatter happens to name the same `parse:` tag by hand.
-pub(crate) const TAG_CODE: &str = "code";
+/// Tag every document this parser produces carries.
+///
+/// It does not prove one, though: `tags` is frontmatter, so a note can declare it by hand.
+/// What separates a source file from a note that says the same words is the line range on
+/// its chunks, which comes from the parser rather than from the document.
+const TAG_CODE: &str = "code";
 
 /// Tag on a document whose grammar could not read part of it.
 const TAG_PARSE_DEGRADED: &str = "parse:degraded";

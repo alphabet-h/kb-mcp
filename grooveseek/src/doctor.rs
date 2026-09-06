@@ -269,17 +269,16 @@ pub fn run(db: &Database, registry: &Registry) -> Result<Report> {
     // -- what the chunker gave up on ----------------------------------------
 
     let without_definitions = crate::parser::code::TAGS_WITHOUT_DEFINITIONS;
+    // Only documents a parser gave line numbers to are asked, because `tags` alone proves
+    // nothing: it is frontmatter, so a note about code parsing can declare `parse:too-deep`
+    // and `code` by hand and be believed. `chunks.start_line` cannot be declared -- it comes
+    // from a parser's own account of where a chunk sat in its file.
     let chunked_by_lines: Vec<String> = db
-        .all_document_tags()?
+        .tags_of_documents_with_line_numbers()?
         .into_iter()
         .filter(|(_, tags)| {
-            // The `code` tag as well, and not as a nicety: `tags` is frontmatter for a
-            // Markdown document, so anyone can write `parse:too-deep` into a note by hand.
-            // Only the code parser writes both.
-            tags.iter().any(|t| t == crate::parser::code::TAG_CODE)
-                && tags
-                    .iter()
-                    .any(|t| without_definitions.contains(&t.as_str()))
+            tags.iter()
+                .any(|t| without_definitions.contains(&t.as_str()))
         })
         .map(|(path, _)| path)
         .collect();
@@ -616,13 +615,30 @@ mod tests {
 
     /// Add a second document carrying `tags`, so a check that reads them has something to
     /// find beside the plain Markdown one every fixture starts with.
-    fn with_tagged_document(db: &Database, path: &str, tags: &[&str]) {
+    ///
+    /// `line_numbers` decides whether its chunk gets a line range, which is how a document a
+    /// code parser produced is told apart from a note that merely says the same words in its
+    /// frontmatter.
+    fn with_tagged_document(db: &Database, path: &str, tags: &[&str], line_numbers: bool) {
         let owned: Vec<String> = tags.iter().map(|t| (*t).to_string()).collect();
         let doc = db
             .upsert_document(path, Some("T"), None, None, None, &owned, None, "h2", 12)
             .expect("upsert");
-        db.insert_chunk(doc, 0, Some("H"), None, "body", None, &vec![0.1; 384], 1.0)
-            .expect("chunk");
+        db.insert_chunk_with_code(
+            doc,
+            0,
+            Some("H"),
+            None,
+            "body",
+            None,
+            &vec![0.1; 384],
+            1.0,
+            crate::db::CodeMeta {
+                line_range: line_numbers.then_some((1, 4)),
+                symbol_kind: None,
+            },
+        )
+        .expect("chunk");
     }
 
     fn chunked_without_definitions(report: &Report) -> Option<&Finding> {
@@ -635,8 +651,8 @@ mod tests {
     #[test]
     fn a_source_file_chunked_by_lines_is_reported_whichever_bound_stopped_it() {
         let db = db_with_one_chunk();
-        with_tagged_document(&db, "src/deep.rs", &["code", "parse:too-deep"]);
-        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"]);
+        with_tagged_document(&db, "src/deep.rs", &["code", "parse:too-deep"], true);
+        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"], true);
 
         let report = run(&db, &registry_md()).expect("run");
         let f = chunked_without_definitions(&report)
@@ -657,11 +673,18 @@ mod tests {
     }
 
     #[test]
-    fn a_note_that_merely_spells_the_tag_by_hand_is_not_reported() {
-        // `documents.tags` is frontmatter for a Markdown document, so anyone can write these
-        // strings into a note. Only a file the code parser produced carries `code` as well.
+    fn a_note_that_merely_spells_the_tags_by_hand_is_not_reported() {
+        // `documents.tags` is frontmatter, so a note *about* code parsing can legally declare
+        // every tag this check reads, `code` included -- which is why the check reads line
+        // numbers instead of believing them (codex P2, round 1). The fixture writes both tags
+        // and no line range, the exact shape that used to be reported.
         let db = db_with_one_chunk();
-        with_tagged_document(&db, "notes/about-parsing.md", &["parse:too-deep"]);
+        with_tagged_document(
+            &db,
+            "notes/about-parsing.md",
+            &["code", "parse:too-deep"],
+            false,
+        );
 
         let report = run(&db, &registry_md()).expect("run");
         assert!(
@@ -676,8 +699,11 @@ mod tests {
         // The column is fail-open everywhere else it is read; a diagnostic is the last place
         // that should turn one bad row into "could not look".
         let db = db_with_one_chunk();
-        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"]);
-        db.execute_for_test("UPDATE documents SET tags = '{not json' WHERE path = 'notes/a.md'")
+        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"], true);
+        // Corrupted on a row the query actually returns, so the fail-open path is the one
+        // under test rather than a row the join already left out.
+        with_tagged_document(&db, "src/broken.rs", &["code"], true);
+        db.execute_for_test("UPDATE documents SET tags = '{not json' WHERE path = 'src/broken.rs'")
             .expect("update");
 
         let report = run(&db, &registry_md()).expect("run");
@@ -688,7 +714,7 @@ mod tests {
     #[test]
     fn an_index_whose_files_kept_their_definitions_says_nothing_about_them() {
         let db = db_with_one_chunk();
-        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"]);
+        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
 
         let report = run(&db, &registry_md()).expect("run");
         assert!(
