@@ -291,7 +291,8 @@ fn test_parsers_do_not_unwind_on_cross_format_payloads() {
 /// formats come from, so they belong in this battery for the same reason.
 ///
 /// Reached through the registry rather than by naming the parser: its constructor is private
-/// to the crate, and `Registry` is how the indexer gets a `&dyn Parser` for an extension.
+/// to the crate, and [`grooveseek::parser::Registry`] is how the indexer gets a parser for an
+/// extension.
 #[test]
 fn test_code_adversarial_inputs_do_not_unwind() {
     let registry = Registry::from_enabled(&["rs".into()]).expect("the rs parser builds");
