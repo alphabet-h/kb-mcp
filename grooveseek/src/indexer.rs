@@ -1417,40 +1417,55 @@ pub(crate) fn resolve_code_chunk_budget(db: &Database, desired: usize, force: bo
 /// [ADR-0017]: https://github.com/alphabet-h/grooveseek/blob/main/docs/decisions/0017-bound-the-chunk-count-without-dropping-bytes.md
 pub(crate) const CODE_CHUNK_POLICY: &str = "degrade";
 
+/// What an index that was built before [`CODE_CHUNK_POLICY`] existed is recorded as.
+///
+/// Absence used to mean this. Recording it instead is what lets the question be settled
+/// once: absence means "not looked at yet", and looking is the part that costs (codex P1,
+/// round 7). The evidence is not erased by writing it down — it is written down.
+pub(crate) const CODE_CHUNK_POLICY_LEGACY: &str = "truncate-pre-1.6";
+
 /// Record which chunking policy this index was built under, when that can be said honestly.
 ///
-/// Unlike [`resolve_code_chunk_budget`], **an absent key is not filled in on an ordinary
-/// run.** The two are asked different questions. A stored budget that differs from the
-/// configured one is a mismatch a reader can act on; an absent policy is the state of every
-/// index written before v1.6.0, and those may hold code documents whose tails the old
-/// truncation cut off. A file whose content has not changed never reaches the parser again,
-/// so an ordinary run neither repairs nor detects that — and writing the key anyway would
-/// erase the only evidence that it might be there (codex P1, round 2).
+/// An index written before v1.6.0 may hold code documents whose tails the old truncation cut
+/// off, and nothing on those documents says so: the tag comes from the parser, and a file
+/// whose content has not changed never reaches the parser again. So the answer cannot be
+/// worked out later — it has to be recorded while it is still knowable, which is the first
+/// time any run looks at the index.
 ///
-/// So it is written when the index is being built in full (`force`), and when the index holds
-/// no source file yet — the one other moment nothing in it can have been cut by the old rule.
-/// Otherwise the key stays absent and `groove doctor` reports it.
+/// Three states, and the key is written in all of them:
+///
+/// - `--force` re-chunks everything, so the index matches this build: [`CODE_CHUNK_POLICY`].
+/// - Otherwise, an index holding no source file has nothing the old rule could have cut:
+///   [`CODE_CHUNK_POLICY`] again.
+/// - Otherwise it was built by something else and may be damaged:
+///   [`CODE_CHUNK_POLICY_LEGACY`], which `groove doctor` reports.
 ///
 /// **Emptiness is measured in source files, not in documents.** A Markdown-only knowledge
 /// base that switches code parsing on has documents already, and every source file the run is
 /// about to add is chunked by this build; asking [`Database::document_count`] there would
-/// withhold the key over prose that was never in question and send its owner to an
-/// unnecessary `--force` (codex P2, round 3). The population asked is the one the finding
-/// reads, through the same predicate, so the two cannot come to disagree about who counts as
-/// a source file.
+/// call it legacy over prose that was never in question and send its owner to an unnecessary
+/// `--force` (codex P2, round 3). The population asked is the one the finding reads, through
+/// the same predicate, so the two cannot come to disagree about who counts as a source file.
 ///
-/// **Called once per indexed file**, so neither question may be answered by building a list.
-/// The recorded policy is one row of `index_meta`, and [`Database::has_documents_with_line_numbers`]
-/// stops at the first source file it finds — which is the case that cannot write the key and
-/// so asks again on the next entry. Materialising every source document there instead made
-/// the first run after an upgrade quadratic in the corpus (codex P1, round 6).
+/// **Called once per indexed file**, so the answer has to be settled rather than recomputed.
+/// Recording the legacy state is what settles it: an earlier version left the key absent
+/// there, so the lookup that decides never short-circuited and every entry paid for a scan
+/// over the prose ahead of the first source document (codex P1, rounds 6 and 7). Absence now
+/// means only "not looked at yet".
 pub(crate) fn resolve_code_chunk_policy(db: &Database, force: bool) -> Result<()> {
-    if !force && db.read_code_chunk_policy()?.is_some() {
+    if force {
+        db.write_code_chunk_policy(CODE_CHUNK_POLICY)?;
         return Ok(());
     }
-    if force || !db.has_documents_with_line_numbers()? {
-        db.write_code_chunk_policy(CODE_CHUNK_POLICY)?;
+    if db.read_code_chunk_policy()?.is_some() {
+        return Ok(());
     }
+    let policy = if db.has_documents_with_line_numbers()? {
+        CODE_CHUNK_POLICY_LEGACY
+    } else {
+        CODE_CHUNK_POLICY
+    };
+    db.write_code_chunk_policy(policy)?;
     Ok(())
 }
 

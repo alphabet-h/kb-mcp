@@ -4302,9 +4302,22 @@ mod tests {
             )
             .unwrap();
         crate::indexer::resolve_code_chunk_policy(&legacy, false).unwrap();
-        assert!(
-            legacy.read_code_chunk_policy().unwrap().is_none(),
-            "a plain run must not record a policy it did not apply to what is already there"
+        assert_eq!(
+            legacy.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY_LEGACY),
+            "a plain run must record what it found rather than claim this build chunked it"
+        );
+
+        // And having recorded it, it does not look again -- which is the whole point: the
+        // lookup that decides now short-circuits instead of scanning per indexed file.
+        legacy
+            .execute_for_test("DELETE FROM chunks")
+            .expect("empty the index behind its back");
+        crate::indexer::resolve_code_chunk_policy(&legacy, false).unwrap();
+        assert_eq!(
+            legacy.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY_LEGACY),
+            "the answer was settled; a later run must not re-derive it"
         );
 
         // A forced run re-chunks everything, so at that point the index does match.

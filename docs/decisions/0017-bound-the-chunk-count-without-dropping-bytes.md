@@ -118,14 +118,19 @@ changed is what happens when it does.
 - An index built before this release keeps its chunks for every file whose content has not
   changed, because such a file never reaches the parser again. Those files may still be
   missing the tails the old truncation cut, and nothing on the document says so — the tag is
-  written by the parser, and the parser is what that path skips. **So the index records
-  which chunking policy built it**, written whenever it holds no source file yet — measured
-  in source files rather than in documents, so a prose knowledge base switching code parsing
-  on is not held back by notes that were never in question — and whenever `--force` rebuilds
-  it. `groove doctor` reports an index that predates that record rather than reporting a
-  clean bill over damage it cannot see, and `groove index --force` re-chunks them. The record
-  is written on the incremental path as well: `serve` needs no index to start, so a knowledge
-  base can get its first source file from the watcher without a full rebuild ever running.
+  written by the parser, and the parser is what that path skips. **So the index records which
+  chunking policy built it** — this one when `--force` rebuilds it or when it holds no source
+  file yet, and otherwise a marker saying it was built by something else. `groove doctor`
+  reports an index carrying anything but the current policy rather than reporting a clean
+  bill over damage it cannot see, and `groove index --force` re-chunks them.
+
+  Emptiness is measured in source files rather than in documents, so a prose knowledge base
+  switching code parsing on is not held back by notes that were never in question. The record
+  is written where every insertion path meets, because `serve` needs no index to start and a
+  knowledge base can get its first source file from the watcher without a full rebuild ever
+  running. And the legacy state is *written down* rather than left as an absent key: the
+  question costs something to answer, and a state that cannot be recorded is one every
+  indexed file has to re-derive.
 
   The alternative was to guess: a truncated document has exactly the bound's worth of chunks.
   That was rejected because a file whose definitions produce exactly that many is left alone

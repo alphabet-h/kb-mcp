@@ -49,10 +49,11 @@ Do not reach for `format-local` here: it renders in the *reader's* timezone, so 
   still hold files the old truncation cut short — and they carry no tag to find
   them by, which would let the finding above report a clean bill over exactly
   the damage it exists to expose. An index now records which chunking policy
-  built it, written when it is built from empty or with `--force`, and a second
-  finding, `chunk-policy-not-recorded`, reports an index that predates that
-  record while holding source files. `groove index --force` re-chunks them and
-  the finding goes away.
+  built it — this one when it is built from empty or with `--force`, and
+  otherwise a marker saying it was built by something else — and a second
+  finding, `chunk-policy-not-recorded`, reports an index holding source files
+  under anything but the current policy. `groove index --force` re-chunks them
+  and the finding goes away.
 
 ### Security
 

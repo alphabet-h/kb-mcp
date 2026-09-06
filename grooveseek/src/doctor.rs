@@ -273,8 +273,12 @@ pub fn run(db: &Database, registry: &Registry) -> Result<Report> {
     // and they carry no tag to find them by. Only worth saying where there are code documents
     // to be wrong about, and `with_line_numbers` is that population.
     let with_line_numbers = db.tags_of_documents_with_line_numbers()?;
+    // Absent or recorded as something else, both. Absent is an index no run has looked at
+    // since the upgrade; the legacy marker is one that has been looked at and found wanting.
+    // Neither can say its source files are whole.
     let policy = db.read_code_chunk_policy()?;
-    if policy.is_none() && !with_line_numbers.is_empty() {
+    let policy_is_current = policy.as_deref() == Some(crate::indexer::CODE_CHUNK_POLICY);
+    if !policy_is_current && !with_line_numbers.is_empty() {
         findings.push(Finding {
             check: "chunk-policy-not-recorded",
             severity: Severity::Warning,
@@ -682,19 +686,26 @@ mod tests {
         // its chunks because its content has not changed, so it never acquires a tag and the
         // finding below would report nothing while the tail is still missing (codex P1,
         // round 2). What is knowable is that the answer is not knowable.
-        let db = db_with_one_chunk();
-        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
+        //
+        // Two ways to be in it: no run has looked since the upgrade (no key), or one has and
+        // wrote down what it found. Both have to report.
+        for recorded in [None, Some(crate::indexer::CODE_CHUNK_POLICY_LEGACY)] {
+            let db = db_with_one_chunk();
+            with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
+            if let Some(policy) = recorded {
+                db.write_code_chunk_policy(policy).expect("policy");
+            }
 
-        let report = run(&db, &registry_md()).expect("run");
-        let f = report
-            .findings
-            .iter()
-            .find(|f| f.check == "chunk-policy-not-recorded")
-            .expect("an index that predates the policy must say so");
-        assert_eq!(f.severity, Severity::Warning);
-        assert_eq!(f.count, 1);
-        // The only run that re-chunks a file whose content has not changed.
-        assert!(f.remedy.contains("--force"), "remedy was {:?}", f.remedy);
+            let report = run(&db, &registry_md()).expect("run");
+            let f = report
+                .findings
+                .iter()
+                .find(|f| f.check == "chunk-policy-not-recorded")
+                .unwrap_or_else(|| panic!("{recorded:?} must still be reported"));
+            assert_eq!(f.severity, Severity::Warning);
+            assert_eq!(f.count, 1);
+            assert!(f.remedy.contains("--force"), "remedy was {:?}", f.remedy);
+        }
     }
 
     #[test]
