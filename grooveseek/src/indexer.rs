@@ -1432,10 +1432,11 @@ pub(crate) const CODE_CHUNK_POLICY: &str = "degrade";
 ///
 /// **Emptiness is measured in source files, not in documents.** A Markdown-only knowledge
 /// base that switches code parsing on has documents already, and every source file the run is
-/// about to add is chunked by this build; asking `document_count` there would withhold the
-/// key over prose that was never in question and send its owner to an unnecessary `--force`
-/// (codex P2, round 3). The population asked is the one the finding reads, through the same
-/// query, so the two cannot come to disagree about who counts as a source file.
+/// about to add is chunked by this build; asking [`Database::document_count`] there would
+/// withhold the key over prose that was never in question and send its owner to an
+/// unnecessary `--force` (codex P2, round 3). The population asked is the one the finding
+/// reads, through the same query, so the two cannot come to disagree about who counts as a
+/// source file.
 pub(crate) fn resolve_code_chunk_policy(db: &Database, force: bool) -> Result<()> {
     // Cheap first, because the watcher calls this per changed file: once the answer is
     // recorded there is nothing to work out, and the scan below never runs again.
