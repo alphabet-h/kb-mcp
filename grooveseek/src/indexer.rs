@@ -992,6 +992,12 @@ pub fn reindex_single_file(
     exclude_headings: Option<&[String]>,
     registry: &Registry,
 ) -> Result<SingleResult> {
+    // `groove serve` does not require an index to exist, and its watcher reaches this function
+    // without ever going through [`rebuild_index`] -- so a knowledge base whose first source
+    // file arrives this way would hold one in an index that never recorded a policy, and
+    // `groove doctor` would call it possibly-truncated legacy data (codex P2, round 3).
+    resolve_code_chunk_policy(db, false)?;
+
     let full = kb_path.join(rel);
     if !full.exists() {
         return Ok(SingleResult::Skipped {
@@ -1420,11 +1426,23 @@ pub(crate) const CODE_CHUNK_POLICY: &str = "degrade";
 /// so an ordinary run neither repairs nor detects that — and writing the key anyway would
 /// erase the only evidence that it might be there (codex P1, round 2).
 ///
-/// So it is written when the index is being built in full (`force`), and when there is
-/// nothing in it yet, which is the one other moment the whole index does match this build.
+/// So it is written when the index is being built in full (`force`), and when the index holds
+/// no source file yet — the one other moment nothing in it can have been cut by the old rule.
 /// Otherwise the key stays absent and `groove doctor` reports it.
+///
+/// **Emptiness is measured in source files, not in documents.** A Markdown-only knowledge
+/// base that switches code parsing on has documents already, and every source file the run is
+/// about to add is chunked by this build; asking `document_count` there would withhold the
+/// key over prose that was never in question and send its owner to an unnecessary `--force`
+/// (codex P2, round 3). The population asked is the one the finding reads, through the same
+/// query, so the two cannot come to disagree about who counts as a source file.
 pub(crate) fn resolve_code_chunk_policy(db: &Database, force: bool) -> Result<()> {
-    if force || db.document_count()? == 0 {
+    // Cheap first, because the watcher calls this per changed file: once the answer is
+    // recorded there is nothing to work out, and the scan below never runs again.
+    if !force && db.read_code_chunk_policy()?.is_some() {
+        return Ok(());
+    }
+    if force || db.tags_of_documents_with_line_numbers()?.is_empty() {
         db.write_code_chunk_policy(CODE_CHUNK_POLICY)?;
     }
     Ok(())

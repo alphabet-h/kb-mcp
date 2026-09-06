@@ -178,3 +178,35 @@ fn a_missing_index_exits_two_rather_than_reporting_a_clean_bill() {
         "the reason belongs on stderr: {stderr}"
     );
 }
+
+/// `serve` starts its watcher without an index, which is why the chunking policy cannot be
+/// recorded by `groove index` alone.
+///
+/// `status`, `graph` and `doctor` all refuse a knowledge base with no index; `serve` does
+/// not, and its watcher reaches `reindex_single_file` without ever going through
+/// `rebuild_index`. So the first source file a knowledge base ever gets can arrive there,
+/// and the policy has to be recorded on that path too (codex P2, round 3). This pins the
+/// premise: if `serve` ever starts refusing, that call becomes dead weight rather than a
+/// silent gap, and someone should be told which it is.
+#[test]
+fn serve_starts_its_watcher_without_an_index_so_the_watcher_can_seed_one() {
+    let layout = TempKbLayout::new("groove-serve-noindex");
+    layout.write("notes/a.md", "# A\n\nbody\n");
+
+    let out = Command::new(grooveseek_bin())
+        .args(["serve", "--kb-path", &layout.kb().display().to_string()])
+        .output()
+        .expect("groove serve");
+
+    // It exits non-zero because nothing is speaking MCP on its stdin, not because it declined
+    // to look at the knowledge base -- the watcher line is what says it got that far.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("No index found"),
+        "serve is not supposed to require an index: {stderr}"
+    );
+    assert!(
+        stderr.contains("watching"),
+        "the watcher is what can seed an index, so it has to have started: {stderr}"
+    );
+}

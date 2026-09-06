@@ -4208,11 +4208,44 @@ mod tests {
             Some(crate::indexer::CODE_CHUNK_POLICY)
         );
 
-        // An index that already holds documents and has no policy recorded is a legacy one.
+        // Prose already indexed is not what the question is about: a Markdown-only knowledge
+        // base switching code parsing on has documents, and none of them can have been cut by
+        // the old rule (codex P2, round 3).
+        let prose = Database::open_in_memory().unwrap();
+        prose
+            .upsert_document("a.md", None, None, None, None, &[], None, "h", 1)
+            .unwrap();
+        crate::indexer::resolve_code_chunk_policy(&prose, false).unwrap();
+        assert_eq!(
+            prose.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY),
+            "prose in the index says nothing about how source files were chunked"
+        );
+
+        // A source file already in the index, with no policy recorded, is the legacy state.
         // A plain run must leave it that way.
         let legacy = Database::open_in_memory().unwrap();
         legacy
-            .upsert_document("a.md", None, None, None, None, &[], None, "h", 1)
+            .verify_embedding_meta("bge-small-en-v1.5", 384)
+            .unwrap();
+        let doc = legacy
+            .upsert_document("a.rs", None, None, None, None, &[], None, "h", 1)
+            .unwrap();
+        legacy
+            .insert_chunk_with_code(
+                doc,
+                0,
+                None,
+                None,
+                "body",
+                None,
+                &vec![0.1; 384],
+                1.0,
+                crate::db::CodeMeta {
+                    line_range: Some((1, 2)),
+                    symbol_kind: None,
+                },
+            )
             .unwrap();
         crate::indexer::resolve_code_chunk_policy(&legacy, false).unwrap();
         assert!(
