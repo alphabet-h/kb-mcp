@@ -178,3 +178,76 @@ fn a_missing_index_exits_two_rather_than_reporting_a_clean_bill() {
         "the reason belongs on stderr: {stderr}"
     );
 }
+
+/// `groove serve` starts its watcher without an index, which is why the chunking policy
+/// cannot be recorded by `groove index` alone.
+///
+/// `groove status`, `groove graph` and `groove doctor` all refuse a knowledge base with no
+/// index; `groove serve` does not, and its watcher reaches
+/// [`grooveseek::indexer::reindex_single_file`] without ever going through
+/// [`grooveseek::indexer::rebuild_index`]. So the first source file a knowledge base ever
+/// gets can arrive there, and the policy has to be recorded on that path too (codex P2,
+/// round 3). This pins the premise: if `groove serve` ever starts refusing, that call
+/// becomes dead weight rather than a silent gap, and someone should be told which it is.
+#[test]
+fn serve_starts_its_watcher_without_an_index_so_the_watcher_can_seed_one() {
+    let layout = TempKbLayout::new("groove-serve-noindex");
+    layout.write("notes/a.md", "# A\n\nbody\n");
+
+    let out = Command::new(grooveseek_bin())
+        .args(["serve", "--kb-path", &layout.kb().display().to_string()])
+        .output()
+        .expect("groove serve");
+
+    // It exits non-zero because nothing is speaking MCP on its stdin, not because it declined
+    // to look at the knowledge base. What says it got that far is the database: `serve` opens
+    // one, and opening one creates it.
+    //
+    // Asserted on the file rather than on a log line. The first version of this looked for
+    // the word "watching" and passed here while failing on the macOS runner, which printed
+    // "watcher started" instead: the watcher announces itself twice from two lines of
+    // `watcher.rs`, and which of them a run shows is not this test's business. The property
+    // is about the index.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("No index found"),
+        "serve is not supposed to require an index: {stderr}"
+    );
+    assert!(
+        grooveseek::resolve_db_path(layout.kb()).exists(),
+        "serve created no index, so nothing the watcher adds could land in one: {stderr}"
+    );
+}
+
+/// Every way a document enters an index goes through one function, which is where the
+/// chunking policy is resolved.
+///
+/// Resolving it at the callers instead is what left the rename branch uncovered: it reaches
+/// [`grooveseek::indexer`]'s shared entry directly rather than through
+/// [`grooveseek::indexer::reindex_single_file`] (codex P2, round 5). This reads the source
+/// because the function is private, and the point is the shape of the call graph rather than
+/// any one behaviour: if a fourth way in appears, it inherits the policy by arriving here.
+#[test]
+fn the_chunk_policy_is_resolved_where_the_insertion_paths_meet() {
+    let src = include_str!("../src/indexer.rs");
+    let entry = src
+        .split("fn index_single_disk_entry(")
+        .nth(1)
+        .expect("the shared insertion path still exists");
+    let body = entry.split("\nfn ").next().unwrap_or(entry);
+    assert!(
+        body.contains("resolve_code_chunk_policy(db, false)"),
+        "the shared insertion path no longer resolves the chunking policy, so a caller that \
+         does not do it itself would leave the index unable to say what chunked it"
+    );
+    // And not at the callers, where it would be one path away from being missed again.
+    let reindex = src
+        .split("pub fn reindex_single_file(")
+        .nth(1)
+        .expect("reindex_single_file still exists");
+    let reindex_body = reindex.split("\npub fn ").next().unwrap_or(reindex);
+    assert!(
+        !reindex_body.contains("resolve_code_chunk_policy"),
+        "the policy is resolved twice; the shared path already covers this caller"
+    );
+}

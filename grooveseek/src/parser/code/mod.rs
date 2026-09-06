@@ -42,11 +42,52 @@ use super::{Chunk, Frontmatter, ParsedDocument, Parser, build_context};
 /// has to be refused before the parser ever sees it.
 pub(crate) const MAX_RAW_CODE_BYTES: u64 = 1024 * 1024;
 
-/// Chunks one file may contribute before the parser gives up and warns.
+/// Chunks one file may contribute.
 ///
-/// A policy number, not a measured one: in a prose knowledge base with some code mixed in, a
-/// file that wants more than this is a file that should not have been indexed.
+/// A file that wants more is chunked by lines instead, and the line budget is widened just
+/// enough that the result fits — so this is a bound the index actually keeps, and the file
+/// still contributes every byte it has, which is what ADR-0012 requires of any file the
+/// chunker gives up on. What the file loses is granularity, not content.
+///
+/// It used to be applied by keeping the first this-many chunks and dropping the rest. Since
+/// the pieces are sorted by position, that silently left the tail of a wide file out of the
+/// index while `get_document`, served from [`crate::server`], went on returning the whole
+/// file.
+//
+// Measured 2026-09-06 against this repository's own sources: 62 `.rs` files copied into a
+// scratch knowledge base, indexed with `target/release/groove.exe index --config
+// groove.toml --force`, then counted with
+//   SELECT d.path, COUNT(c.id) FROM documents d
+//     JOIN chunks c ON c.document_id = d.id GROUP BY d.id ORDER BY 2 DESC
+// The widest file was `transport/http.rs` at 297 chunks, so real code has room to grow by
+// about three-quarters before it meets this.
 const MAX_CHUNKS_PER_FILE: usize = 512;
+
+/// Tag every document this parser produces carries.
+///
+/// It does not prove one, though: `tags` is frontmatter, so a note can declare it by hand.
+/// What separates a source file from a note that says the same words is the line range on
+/// its chunks, which comes from the parser rather than from the document.
+const TAG_CODE: &str = "code";
+
+/// Tag on a document whose grammar could not read part of it.
+const TAG_PARSE_DEGRADED: &str = "parse:degraded";
+
+/// Tag on a document chunked by lines because a definition sat past the scope bound.
+const TAG_PARSE_TOO_DEEP: &str = "parse:too-deep";
+
+/// Tag on a document chunked by lines because its definitions wanted more chunks than
+/// [`MAX_CHUNKS_PER_FILE`].
+const TAG_PARSE_TOO_MANY_CHUNKS: &str = "parse:too-many-chunks";
+
+/// The tags that say a document holds no definition metadata because groove declined to
+/// produce it. Whoever reports on that state reads this rather than listing the tags again.
+///
+/// [`TAG_PARSE_DEGRADED`] is deliberately not one of them. A file the grammar could not fully
+/// read still contributes the definitions around the break, which is the whole point of
+/// gap-filling; what it lost is a region, not its definitions.
+pub(crate) const TAGS_WITHOUT_DEFINITIONS: &[&str] =
+    &[TAG_PARSE_TOO_DEEP, TAG_PARSE_TOO_MANY_CHUNKS];
 
 /// Default budget for one chunk, counted in non-whitespace characters.
 ///
@@ -205,26 +246,39 @@ fn chunk_source(
     text: &str,
     path_hint: &str,
 ) -> Result<ParsedDocument> {
-    chunk_source_capped(
-        grammar,
-        budget,
-        bytes,
-        text,
-        path_hint,
-        MAX_DEFINITION_SCOPE_DEPTH,
-    )
+    chunk_source_capped(grammar, budget, bytes, text, path_hint, Bounds::SHIPPED)
 }
 
-/// [`chunk_source`] with the scope bound injected, so a unit test can take the fallback
-/// without building a source deep enough to take it for real (the same split
-/// [`super::pdf`] uses for its page budgets).
+/// The two bounds that decide when the chunker stops chunking at definitions.
+///
+/// One struct rather than two `usize` parameters, because they are both counts: passing them
+/// in the wrong order would compile and quietly change which bound a test was about.
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    /// Ancestors a definition may sit under before the file is chunked by lines.
+    scope_depth: usize,
+    /// Chunks one file may contribute before it is chunked by lines.
+    chunks: usize,
+}
+
+impl Bounds {
+    /// What production runs with.
+    const SHIPPED: Self = Self {
+        scope_depth: MAX_DEFINITION_SCOPE_DEPTH,
+        chunks: MAX_CHUNKS_PER_FILE,
+    };
+}
+
+/// [`chunk_source`] with the bounds injected, so a unit test can take either fallback without
+/// building a source that reaches it for real (the same split [`super::pdf`] uses for its page
+/// budgets).
 fn chunk_source_capped(
     grammar: &LoadedGrammar,
     budget: usize,
     bytes: &[u8],
     text: &str,
     path_hint: &str,
-    scope_limit: usize,
+    bounds: Bounds,
 ) -> Result<ParsedDocument> {
     let title = super::txt::derive_title_pub(path_hint);
     let mut ts = tree_sitter::Parser::new();
@@ -262,7 +316,7 @@ fn chunk_source_capped(
         // Stop at the first definition nested past the bound rather than finishing the file:
         // every remaining definition would pay the same walk, and the answer is already known.
         let scope = match node {
-            Some(n) => match scope_chain(n, text, scope_limit) {
+            Some(n) => match scope_chain(n, text, bounds.scope_depth) {
                 Some(scope) => scope,
                 None => {
                     too_deep = true;
@@ -281,29 +335,14 @@ fn chunk_source_capped(
         });
     }
 
+    // Chunk at the definitions — unless the scope bound already ended that, in which case
+    // there are none and the file goes straight to the fallback below.
     let mut pieces: Vec<Piece> = Vec::new();
     if too_deep {
-        // The file still contributes every byte it has (ADR-0012); it contributes them as
-        // lines, which is the shape a region no definition covers already gets. Falling back
-        // to the plain-text parser instead would make the whole file one chunk, the shape this
-        // module exists to avoid.
         tracing::warn!(
             path = path_hint,
-            limit = scope_limit,
+            limit = bounds.scope_depth,
             "a definition is nested deeper than the limit; chunking this file by lines instead"
-        );
-        defs.clear();
-        let context_parts: Vec<String> = title.iter().cloned().collect();
-        // Not droppable, unlike an ordinary gap. A gap is the frame around content that was
-        // chunked as a definition; here there is no such content, so a thin last piece is the
-        // end of the file rather than a stray closing brace beside something that survived.
-        push_line_pieces(
-            0..text.len(),
-            &context_parts,
-            text,
-            budget,
-            false,
-            &mut pieces,
         );
     } else {
         link_containment(&mut defs);
@@ -314,18 +353,22 @@ fn chunk_source_capped(
         fill_gaps(&roots, &defs, text, budget, &title, &mut pieces);
     }
 
-    pieces.sort_by_key(|p| p.range.start);
-    let kept = drop_thin_fragments(pieces, text);
-    let (kept, truncated) = if kept.len() > MAX_CHUNKS_PER_FILE {
-        (kept[..MAX_CHUNKS_PER_FILE].to_vec(), true)
-    } else {
-        (kept, false)
-    };
-    if truncated {
+    let mut kept = settle(pieces, text);
+    // Asked of the definition chunks, which is why a file the scope bound stopped answers no
+    // rather than being excluded by hand: it produced none to count.
+    let too_many = kept.len() > bounds.chunks;
+    if too_many {
         tracing::warn!(
             path = path_hint,
-            limit = MAX_CHUNKS_PER_FILE,
-            "code file produced more chunks than the per-file limit; keeping the first ones"
+            limit = bounds.chunks,
+            chunks = kept.len(),
+            "code file wants more chunks than the per-file limit; chunking it by lines instead"
+        );
+    }
+    if too_deep || too_many {
+        kept = settle(
+            line_chunk_whole_file(text, budget, bounds.chunks, &title),
+            text,
         );
     }
 
@@ -355,15 +398,21 @@ fn chunk_source_capped(
         })
         .collect();
 
-    let mut tags_out = vec!["code".to_string(), format!("lang:{}", grammar.name)];
+    let mut tags_out = vec![TAG_CODE.to_string(), format!("lang:{}", grammar.name)];
     if has_error {
-        tags_out.push("parse:degraded".to_string());
+        tags_out.push(TAG_PARSE_DEGRADED.to_string());
     }
     // A separate tag from `parse:degraded`, which answers a different question: that one says
     // the grammar could not read part of the file, this one says groove declined to chunk a
     // file it could read. A caller filtering for one does not want the other.
     if too_deep {
-        tags_out.push("parse:too-deep".to_string());
+        tags_out.push(TAG_PARSE_TOO_DEEP.to_string());
+    }
+    // And separate again from `parse:too-deep`, which is the same outcome reached for the
+    // other reason. Both are in `TAGS_WITHOUT_DEFINITIONS`; they are two tags rather than one
+    // because the input to change differs -- flatten the nesting, or split the file.
+    if too_many {
+        tags_out.push(TAG_PARSE_TOO_MANY_CHUNKS.to_string());
     }
     // The source, verbatim -- not the chunks rejoined, which is what the prose parsers do.
     // Rejoining is right when chunks are a lossy view of the document, because then it is the
@@ -619,6 +668,74 @@ fn push_line_pieces(
             droppable,
         });
     }
+}
+
+/// Put the pieces in file order and drop the ones too thin to be worth a chunk.
+///
+/// Every path out of the chunker ends here, so a piece list is never turned into chunks
+/// without passing the same two steps.
+fn settle(mut pieces: Vec<Piece>, text: &str) -> Vec<Piece> {
+    pieces.sort_by_key(|p| p.range.start);
+    drop_thin_fragments(pieces, text)
+}
+
+/// The whole file as headingless line pieces — what both bounds fall back to.
+///
+/// The file still contributes every byte it has (ADR-0012); it contributes them as lines,
+/// which is the shape a region no definition covers already gets. Falling back to the
+/// plain-text parser instead would make the whole file one chunk, the shape this module
+/// exists to avoid.
+///
+/// The pieces are **not** droppable, unlike an ordinary gap. A gap is the frame around content
+/// that was chunked as a definition; here there is no such content, so a thin last piece is
+/// the end of the file rather than a stray closing brace beside something that survived.
+/// Taking `droppable` from the gap path instead is how an earlier version of the scope
+/// fallback lost the tail of a file it was supposed to keep whole.
+///
+/// `limit` is applied by widening the budget rather than by dropping pieces, so this is the
+/// one place that makes [`MAX_CHUNKS_PER_FILE`] true of every file: whichever bound sent a
+/// file here, what comes back fits it.
+fn line_chunk_whole_file(
+    text: &str,
+    budget: usize,
+    limit: usize,
+    title: &Option<String>,
+) -> Vec<Piece> {
+    let context_parts: Vec<String> = title.iter().cloned().collect();
+    let mut pieces = Vec::new();
+    push_line_pieces(
+        0..text.len(),
+        &context_parts,
+        text,
+        budget_for_at_most(text, budget, limit),
+        false,
+        &mut pieces,
+    );
+    pieces
+}
+
+/// A budget wide enough that [`split_by_lines`] cannot cut `text` into more than `limit` pieces.
+///
+/// [`split_by_lines`] starts a new piece only when the next line would overrun the budget, so
+/// any two neighbouring pieces weigh more than it together. A text weighing `weight` therefore
+/// yields fewer than `2 * weight / budget + 1` pieces, and asking for that to stay under
+/// `limit` gives the budget below.
+///
+/// Widening is what lets the chunk bound and ADR-0012 hold at the same time: the file is cut
+/// more coarsely rather than cut short, so every byte still reaches the index.
+///
+/// The configured budget is returned untouched unless it is too narrow for the file, which
+/// takes a weight above `budget * (limit - 1) / 2`. At [`DEFAULT_MAX_CHUNK_CHARS`] and
+/// [`MAX_CHUNKS_PER_FILE`] that is around 894,000 non-whitespace characters — reachable
+/// under [`MAX_RAW_CODE_BYTES`], but only by a file that is nearly all code and nearly at
+/// the cap. The ordinary way to reach it is a knowledge base that set
+/// `[parsers.code].max_chunk_chars` far below the default.
+fn budget_for_at_most(text: &str, budget: usize, limit: usize) -> usize {
+    let weight = non_ws(text, &(0..text.len()));
+    // `limit - 1` because the bound above is strict; the `max(1)` keeps a limit of one (or of
+    // zero, which no caller passes) from dividing by nothing.
+    let pairs = limit.saturating_sub(1).max(1);
+    budget.max(weight.saturating_mul(2).div_ceil(pairs))
 }
 
 /// Drop fragments too small to be worth a chunk — unless dropping them would leave the file
@@ -1040,9 +1157,31 @@ impl Counter {
             src.as_bytes(),
             src,
             "src/lib.rs",
-            scope_limit,
+            Bounds {
+                scope_depth: scope_limit,
+                ..Bounds::SHIPPED
+            },
         )
         .expect("a nested file still parses")
+    }
+
+    /// The other injected bound: how many chunks the file may contribute before it is chunked
+    /// by lines. Injected for the same reason the scope one is — a source that reaches the
+    /// shipped bound for real is a large fixture to carry around.
+    fn parse_chunk_capped(src: &str, budget: usize, chunk_limit: usize) -> ParsedDocument {
+        let grammar = static_rust::grammar().expect("rust grammar builds");
+        chunk_source_capped(
+            &grammar,
+            budget,
+            src.as_bytes(),
+            src,
+            "src/lib.rs",
+            Bounds {
+                chunks: chunk_limit,
+                ..Bounds::SHIPPED
+            },
+        )
+        .expect("a wide file still parses")
     }
 
     #[test]
@@ -1100,6 +1239,296 @@ impl Counter {
                 .any(|t| t == "parse:too-deep"),
             "tags were {:?}",
             outside.frontmatter.tags
+        );
+    }
+
+    /// `defs` one-line functions, one per line.
+    ///
+    /// Wide rather than deep: every definition sits at the top level, so the scope bound is
+    /// nowhere near and the only thing that can send this file to the fallback is how many
+    /// chunks it wants. Built here for the reason the other fixtures are — a file on disk
+    /// would arrive with whatever line endings the checkout gives it.
+    fn wide_source(defs: usize) -> String {
+        let mut src = String::new();
+        for i in 0..defs {
+            src.push_str("pub fn f");
+            src.push_str(&i.to_string());
+            src.push_str("() -> u32 { ");
+            src.push_str(&i.to_string());
+            src.push_str(" }\n");
+        }
+        src
+    }
+
+    #[test]
+    fn a_file_over_the_chunk_limit_is_chunked_by_lines_rather_than_truncated() {
+        let src = wide_source(40);
+        let doc = parse_chunk_capped(&src, DEFAULT_MAX_CHUNK_CHARS, 8);
+        // Asserted first so this cannot quietly become a test of the definition path.
+        assert!(
+            doc.frontmatter
+                .tags
+                .iter()
+                .any(|t| t == "parse:too-many-chunks"),
+            "this fixture is supposed to take the fallback, tags were {:?}",
+            doc.frontmatter.tags
+        );
+        assert!(
+            !doc.frontmatter.tags.iter().any(|t| t == "parse:too-deep"),
+            "nothing in this fixture is nested, tags were {:?}",
+            doc.frontmatter.tags
+        );
+        assert!(
+            doc.chunks.len() <= 8,
+            "the fallback is supposed to fit the bound, got {} chunks",
+            doc.chunks.len()
+        );
+        assert!(
+            doc.chunks.iter().all(|c| c.symbol_kind.is_none()),
+            "line chunks carry no definition kind, got {:?}",
+            doc.chunks
+                .iter()
+                .map(|c| &c.symbol_kind)
+                .collect::<Vec<_>>()
+        );
+        // The last definition in the file. Pieces are sorted by position, so keeping the first
+        // `limit` of them is exactly what used to drop this one.
+        let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(seen.contains("f39"), "the tail of the file is missing");
+    }
+
+    #[test]
+    fn a_file_over_the_chunk_limit_still_covers_every_byte() {
+        // The budget is injected narrow so the fallback produces several chunks. A fixture
+        // that fits in one chunk cannot show that nothing was dropped between them, which is
+        // how the coverage test for the scope fallback missed a real loss once already.
+        let src = wide_source(40);
+        let doc = parse_chunk_capped(&src, 40, 8);
+        assert!(
+            doc.frontmatter
+                .tags
+                .iter()
+                .any(|t| t == "parse:too-many-chunks"),
+            "this fixture is supposed to take the fallback, tags were {:?}",
+            doc.frontmatter.tags
+        );
+        assert!(
+            doc.chunks.len() > 1,
+            "the split never happened, so this proves nothing about what falls between chunks"
+        );
+        let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+        let seen_ws_free: String = seen.chars().filter(|c| !c.is_whitespace()).collect();
+        let want: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(seen_ws_free, want, "the fallback dropped part of the file");
+    }
+
+    #[test]
+    fn the_chunk_limit_is_what_decides_it_rather_than_the_source() {
+        // One source, two bounds — the same shape as the scope test above.
+        let src = wide_source(40);
+
+        let inside = parse_chunk_capped(&src, DEFAULT_MAX_CHUNK_CHARS, MAX_CHUNKS_PER_FILE);
+        assert!(
+            inside.chunks.iter().any(|c| c.symbol_kind.is_some()),
+            "expected definition chunks, got {:?}",
+            inside.chunks.iter().map(|c| &c.heading).collect::<Vec<_>>()
+        );
+        assert!(
+            !inside
+                .frontmatter
+                .tags
+                .iter()
+                .any(|t| t == "parse:too-many-chunks"),
+            "tags were {:?}",
+            inside.frontmatter.tags
+        );
+
+        let outside = parse_chunk_capped(&src, DEFAULT_MAX_CHUNK_CHARS, 8);
+        assert!(
+            outside.chunks.iter().all(|c| c.symbol_kind.is_none()),
+            "expected line chunks only"
+        );
+        assert!(
+            outside
+                .frontmatter
+                .tags
+                .iter()
+                .any(|t| t == "parse:too-many-chunks"),
+            "tags were {:?}",
+            outside.frontmatter.tags
+        );
+    }
+
+    #[test]
+    fn a_file_of_exactly_the_chunk_limit_is_left_at_its_definitions() {
+        // The count is read off a run that cannot reach the bound rather than written down
+        // here: how many chunks a source produces is the chunker's business, and hard-coding
+        // it would turn this into a test of that number instead of of the comparison.
+        let src = wide_source(40);
+        let unbounded = parse_chunk_capped(&src, DEFAULT_MAX_CHUNK_CHARS, MAX_CHUNKS_PER_FILE);
+        let exactly = unbounded.chunks.len();
+        assert!(
+            exactly > 1,
+            "the fixture has to produce more than one chunk"
+        );
+
+        let fits = parse_chunk_capped(&src, DEFAULT_MAX_CHUNK_CHARS, exactly);
+        assert!(
+            !fits
+                .frontmatter
+                .tags
+                .iter()
+                .any(|t| t == "parse:too-many-chunks"),
+            "a file that fits exactly is not over the bound, tags were {:?}",
+            fits.frontmatter.tags
+        );
+        assert_eq!(fits.chunks.len(), exactly);
+
+        let over = parse_chunk_capped(&src, DEFAULT_MAX_CHUNK_CHARS, exactly - 1);
+        assert!(
+            over.frontmatter
+                .tags
+                .iter()
+                .any(|t| t == "parse:too-many-chunks"),
+            "one under the count is over the bound, tags were {:?}",
+            over.frontmatter.tags
+        );
+    }
+
+    #[test]
+    fn the_fallback_fits_the_bound_however_narrow_the_budget_is() {
+        // The budget decides how finely the fallback cuts, and `[parsers.code].max_chunk_chars`
+        // takes any number. Widening it rather than dropping pieces is what lets the bound and
+        // ADR-0012's "every byte" hold at once, so both are asserted for each budget.
+        let src = wide_source(60);
+        let want: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        for budget in [1usize, 5, 40] {
+            let doc = parse_chunk_capped(&src, budget, 6);
+            assert!(
+                doc.chunks.len() <= 6,
+                "budget {budget} produced {} chunks",
+                doc.chunks.len()
+            );
+            let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+            let seen_ws_free: String = seen.chars().filter(|c| !c.is_whitespace()).collect();
+            assert_eq!(
+                seen_ws_free, want,
+                "budget {budget} dropped part of the file"
+            );
+        }
+    }
+
+    /// [`deeply_nested`] written one brace per line.
+    ///
+    /// The single-line version cannot be split at all, so any test about how many pieces the
+    /// fallback produces would pass on a file of one chunk without exercising anything.
+    fn deeply_nested_lines(levels: usize) -> String {
+        let mut src = String::new();
+        for i in 0..levels {
+            src.push_str("mod a");
+            src.push_str(&i.to_string());
+            src.push_str(" {\n");
+        }
+        src.push_str("pub fn leaf() -> u32 { 7 }\n");
+        for _ in 0..levels {
+            src.push_str("}\n");
+        }
+        src
+    }
+
+    #[test]
+    fn a_file_the_scope_bound_stopped_also_fits_the_chunk_bound() {
+        // The truncation this replaced sat outside the branch, so it cut the scope fallback's
+        // output as well — a deep file wide enough to overrun the bound lost its tail for the
+        // second reason after losing its definitions for the first.
+        let src = deeply_nested_lines(200);
+        let doc = parse_chunk_capped(&src, 1, 4);
+        assert!(
+            doc.frontmatter.tags.iter().any(|t| t == "parse:too-deep"),
+            "this fixture is supposed to take the scope fallback, tags were {:?}",
+            doc.frontmatter.tags
+        );
+        assert!(
+            doc.chunks.len() <= 4,
+            "the scope fallback has to fit the chunk bound too, got {}",
+            doc.chunks.len()
+        );
+        // The same guard its sibling above carries: a fixture that collapses to one chunk
+        // makes the coverage assertion below vacuous, and nothing else pins the widening
+        // constant or the fixture size to keep that from happening.
+        assert!(
+            doc.chunks.len() > 1,
+            "the split never happened, so this proves nothing about what falls between chunks"
+        );
+        let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
+        let seen_ws_free: String = seen.chars().filter(|c| !c.is_whitespace()).collect();
+        let want: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(
+            seen_ws_free, want,
+            "the scope fallback dropped part of the file"
+        );
+    }
+
+    #[test]
+    fn a_file_stopped_by_the_scope_bound_names_only_that_bound() {
+        // The scope bound stops the walk at the first definition past it, so the file never
+        // gets as far as producing definition chunks to count. Tagging it for both would claim
+        // a decision groove never reached.
+        let src = deeply_nested(200);
+        let doc = parse_chunk_capped(&src, 1, 2);
+        assert!(
+            doc.frontmatter.tags.iter().any(|t| t == "parse:too-deep"),
+            "tags were {:?}",
+            doc.frontmatter.tags
+        );
+        assert!(
+            !doc.frontmatter
+                .tags
+                .iter()
+                .any(|t| t == "parse:too-many-chunks"),
+            "tags were {:?}",
+            doc.frontmatter.tags
+        );
+    }
+
+    #[test]
+    fn an_ordinary_file_is_not_tagged_as_one_the_chunker_gave_up_on() {
+        // The reverse guard: a bound widened until it catches ordinary code would be worse
+        // than the bug it replaced, and `doctor` now reports on exactly these tags.
+        let doc = parse(SRC, DEFAULT_MAX_CHUNK_CHARS);
+        assert!(
+            !doc.frontmatter.tags.iter().any(|t| t.starts_with("parse:")),
+            "tags were {:?}",
+            doc.frontmatter.tags
+        );
+    }
+
+    #[test]
+    fn the_widened_budget_keeps_the_split_under_the_bound() {
+        // The arithmetic `budget_for_at_most` is built on, checked against the function it is
+        // built for rather than restated.
+        for lines in [1usize, 7, 50, 500] {
+            let src = wide_source(lines);
+            for limit in [1usize, 2, 8, 64] {
+                let budget = budget_for_at_most(&src, 1, limit);
+                let pieces = split_by_lines(&src, &(0..src.len()), budget);
+                assert!(
+                    pieces.len() <= limit,
+                    "{lines} line(s) at a bound of {limit} split into {}",
+                    pieces.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_budget_is_left_alone_when_the_file_does_not_need_widening() {
+        // Widening is for a knowledge base that set `max_chunk_chars` far below the default;
+        // an ordinary file under the shipped settings must come out of it untouched.
+        let src = wide_source(40);
+        assert_eq!(
+            budget_for_at_most(&src, DEFAULT_MAX_CHUNK_CHARS, MAX_CHUNKS_PER_FILE),
+            DEFAULT_MAX_CHUNK_CHARS
         );
     }
 

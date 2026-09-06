@@ -1,6 +1,6 @@
 //! `groove doctor` — ask the index whether it is in the state it should be.
 //!
-//! Two groups of question, and one deliberate omission.
+//! Three groups of question, and one deliberate omission.
 //!
 //! **Integrity.** Search reads three tables that have to agree about a chunk:
 //! `chunks` holds the text, `vec_chunks` the embedding, `fts_chunks` the
@@ -17,6 +17,16 @@
 //! server answers `resources/list` from. A doctor that computed its own
 //! equivalent would eventually disagree with the thing it is reporting on,
 //! which is the failure mode this whole feature is about.
+//!
+//! **What the chunker gave up on.** Which source files were chunked by lines
+//! rather than at their definitions, because one sat past the scope bound or
+//! because the file wanted more chunks than one file may contribute. Those
+//! files are whole and searchable — every byte reaches the index, which is what
+//! [ADR-0012] requires — but their chunks carry no symbol kind, heading or
+//! scope, so a query shaped like a definition cannot reach them. The parser
+//! says so with a tag on the document; until now nothing read it back.
+//!
+//! [ADR-0012]: https://github.com/alphabet-h/grooveseek/blob/main/docs/decisions/0012-chunk-code-at-its-definitions-and-fill-the-gaps-by-line.md
 //!
 //! **It does not repair.** Every finding names the command that fixes it. That
 //! is the contract `paths_with_unregistered_extension` already states for the
@@ -107,9 +117,10 @@ fn finding(
 
 /// Run every check against `db` and collect what it found.
 ///
-/// Findings come out in the order below — integrity, then servability —
-/// because the first group means something is broken and the second means
-/// something is merely unavailable.
+/// Findings come out in the order below — integrity, then servability, then
+/// what the chunker gave up on — because the first group means something is
+/// broken, the second means something is merely unavailable, and the third
+/// means everything arrived but in a coarser shape than usual.
 pub fn run(db: &Database, registry: &Registry) -> Result<Report> {
     let mut findings = Vec::new();
 
@@ -254,6 +265,63 @@ pub fn run(db: &Database, registry: &Registry) -> Result<Report> {
             remedy: "groove index (one run fills them in, without re-embedding)",
         });
     }
+
+    // -- what the chunker gave up on ----------------------------------------
+
+    // Before the finding below, because it says whether that finding can answer at all: an
+    // index written before the policy changed may hold files the old truncation cut short,
+    // and they carry no tag to find them by. Only worth saying where there are code documents
+    // to be wrong about, and `with_line_numbers` is that population.
+    let with_line_numbers = db.tags_of_documents_with_line_numbers()?;
+    // Absent or recorded as something else, both. Absent is an index no run has looked at
+    // since the upgrade; the legacy marker is one that has been looked at and found wanting.
+    // Neither can say its source files are whole.
+    let policy = db.read_code_chunk_policy()?;
+    let policy_is_current = policy.as_deref() == Some(crate::indexer::CODE_CHUNK_POLICY);
+    if !policy_is_current && !with_line_numbers.is_empty() {
+        findings.push(Finding {
+            check: "chunk-policy-not-recorded",
+            severity: Severity::Warning,
+            summary: format!(
+                "{} indexed source file(s) were chunked before it was recorded how a file over \
+                 the chunk limit is handled, so whether any of them lost its tail is not known",
+                with_line_numbers.len()
+            ),
+            count: with_line_numbers.len() as u64,
+            samples: Vec::new(),
+            // The only run that re-chunks a file whose content has not changed.
+            remedy: "groove index --force (re-chunks and re-embeds them)",
+        });
+    }
+
+    let without_definitions = crate::parser::code::TAGS_WITHOUT_DEFINITIONS;
+    // Only documents a parser gave line numbers to are asked, because `tags` alone proves
+    // nothing: it is frontmatter, so a note about code parsing can declare `parse:too-deep`
+    // and `code` by hand and be believed. `chunks.start_line` cannot be declared -- it comes
+    // from a parser's own account of where a chunk sat in its file.
+    let chunked_by_lines: Vec<String> = with_line_numbers
+        .into_iter()
+        .filter(|(_, tags)| {
+            tags.iter()
+                .any(|t| without_definitions.contains(&t.as_str()))
+        })
+        .map(|(path, _)| path)
+        .collect();
+    findings.extend(finding(
+        "chunked-without-definitions",
+        Severity::Warning,
+        format!(
+            "{} indexed source file(s) were chunked by lines rather than at their definitions, \
+             so their chunks carry no symbol kind, heading or scope",
+            chunked_by_lines.len()
+        ),
+        truncated(chunked_by_lines),
+        // Not an index command: re-running one reaches the same bound and makes the same
+        // choice. What changes the answer is the file (`doctor.rs` already carries the same
+        // caution for the oversize finding).
+        "split the file, or flatten its nesting -- the text stays searchable either way, \
+         it is the definition metadata that is missing",
+    ));
 
     Ok(Report {
         documents: db.document_count()?,
@@ -568,5 +636,186 @@ mod tests {
         assert_eq!(f.count, 1);
         // Not an error: nothing is broken, the answer is just not known yet.
         assert_eq!(f.severity, Severity::Warning);
+    }
+
+    /// Add a second document carrying `tags`, so a check that reads them has something to
+    /// find beside the plain Markdown one every fixture starts with.
+    ///
+    /// `line_numbers` decides whether its chunk gets a line range, which is how a document a
+    /// code parser produced is told apart from a note that merely says the same words in its
+    /// frontmatter.
+    fn with_tagged_document(db: &Database, path: &str, tags: &[&str], line_numbers: bool) {
+        let owned: Vec<String> = tags.iter().map(|t| (*t).to_string()).collect();
+        let doc = db
+            .upsert_document(path, Some("T"), None, None, None, &owned, None, "h2", 12)
+            .expect("upsert");
+        db.insert_chunk_with_code(
+            doc,
+            0,
+            Some("H"),
+            None,
+            "body",
+            None,
+            &vec![0.1; 384],
+            1.0,
+            crate::db::CodeMeta {
+                line_range: line_numbers.then_some((1, 4)),
+                symbol_kind: None,
+            },
+        )
+        .expect("chunk");
+    }
+
+    fn chunked_without_definitions(report: &Report) -> Option<&Finding> {
+        report
+            .findings
+            .iter()
+            .find(|f| f.check == "chunked-without-definitions")
+    }
+
+    /// Say the index was built by a version that records what it did, so a fixture about the
+    /// tags is not also a fixture about the generation.
+    fn with_the_current_chunk_policy(db: &Database) {
+        db.write_code_chunk_policy(crate::indexer::CODE_CHUNK_POLICY)
+            .expect("policy");
+    }
+
+    #[test]
+    fn an_index_from_before_the_chunk_policy_was_recorded_says_it_cannot_answer() {
+        // The state this whole finding exists for: a file the old truncation cut short keeps
+        // its chunks because its content has not changed, so it never acquires a tag and the
+        // finding below would report nothing while the tail is still missing (codex P1,
+        // round 2). What is knowable is that the answer is not knowable.
+        //
+        // Two ways to be in it: no run has looked since the upgrade (no key), or one has and
+        // wrote down what it found. Both have to report.
+        for recorded in [None, Some(crate::indexer::CODE_CHUNK_POLICY_LEGACY)] {
+            let db = db_with_one_chunk();
+            with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
+            if let Some(policy) = recorded {
+                db.write_code_chunk_policy(policy).expect("policy");
+            }
+
+            let report = run(&db, &registry_md()).expect("run");
+            let f = report
+                .findings
+                .iter()
+                .find(|f| f.check == "chunk-policy-not-recorded")
+                .unwrap_or_else(|| panic!("{recorded:?} must still be reported"));
+            assert_eq!(f.severity, Severity::Warning);
+            assert_eq!(f.count, 1);
+            assert!(f.remedy.contains("--force"), "remedy was {:?}", f.remedy);
+        }
+    }
+
+    #[test]
+    fn an_index_with_no_source_files_says_nothing_about_the_chunk_policy() {
+        // Nothing to be wrong about: the fixture is one Markdown document, and the question
+        // is only about files a code parser chunked.
+        let db = db_with_one_chunk();
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "chunk-policy-not-recorded"),
+            "findings were {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn an_index_that_recorded_the_policy_is_not_asked_again() {
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
+        with_the_current_chunk_policy(&db);
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "chunk-policy-not-recorded"),
+            "findings were {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn a_source_file_chunked_by_lines_is_reported_whichever_bound_stopped_it() {
+        let db = db_with_one_chunk();
+        with_the_current_chunk_policy(&db);
+        with_tagged_document(&db, "src/deep.rs", &["code", "parse:too-deep"], true);
+        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"], true);
+
+        let report = run(&db, &registry_md()).expect("run");
+        let f = chunked_without_definitions(&report)
+            .expect("both files gave up their definitions, so both belong to this finding");
+        assert_eq!(f.severity, Severity::Warning);
+        assert_eq!(f.count, 2);
+        assert_eq!(
+            f.samples,
+            vec!["src/deep.rs".to_string(), "src/wide.rs".to_string()]
+        );
+        // Naming an index command here would send someone to a remedy that cannot work: the
+        // next run reaches the same bound and makes the same choice.
+        assert!(
+            !f.remedy.contains("groove index"),
+            "remedy was {:?}",
+            f.remedy
+        );
+    }
+
+    #[test]
+    fn a_note_that_merely_spells_the_tags_by_hand_is_not_reported() {
+        // `documents.tags` is frontmatter, so a note *about* code parsing can legally declare
+        // every tag this check reads, `code` included -- which is why the check reads line
+        // numbers instead of believing them (codex P2, round 1). The fixture writes both tags
+        // and no line range, the exact shape that used to be reported.
+        let db = db_with_one_chunk();
+        with_tagged_document(
+            &db,
+            "notes/about-parsing.md",
+            &["code", "parse:too-deep"],
+            false,
+        );
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            chunked_without_definitions(&report).is_none(),
+            "findings were {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn a_document_with_unreadable_tags_does_not_stop_the_report() {
+        // The column is fail-open everywhere else it is read; a diagnostic is the last place
+        // that should turn one bad row into "could not look".
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"], true);
+        // Corrupted on a row the query actually returns, so the fail-open path is the one
+        // under test rather than a row the join already left out.
+        with_tagged_document(&db, "src/broken.rs", &["code"], true);
+        db.execute_for_test("UPDATE documents SET tags = '{not json' WHERE path = 'src/broken.rs'")
+            .expect("update");
+
+        let report = run(&db, &registry_md()).expect("run");
+        let f = chunked_without_definitions(&report).expect("the readable row is still found");
+        assert_eq!(f.count, 1);
+    }
+
+    #[test]
+    fn an_index_whose_files_kept_their_definitions_says_nothing_about_them() {
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            chunked_without_definitions(&report).is_none(),
+            "findings were {:?}",
+            report.findings
+        );
     }
 }

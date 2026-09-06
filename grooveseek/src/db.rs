@@ -4192,6 +4192,142 @@ mod tests {
         assert_eq!(db.read_code_max_chunk_chars().unwrap(), Some(1200));
     }
 
+    /// The cheap answer and the listed one agree about who is a source file.
+    ///
+    /// They are two statements built from one predicate, because the indexer needs the
+    /// question answered per file without a list being built (codex P1, round 6) while
+    /// `groove doctor` needs the list. Two statements can drift; this says they have not.
+    #[test]
+    fn the_existence_check_and_the_listing_agree_about_source_files() {
+        let db = Database::open_in_memory().unwrap();
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+        assert!(!db.has_documents_with_line_numbers().unwrap());
+        assert!(db.tags_of_documents_with_line_numbers().unwrap().is_empty());
+
+        // A prose document: chunks, but no line numbers.
+        let prose = db
+            .upsert_document("a.md", None, None, None, None, &[], None, "h", 1)
+            .unwrap();
+        db.insert_chunk(prose, 0, None, None, "body", None, &vec![0.1; 384], 1.0)
+            .unwrap();
+        assert!(
+            !db.has_documents_with_line_numbers().unwrap(),
+            "prose is not a source file"
+        );
+        assert!(db.tags_of_documents_with_line_numbers().unwrap().is_empty());
+
+        // A source document: two chunks, so the listing would repeat it if it joined naively.
+        let code = db
+            .upsert_document("a.rs", None, None, None, None, &[], None, "h2", 1)
+            .unwrap();
+        for i in 0..2 {
+            db.insert_chunk_with_code(
+                code,
+                i,
+                None,
+                None,
+                "body",
+                None,
+                &vec![0.1; 384],
+                1.0,
+                crate::db::CodeMeta {
+                    line_range: Some((1, 2)),
+                    symbol_kind: None,
+                },
+            )
+            .unwrap();
+        }
+        assert!(db.has_documents_with_line_numbers().unwrap());
+        let listed = db.tags_of_documents_with_line_numbers().unwrap();
+        assert_eq!(
+            listed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs"],
+            "one row per document, whatever its chunk count"
+        );
+    }
+
+    /// The policy generation is written only when the whole index matches this build.
+    ///
+    /// Deliberately unlike the budget beside it, which adopts an absent value on any run. An
+    /// absent policy is the state of every index written before v1.6.0, and those may hold
+    /// files the old truncation cut short; adopting it on a plain run would erase the only
+    /// evidence that they might be there while repairing nothing (codex P1, round 2).
+    #[test]
+    fn the_chunk_policy_is_recorded_on_a_fresh_or_forced_index_and_not_otherwise() {
+        let db = Database::open_in_memory().unwrap();
+        // Nothing indexed yet: whatever this run produces is all there will be.
+        crate::indexer::resolve_code_chunk_policy(&db, false).unwrap();
+        assert_eq!(
+            db.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY)
+        );
+
+        // Prose already indexed is not what the question is about: a Markdown-only knowledge
+        // base switching code parsing on has documents, and none of them can have been cut by
+        // the old rule (codex P2, round 3).
+        let prose = Database::open_in_memory().unwrap();
+        prose
+            .upsert_document("a.md", None, None, None, None, &[], None, "h", 1)
+            .unwrap();
+        crate::indexer::resolve_code_chunk_policy(&prose, false).unwrap();
+        assert_eq!(
+            prose.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY),
+            "prose in the index says nothing about how source files were chunked"
+        );
+
+        // A source file already in the index, with no policy recorded, is the legacy state.
+        // A plain run must leave it that way.
+        let legacy = Database::open_in_memory().unwrap();
+        legacy
+            .verify_embedding_meta("bge-small-en-v1.5", 384)
+            .unwrap();
+        let doc = legacy
+            .upsert_document("a.rs", None, None, None, None, &[], None, "h", 1)
+            .unwrap();
+        legacy
+            .insert_chunk_with_code(
+                doc,
+                0,
+                None,
+                None,
+                "body",
+                None,
+                &vec![0.1; 384],
+                1.0,
+                crate::db::CodeMeta {
+                    line_range: Some((1, 2)),
+                    symbol_kind: None,
+                },
+            )
+            .unwrap();
+        crate::indexer::resolve_code_chunk_policy(&legacy, false).unwrap();
+        assert_eq!(
+            legacy.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY_LEGACY),
+            "a plain run must record what it found rather than claim this build chunked it"
+        );
+
+        // And having recorded it, it does not look again -- which is the whole point: the
+        // lookup that decides now short-circuits instead of scanning per indexed file.
+        legacy
+            .execute_for_test("DELETE FROM chunks")
+            .expect("empty the index behind its back");
+        crate::indexer::resolve_code_chunk_policy(&legacy, false).unwrap();
+        assert_eq!(
+            legacy.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY_LEGACY),
+            "the answer was settled; a later run must not re-derive it"
+        );
+
+        // A forced run re-chunks everything, so at that point the index does match.
+        crate::indexer::resolve_code_chunk_policy(&legacy, true).unwrap();
+        assert_eq!(
+            legacy.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY)
+        );
+    }
+
     #[test]
     fn test_context_mode_malformed_is_none() {
         let db = Database::open_in_memory().unwrap();
@@ -5653,6 +5789,31 @@ mod tests {
         let v = db.parse_tags_json_recording(Some(String::new()));
         assert!(v.is_empty());
         assert_eq!(db.tags_parse_failure_count(), 0);
+    }
+
+    /// The counting wrapper adds counting and nothing else.
+    ///
+    /// Both readers of `documents.tags` -- search through the wrapper, `groove doctor`
+    /// through the decoder alone -- have to agree about what the column says, or the two would
+    /// classify different documents while looking at the same row (codex P1, round 1). Pinned
+    /// by comparing the two on the shapes the column actually takes.
+    #[test]
+    fn the_counting_tag_reader_decodes_exactly_what_the_plain_one_does() {
+        let db = Database::open_in_memory().unwrap();
+        for raw in [
+            None,
+            Some(String::new()),
+            Some(r#"["mcp","rust"]"#.to_string()),
+            Some("[]".to_string()),
+            Some("not-a-json".to_string()),
+            Some("{broken".to_string()),
+            // Valid JSON of the wrong shape: an object rather than an array of strings.
+            Some(r#"{"a":1}"#.to_string()),
+        ] {
+            let plain = Database::decode_tags_json(raw.clone()).unwrap_or_default();
+            let counted = db.parse_tags_json_recording(raw.clone());
+            assert_eq!(counted, plain, "the two readers disagree about {raw:?}");
+        }
     }
 
     #[test]
