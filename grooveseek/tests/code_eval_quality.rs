@@ -1,9 +1,10 @@
 //! Retrieval quality gate over the committed `kb-code-eval` fixture corpus (AV-15).
 //!
 //! The twenty prose documents behind `tests/eval_corpus_quality.rs` measure whether a
-//! *document* stays findable. Nothing measured whether a *definition* does, so a change to how source
-//! files are cut into chunks — the definition walk, the gap filling around it, the chunk
-//! budget — could not move a number anywhere in this repository. This file is that number.
+//! *document* stays findable. Nothing measured whether a *definition* does, so a change
+//! to how source files are cut into chunks — the definition walk, the gap filling around
+//! it, the chunk budget — could not move a number anywhere in this repository. This file
+//! is that number.
 //!
 //! # How a golden can see a chunking regression at all
 //!
@@ -37,12 +38,12 @@
 //!
 //! # Layers
 //!
-//! [`kb_code_eval_corpus_and_golden_stay_in_sync`] and
-//! [`kb_code_eval_fixtures_chunk_at_the_headings_the_golden_names`] need no model and run
-//! in the ordinary `cargo test` (= the PR gate). The second is the more useful of the two
-//! here: `groove eval` can only say a query stopped ranking first, while that one says the
-//! definition a golden entry names stopped being a chunk, which is the thing this corpus
-//! is about — and it says it on the pull request rather than a day later.
+//! [`crate::kb_code_eval_corpus_and_golden_stay_in_sync`] and
+//! [`crate::kb_code_eval_fixtures_chunk_at_the_headings_the_golden_names`] need no model
+//! and run in the ordinary `cargo test` (= the PR gate). The second is the more useful of
+//! the two here: `groove eval` can only say a query stopped ranking first, while that one
+//! says the definition a golden entry names stopped being a chunk, which is the thing this
+//! corpus is about — and it says it on the pull request rather than a day later.
 //!
 //! The two `#[ignore]` tests do the retrieval and are picked up by `nightly.yml`. The
 //! BGE-M3 one is in that workflow's skip list for the windows and macOS legs, alongside
@@ -70,14 +71,14 @@
 //! | BGE-M3, chunk budget 3500 -> 800 | 0.800 | 0.800 | 0.800 |
 //!
 //! The broken rows come from scratch builds, one edit each. Three of the five are in
-//! `grooveseek/src/parser/code/mod.rs`: `Bounds::SHIPPED.scope_depth` set to 0, so every
-//! source file takes the too-deep fallback and is chunked by lines with no heading
-//! anywhere; `fill_gaps` returning immediately; and `DEFAULT_MAX_CHUNK_CHARS` cut from
-//! 3500 to 800. The other two silence a retrieval leg: the MATCH expression built by
-//! `ParsedQuery::match_expr` in `grooveseek/src/db/fts_query.rs` returning `None`, and
-//! `search_split_candidates` in `grooveseek/src/db/search.rs` returning an empty
-//! vector-leg list. All five are crate-private, which is why they are named here rather
-//! than linked: an integration test sees only what the library exports.
+//! [`grooveseek::parser::code`]: `Bounds::SHIPPED.scope_depth` set to 0, so every source
+//! file takes the too-deep fallback and is chunked by lines with no heading anywhere;
+//! `fill_gaps` returning immediately; and `DEFAULT_MAX_CHUNK_CHARS` cut from 3500 to 800.
+//! The other two silence a retrieval leg, both under [`grooveseek::db`]: the MATCH
+//! expression built by `ParsedQuery::match_expr` returning `None`, and
+//! `search_split_candidates` returning an empty vector-leg list. Each of the five is
+//! private to the module it sits in, so the module is what is linked and the item stays in
+//! prose.
 //!
 //! Five conclusions are baked into the thresholds below:
 //!
@@ -85,7 +86,7 @@
 //!    0.267 / 0.333. Ten heading-scoped entries stop being satisfiable at once while the
 //!    files themselves still rank first, which is exactly the state a path-only golden
 //!    reports as healthy. The failure log shows it as the right path winning under no
-//!    heading, and [`winning_heading_report`] is what prints that.
+//!    heading, and [`crate::winning_heading_report`] is what prints that.
 //! 2. **Gap filling has its own detector and it is deterministic.** `src/glyphs.rs` holds
 //!    no definitions, so every chunk it has comes out of the gap filling named above; with
 //!    that dead the file yields no chunks, the indexer drops the document before the
@@ -238,7 +239,14 @@ fn winning_heading_report(all: &[QueryResult]) -> String {
         if q.metrics.reciprocal_rank >= 1.0 {
             continue;
         }
+        // A query whose retrieved window came back empty is the loudest state this report
+        // can be asked about, and skipping it would be the quietest thing to print. If
+        // every miss looked like that -- indexing dropped the whole corpus, say -- the
+        // line below would never run and the fallback text would tell the reader that
+        // every query ranked its expected chunk first, on the same failure that just said
+        // otherwise in numbers.
         let Some(top) = q.top_k.first() else {
+            report.push_str(&format!("  {}: nothing was returned at all\n", q.id));
             continue;
         };
         let heading = match &top.heading {

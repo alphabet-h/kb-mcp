@@ -10,7 +10,7 @@
 //! metric ceilings differ, the other one population — and a shared spelling of them would
 //! be a single knob two measurements hang off.
 //!
-//! The split follows this module's own rule (see [`super`]): a second caller is what makes
+//! The split follows this module's own rule (see [`crate::common`]): a second caller is what makes
 //! collapsing a copy part of the change, and these functions acquired their second caller
 //! when the code gate was added.
 

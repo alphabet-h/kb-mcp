@@ -23,7 +23,7 @@
 //!   layout guard.
 //! - [`crate::common::workflow`] — the `run:` steps of a GitHub Actions
 //!   workflow, read from its YAML. Shared by the pin guard and the bench guard.
-//! - [`eval_gate`] — walking a fixture corpus, pinning the configuration a
+//! - [`crate::common::eval_gate`] — walking a fixture corpus, pinning the configuration a
 //!   measurement is taken under, driving `groove index` / `groove eval`, and
 //!   reading the run back. Shared by the prose retrieval gate
 //!   (`eval_corpus_quality.rs`) and the code one (`code_eval_quality.rs`).
