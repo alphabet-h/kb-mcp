@@ -116,9 +116,18 @@ changed is what happens when it does.
   decides how many chunks a file may contribute, so it is no longer an availability
   question — it only decides how finely files that fit the bound are cut.
 - An index built before this release keeps its chunks for every file whose content has not
-  changed, because such a file never reaches the parser again. Those files keep whatever
-  chunking they were given, and `groove doctor` answers about the chunks it has;
-  `groove index --force` rebuilds them.
+  changed, because such a file never reaches the parser again. Those files may still be
+  missing the tails the old truncation cut, and nothing on the document says so — the tag is
+  written by the parser, and the parser is what that path skips. **So the index records
+  which chunking policy built it**, written when it is built from empty or with `--force`,
+  and `groove doctor` reports an index that predates that record rather than reporting a
+  clean bill over damage it cannot see. `groove index --force` re-chunks them.
+
+  The alternative was to guess: a truncated document has exactly the bound's worth of chunks.
+  That was rejected because a file whose definitions produce exactly that many is left alone
+  by this decision, so the two are indistinguishable — the guess would libel some documents
+  permanently. A generation says only what is true: this index was written under a different
+  answer, so the question is open.
 
 ## References
 

@@ -43,10 +43,16 @@ Do not reach for `format-local` here: it renders in the *reader's* timezone, so 
   since v1.3.0 and nothing read it back. The remedy it names is the file rather
   than a command, because an index run reaches the same bound and makes the same
   choice. **This can turn a previously clean `groove doctor` into exit 1** on an
-  index that already holds such files. Note also that a file whose content has
-  not changed is never re-chunked, so an index built before this release answers
-  the new finding about the chunks it already has; `groove index --force`
-  rebuilds them.
+  index that already holds such files.
+- **`groove doctor` says when it cannot answer that yet.** A file whose content
+  has not changed is never re-chunked, so an index built before this release may
+  still hold files the old truncation cut short — and they carry no tag to find
+  them by, which would let the finding above report a clean bill over exactly
+  the damage it exists to expose. An index now records which chunking policy
+  built it, written when it is built from empty or with `--force`, and a second
+  finding, `chunk-policy-not-recorded`, reports an index that predates that
+  record while holding source files. `groove index --force` re-chunks them and
+  the finding goes away.
 
 ### Security
 

@@ -523,6 +523,10 @@ pub fn rebuild_index(
     if let Some(budget) = registry.code_max_chunk_chars() {
         resolve_code_chunk_budget(db, budget, force)?;
     }
+    // (AV-12) And which policy cut them, which decides whether `doctor` can answer about the
+    // files this run will not re-chunk. Not gated on a code parser being enabled: an index
+    // built with one and re-indexed without it still holds those documents.
+    resolve_code_chunk_policy(db, force)?;
 
     // (feature-49) `.grooveignore` は **毎回ここで読み直す**。CLI `index` と MCP
     // `rebuild_index` は同じこの関数を通るので、どちらも常に今のファイルを見る。
@@ -1394,6 +1398,34 @@ pub(crate) fn resolve_code_chunk_budget(db: &Database, desired: usize, force: bo
         }
         Some(_) => {}
         None => db.write_code_max_chunk_chars(desired)?,
+    }
+    Ok(())
+}
+
+/// What this build does to a code file that wants more chunks than one file may contribute.
+///
+/// The value is a generation rather than a version: it changes when the answer changes, and
+/// `degrade` is the answer [ADR-0017] gave.
+///
+/// [ADR-0017]: https://github.com/alphabet-h/grooveseek/blob/main/docs/decisions/0017-bound-the-chunk-count-without-dropping-bytes.md
+pub(crate) const CODE_CHUNK_POLICY: &str = "degrade";
+
+/// Record which chunking policy this index was built under, when that can be said honestly.
+///
+/// Unlike [`resolve_code_chunk_budget`], **an absent key is not filled in on an ordinary
+/// run.** The two are asked different questions. A stored budget that differs from the
+/// configured one is a mismatch a reader can act on; an absent policy is the state of every
+/// index written before v1.6.0, and those may hold code documents whose tails the old
+/// truncation cut off. A file whose content has not changed never reaches the parser again,
+/// so an ordinary run neither repairs nor detects that — and writing the key anyway would
+/// erase the only evidence that it might be there (codex P1, round 2).
+///
+/// So it is written when the index is being built in full (`force`), and when there is
+/// nothing in it yet, which is the one other moment the whole index does match this build.
+/// Otherwise the key stays absent and `groove doctor` reports it.
+pub(crate) fn resolve_code_chunk_policy(db: &Database, force: bool) -> Result<()> {
+    if force || db.document_count()? == 0 {
+        db.write_code_chunk_policy(CODE_CHUNK_POLICY)?;
     }
     Ok(())
 }

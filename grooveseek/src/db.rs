@@ -4192,6 +4192,42 @@ mod tests {
         assert_eq!(db.read_code_max_chunk_chars().unwrap(), Some(1200));
     }
 
+    /// The policy generation is written only when the whole index matches this build.
+    ///
+    /// Deliberately unlike the budget beside it, which adopts an absent value on any run. An
+    /// absent policy is the state of every index written before v1.6.0, and those may hold
+    /// files the old truncation cut short; adopting it on a plain run would erase the only
+    /// evidence that they might be there while repairing nothing (codex P1, round 2).
+    #[test]
+    fn the_chunk_policy_is_recorded_on_a_fresh_or_forced_index_and_not_otherwise() {
+        let db = Database::open_in_memory().unwrap();
+        // Nothing indexed yet: whatever this run produces is all there will be.
+        crate::indexer::resolve_code_chunk_policy(&db, false).unwrap();
+        assert_eq!(
+            db.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY)
+        );
+
+        // An index that already holds documents and has no policy recorded is a legacy one.
+        // A plain run must leave it that way.
+        let legacy = Database::open_in_memory().unwrap();
+        legacy
+            .upsert_document("a.md", None, None, None, None, &[], None, "h", 1)
+            .unwrap();
+        crate::indexer::resolve_code_chunk_policy(&legacy, false).unwrap();
+        assert!(
+            legacy.read_code_chunk_policy().unwrap().is_none(),
+            "a plain run must not record a policy it did not apply to what is already there"
+        );
+
+        // A forced run re-chunks everything, so at that point the index does match.
+        crate::indexer::resolve_code_chunk_policy(&legacy, true).unwrap();
+        assert_eq!(
+            legacy.read_code_chunk_policy().unwrap().as_deref(),
+            Some(crate::indexer::CODE_CHUNK_POLICY)
+        );
+    }
+
     #[test]
     fn test_context_mode_malformed_is_none() {
         let db = Database::open_in_memory().unwrap();

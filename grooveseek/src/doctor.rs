@@ -268,13 +268,34 @@ pub fn run(db: &Database, registry: &Registry) -> Result<Report> {
 
     // -- what the chunker gave up on ----------------------------------------
 
+    // Before the finding below, because it says whether that finding can answer at all: an
+    // index written before the policy changed may hold files the old truncation cut short,
+    // and they carry no tag to find them by. Only worth saying where there are code documents
+    // to be wrong about, and `with_line_numbers` is that population.
+    let with_line_numbers = db.tags_of_documents_with_line_numbers()?;
+    let policy = db.read_code_chunk_policy()?;
+    if policy.is_none() && !with_line_numbers.is_empty() {
+        findings.push(Finding {
+            check: "chunk-policy-not-recorded",
+            severity: Severity::Warning,
+            summary: format!(
+                "{} indexed source file(s) were chunked before it was recorded how a file over \
+                 the chunk limit is handled, so whether any of them lost its tail is not known",
+                with_line_numbers.len()
+            ),
+            count: with_line_numbers.len() as u64,
+            samples: Vec::new(),
+            // The only run that re-chunks a file whose content has not changed.
+            remedy: "groove index --force (re-chunks and re-embeds them)",
+        });
+    }
+
     let without_definitions = crate::parser::code::TAGS_WITHOUT_DEFINITIONS;
     // Only documents a parser gave line numbers to are asked, because `tags` alone proves
     // nothing: it is frontmatter, so a note about code parsing can declare `parse:too-deep`
     // and `code` by hand and be believed. `chunks.start_line` cannot be declared -- it comes
     // from a parser's own account of where a chunk sat in its file.
-    let chunked_by_lines: Vec<String> = db
-        .tags_of_documents_with_line_numbers()?
+    let chunked_by_lines: Vec<String> = with_line_numbers
         .into_iter()
         .filter(|(_, tags)| {
             tags.iter()
@@ -648,9 +669,72 @@ mod tests {
             .find(|f| f.check == "chunked-without-definitions")
     }
 
+    /// Say the index was built by a version that records what it did, so a fixture about the
+    /// tags is not also a fixture about the generation.
+    fn with_the_current_chunk_policy(db: &Database) {
+        db.write_code_chunk_policy(crate::indexer::CODE_CHUNK_POLICY)
+            .expect("policy");
+    }
+
+    #[test]
+    fn an_index_from_before_the_chunk_policy_was_recorded_says_it_cannot_answer() {
+        // The state this whole finding exists for: a file the old truncation cut short keeps
+        // its chunks because its content has not changed, so it never acquires a tag and the
+        // finding below would report nothing while the tail is still missing (codex P1,
+        // round 2). What is knowable is that the answer is not knowable.
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
+
+        let report = run(&db, &registry_md()).expect("run");
+        let f = report
+            .findings
+            .iter()
+            .find(|f| f.check == "chunk-policy-not-recorded")
+            .expect("an index that predates the policy must say so");
+        assert_eq!(f.severity, Severity::Warning);
+        assert_eq!(f.count, 1);
+        // The only run that re-chunks a file whose content has not changed.
+        assert!(f.remedy.contains("--force"), "remedy was {:?}", f.remedy);
+    }
+
+    #[test]
+    fn an_index_with_no_source_files_says_nothing_about_the_chunk_policy() {
+        // Nothing to be wrong about: the fixture is one Markdown document, and the question
+        // is only about files a code parser chunked.
+        let db = db_with_one_chunk();
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "chunk-policy-not-recorded"),
+            "findings were {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn an_index_that_recorded_the_policy_is_not_asked_again() {
+        let db = db_with_one_chunk();
+        with_tagged_document(&db, "src/lib.rs", &["code", "lang:rust"], true);
+        with_the_current_chunk_policy(&db);
+
+        let report = run(&db, &registry_md()).expect("run");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "chunk-policy-not-recorded"),
+            "findings were {:?}",
+            report.findings
+        );
+    }
+
     #[test]
     fn a_source_file_chunked_by_lines_is_reported_whichever_bound_stopped_it() {
         let db = db_with_one_chunk();
+        with_the_current_chunk_policy(&db);
         with_tagged_document(&db, "src/deep.rs", &["code", "parse:too-deep"], true);
         with_tagged_document(&db, "src/wide.rs", &["code", "parse:too-many-chunks"], true);
 

@@ -51,7 +51,8 @@ pub(crate) const MAX_RAW_CODE_BYTES: u64 = 1024 * 1024;
 ///
 /// It used to be applied by keeping the first this-many chunks and dropping the rest. Since
 /// the pieces are sorted by position, that silently left the tail of a wide file out of the
-/// index while `get_document` went on returning the whole file.
+/// index while `get_document`, served from [`crate::server`], went on returning the whole
+/// file.
 //
 // Measured 2026-09-06 against this repository's own sources: 62 `.rs` files copied into a
 // scratch knowledge base, indexed with `target/release/groove.exe index --config

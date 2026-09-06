@@ -212,6 +212,33 @@ impl Database {
         Ok(())
     }
 
+    /// `index_meta.code_chunk_policy` を読む。key 不在は `None`。
+    ///
+    /// 不在は「その索引が、chunk 数の上限に当たったファイルをどう扱ったか分からない」の意
+    /// (ADR-0017)。v1.6.0 より前に書かれた索引は全部この状態から始まり、そこにあるコード
+    /// 文書は**末尾を切り捨てられている可能性がある** — hash が一致するファイルは二度と
+    /// parser に届かないので、`--force` 無しでは判別も修復もできない。
+    pub fn read_code_chunk_policy(&self) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM index_meta WHERE key = 'code_chunk_policy'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// `index_meta.code_chunk_policy` を記録する (INSERT OR REPLACE)。
+    pub fn write_code_chunk_policy(&self, policy: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('code_chunk_policy', ?1)",
+            params![policy],
+        )?;
+        Ok(())
+    }
+
     /// 指定 path の documents.title を読む (E-8 の title 変更検知用)。
     /// 未 index / title NULL は `None`。Task 2.7 の frontmatter-only skip title gate で消費される。
     pub fn get_document_title(&self, path: &str) -> Result<Option<String>> {
