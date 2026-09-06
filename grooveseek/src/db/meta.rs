@@ -20,6 +20,19 @@
 use super::*;
 use std::collections::BTreeMap;
 
+/// What makes an indexed document a source file, for everyone who has to agree about that.
+///
+/// A chunk whose line numbers a parser recorded. `documents.tags` cannot answer it — that
+/// column is frontmatter, so a note can call itself `code` — while `chunks.start_line` comes
+/// from a parser's own account of where a chunk sat in its file, which no document can ask
+/// for. Today only the code parser fills it in; a prose parser leaves it NULL.
+///
+/// Held as one string because two callers need it in different shapes — the list and the
+/// existence check — and a copy of a predicate is a copy of a decision. It is a literal from
+/// this module, so composing it with `format!` carries no caller input.
+const SOURCE_FILE_PREDICATE: &str =
+    "EXISTS (SELECT 1 FROM chunks c WHERE c.document_id = d.id AND c.start_line IS NOT NULL)";
+
 /// What one [`Database::backfill_quality`] pass did.
 ///
 /// Two numbers rather than one because they answer different questions and only the first is
@@ -725,6 +738,22 @@ impl Database {
         Ok(())
     }
 
+    /// Whether the index holds any source file at all.
+    ///
+    /// The same question [`Self::tags_of_documents_with_line_numbers`] answers, through the
+    /// same predicate, but without building the list: `EXISTS` stops at the first document
+    /// that qualifies. The caller that runs per indexed file needs that — on an index where
+    /// the answer is yes, materialising and JSON-decoding every source document once per
+    /// entry made the first run after an upgrade quadratic in the corpus (codex P1, round 6).
+    pub fn has_documents_with_line_numbers(&self) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            &format!("SELECT EXISTS (SELECT 1 FROM documents d WHERE {SOURCE_FILE_PREDICATE})"),
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(found != 0)
+    }
+
     /// The tags recorded beside every document that a parser gave line numbers to, in path
     /// order.
     ///
@@ -744,12 +773,10 @@ impl Database {
     /// applies its own rule to it, so the database layer does not have to learn what the code
     /// parser writes.
     pub fn tags_of_documents_with_line_numbers(&self) -> Result<Vec<(String, Vec<String>)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT d.path, d.tags FROM documents d \
-             JOIN chunks c ON c.document_id = d.id \
-             WHERE c.start_line IS NOT NULL \
-             ORDER BY d.path",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT d.path, d.tags FROM documents d WHERE {SOURCE_FILE_PREDICATE} \
+             ORDER BY d.path"
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })?;

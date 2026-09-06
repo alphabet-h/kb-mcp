@@ -1436,15 +1436,19 @@ pub(crate) const CODE_CHUNK_POLICY: &str = "degrade";
 /// about to add is chunked by this build; asking [`Database::document_count`] there would
 /// withhold the key over prose that was never in question and send its owner to an
 /// unnecessary `--force` (codex P2, round 3). The population asked is the one the finding
-/// reads, through the same query, so the two cannot come to disagree about who counts as a
-/// source file.
+/// reads, through the same predicate, so the two cannot come to disagree about who counts as
+/// a source file.
+///
+/// **Called once per indexed file**, so neither question may be answered by building a list.
+/// The recorded policy is one row of `index_meta`, and [`Database::has_documents_with_line_numbers`]
+/// stops at the first source file it finds — which is the case that cannot write the key and
+/// so asks again on the next entry. Materialising every source document there instead made
+/// the first run after an upgrade quadratic in the corpus (codex P1, round 6).
 pub(crate) fn resolve_code_chunk_policy(db: &Database, force: bool) -> Result<()> {
-    // Cheap first, because the watcher calls this per changed file: once the answer is
-    // recorded there is nothing to work out, and the scan below never runs again.
     if !force && db.read_code_chunk_policy()?.is_some() {
         return Ok(());
     }
-    if force || db.tags_of_documents_with_line_numbers()?.is_empty() {
+    if force || !db.has_documents_with_line_numbers()? {
         db.write_code_chunk_policy(CODE_CHUNK_POLICY)?;
     }
     Ok(())

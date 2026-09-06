@@ -4192,6 +4192,60 @@ mod tests {
         assert_eq!(db.read_code_max_chunk_chars().unwrap(), Some(1200));
     }
 
+    /// The cheap answer and the listed one agree about who is a source file.
+    ///
+    /// They are two statements built from one predicate, because the indexer needs the
+    /// question answered per file without a list being built (codex P1, round 6) while
+    /// `groove doctor` needs the list. Two statements can drift; this says they have not.
+    #[test]
+    fn the_existence_check_and_the_listing_agree_about_source_files() {
+        let db = Database::open_in_memory().unwrap();
+        db.verify_embedding_meta("bge-small-en-v1.5", 384).unwrap();
+        assert!(!db.has_documents_with_line_numbers().unwrap());
+        assert!(db.tags_of_documents_with_line_numbers().unwrap().is_empty());
+
+        // A prose document: chunks, but no line numbers.
+        let prose = db
+            .upsert_document("a.md", None, None, None, None, &[], None, "h", 1)
+            .unwrap();
+        db.insert_chunk(prose, 0, None, None, "body", None, &vec![0.1; 384], 1.0)
+            .unwrap();
+        assert!(
+            !db.has_documents_with_line_numbers().unwrap(),
+            "prose is not a source file"
+        );
+        assert!(db.tags_of_documents_with_line_numbers().unwrap().is_empty());
+
+        // A source document: two chunks, so the listing would repeat it if it joined naively.
+        let code = db
+            .upsert_document("a.rs", None, None, None, None, &[], None, "h2", 1)
+            .unwrap();
+        for i in 0..2 {
+            db.insert_chunk_with_code(
+                code,
+                i,
+                None,
+                None,
+                "body",
+                None,
+                &vec![0.1; 384],
+                1.0,
+                crate::db::CodeMeta {
+                    line_range: Some((1, 2)),
+                    symbol_kind: None,
+                },
+            )
+            .unwrap();
+        }
+        assert!(db.has_documents_with_line_numbers().unwrap());
+        let listed = db.tags_of_documents_with_line_numbers().unwrap();
+        assert_eq!(
+            listed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs"],
+            "one row per document, whatever its chunk count"
+        );
+    }
+
     /// The policy generation is written only when the whole index matches this build.
     ///
     /// Deliberately unlike the budget beside it, which adopts an absent value on any run. An
