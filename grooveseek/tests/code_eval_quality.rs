@@ -69,12 +69,15 @@
 //! | BGE-M3, gap filling dead | 0.733 | 0.800 | 0.767 |
 //! | BGE-M3, chunk budget 3500 -> 800 | 0.800 | 0.800 | 0.800 |
 //!
-//! The broken rows come from scratch builds, one edit each:
-//! `Bounds::SHIPPED.scope_depth` set to 0, so every source file takes the too-deep
-//! fallback and is chunked by lines with no heading anywhere; `fill_gaps` returning
-//! immediately; `DEFAULT_MAX_CHUNK_CHARS` cut from 3500 to 800; the full-text leg's MATCH
-//! expression ([`grooveseek::db::ParsedQuery::match_expr`]) returning `None`; and
-//! `search_split_candidates` returning an empty vector-leg list.
+//! The broken rows come from scratch builds, one edit each. Three of the five are in
+//! `grooveseek/src/parser/code/mod.rs`: `Bounds::SHIPPED.scope_depth` set to 0, so every
+//! source file takes the too-deep fallback and is chunked by lines with no heading
+//! anywhere; `fill_gaps` returning immediately; and `DEFAULT_MAX_CHUNK_CHARS` cut from
+//! 3500 to 800. The other two silence a retrieval leg: the MATCH expression built by
+//! `ParsedQuery::match_expr` in `grooveseek/src/db/fts_query.rs` returning `None`, and
+//! `search_split_candidates` in `grooveseek/src/db/search.rs` returning an empty
+//! vector-leg list. All five are crate-private, which is why they are named here rather
+//! than linked: an integration test sees only what the library exports.
 //!
 //! Five conclusions are baked into the thresholds below:
 //!
@@ -84,9 +87,10 @@
 //!    reports as healthy. The failure log shows it as the right path winning under no
 //!    heading, and [`winning_heading_report`] is what prints that.
 //! 2. **Gap filling has its own detector and it is deterministic.** `src/glyphs.rs` holds
-//!    no definitions, so every chunk it has comes out of `fill_gaps`; with that dead the
-//!    file yields no chunks, the indexer drops the document before the database, and its
-//!    three queries miss together. The run also reports one skipped document.
+//!    no definitions, so every chunk it has comes out of the gap filling named above; with
+//!    that dead the file yields no chunks, the indexer drops the document before the
+//!    database, and its three queries miss together. The run also reports one skipped
+//!    document.
 //! 3. **The chunk budget needed three queries, not one.** A container that fits the budget
 //!    is emitted whole and its nested definitions produce no chunks of their own, so
 //!    `module width` is a heading that exists only while the budget holds it together.
@@ -138,10 +142,10 @@ const KB_CODE_EVAL_FILES: &[&str] = &[
 
 /// The parser ids this gate turns on beyond Markdown.
 ///
-/// One list, read twice: [`gate::pinned_config`] writes it into `[parsers].enabled`, and
-/// the sync test checks no fixture has an extension outside it. Two lists would let a
-/// fixture be added that the pinned config cannot index — a permanent miss that every
-/// count in this file would still report as satisfied.
+/// One list, read twice: [`crate::common::eval_gate::pinned_config`] writes it into
+/// `[parsers].enabled`, and the sync test checks no fixture has an extension outside it.
+/// Two lists would let a fixture be added that the pinned config cannot index — a
+/// permanent miss that every count in this file would still report as satisfied.
 const CODE_EXTENSIONS: &[&str] = &["rs"];
 
 /// Number of queries in `tests/fixtures/kb-code-eval-golden.yml`. Pinned because both
@@ -223,10 +227,11 @@ fn is_code_path(path: &str) -> bool {
 
 /// For every query that missed rank 1, the heading the winning chunk carried.
 ///
-/// [`gate::ranking_report`] names the winning *path*, which is the whole answer for a
-/// corpus of prose documents and only half of it here. The state this gate exists to catch
-/// leaves the right file at rank 1 and takes its heading away, so a report without this
-/// line reads as "the right document won" on the exact run that should be alarming.
+/// [`crate::common::eval_gate::ranking_report`] names the winning *path*, which is the
+/// whole answer for a corpus of prose documents and only half of it here. The state this
+/// gate exists to catch leaves the right file at rank 1 and takes its heading away, so a
+/// report without this line reads as "the right document won" on the exact run that
+/// should be alarming.
 fn winning_heading_report(all: &[QueryResult]) -> String {
     let mut report = String::new();
     for q in all {
