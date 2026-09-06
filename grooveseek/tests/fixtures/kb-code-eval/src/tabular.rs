@@ -1,4 +1,4 @@
-/// Everything to do with how much room a column is given.
+/// Column sizing.
 pub mod width {
     /// Decide the room one column is given.
     ///
