@@ -1449,6 +1449,13 @@ impl Counter {
             "the scope fallback has to fit the chunk bound too, got {}",
             doc.chunks.len()
         );
+        // The same guard its sibling above carries: a fixture that collapses to one chunk
+        // makes the coverage assertion below vacuous, and nothing else pins the widening
+        // constant or the fixture size to keep that from happening.
+        assert!(
+            doc.chunks.len() > 1,
+            "the split never happened, so this proves nothing about what falls between chunks"
+        );
         let seen: String = doc.chunks.iter().map(|c| c.content.as_str()).collect();
         let seen_ws_free: String = seen.chars().filter(|c| !c.is_whitespace()).collect();
         let want: String = src.chars().filter(|c| !c.is_whitespace()).collect();
