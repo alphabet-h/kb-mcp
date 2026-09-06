@@ -1761,8 +1761,8 @@ impl Counter {
     }
 
     /// Without [`drop_repeated_ranges`] the repeats become a chain (each the child of the one
-    /// before it), `emit_def` recurses once per link, and the heading of every chunk comes from
-    /// the deepest link rather than the declaration's first name.
+    /// before it), [`emit_def`] recurses once per link, and the heading of every chunk comes
+    /// from the deepest link rather than the declaration's first name.
     #[test]
     fn a_wide_declaration_is_one_definition_rather_than_a_chain_of_them() {
         let grammar = grammar_with_query(FIELD_QUERY);
